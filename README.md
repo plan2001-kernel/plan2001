@@ -56,13 +56,13 @@ The user chooses what to start. Opening a URL starts that URL's system; selectin
 
 ## Continuous integration policy
 
-**CI configuration is centrally controlled; normal agent work is autonomous and must not pause for CI approval.** The intended permanent configuration is at most one small GitHub Actions workflow, `.github/workflows/ci.yml`, when the project owner explicitly assigns CI setup.
+**CI is disabled until the project owner explicitly decides to enable it.** There are no GitHub Actions workflows in the repository, and none are to be created, enabled or imported during normal development or migration.
 
-- Development agents complete their assigned implementation, add or update relevant test code, and run available local tests without asking the user to make CI decisions. They do not create or change CI workflows as a side effect.
-- Only an explicitly assigned CI task may change jobs, triggers, matrices, schedules or required checks. CI-related ideas arising during ordinary work are not reasons to stop work or request approval.
-- Keep automatic checks few, small, and relevant. Expensive suites may be run manually; an ordinary source test need not become a CI job. Do not introduce a workflow per feature or branch.
-- Temporary branch-specific workflows must not be merged into `main`. An owner-assigned CI change can incorporate selected permanent checks into the single central workflow.
-- Do not commit work diaries, CI logs, screenshots or test reports into the repository. If a required GitHub check or infrastructure failure blocks a merge, complete the implementation and state the external blocker in the final response; do not bypass repository protections.
+- Agents must complete assigned software work without requesting CI decisions or pausing for CI approval.
+- Agents may write, update and run appropriate **local tests**, but must not create GitHub Actions workflows, automatic test triggers, required CI checks, matrices or external CI pipelines.
+- No feature-branch or temporary CI workflows are permitted while CI is disabled. Do not import CI configuration from the source repositories.
+- If the owner later enables CI, prefer one centrally maintained minimal workflow; its scope and triggers must be defined by the owner separately.
+- Do not commit logs, reports, screenshots, hashes or other work documentation to the repository.
 
 ## Repository and agent policy
 
