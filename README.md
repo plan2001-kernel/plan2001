@@ -56,13 +56,13 @@ The user chooses what to start. Opening a URL starts that URL's system; selectin
 
 ## Continuous integration policy
 
-**CI is controlled by the project owner, not designed autonomously by agents.** The intended steady state is at most **one centrally maintained GitHub Actions workflow**, `.github/workflows/ci.yml`, running a small, explicitly approved core smoke test. It is not yet authorized for implementation by this specification alone.
+**CI configuration is centrally controlled; normal agent work is autonomous and must not pause for CI approval.** The intended permanent configuration is at most one small GitHub Actions workflow, `.github/workflows/ci.yml`, when the project owner explicitly assigns CI setup.
 
-- Agents must obtain explicit project-owner approval before adding, modifying or enabling any CI workflow, event trigger, job, matrix, scheduled run, test gate, or external CI service.
-- Avoid a growing collection of feature-specific CI workflows. Existing source tests can remain without all becoming automatic CI jobs.
-- Prefer the single lightweight, approved gate for relevant pull requests and optional manual runs for more expensive or architecture-specific tests. Do not automatically launch an entire test matrix for documentation, comments, diagnostics, text, or similarly trivial changes. GitHub path filters alone cannot reliably distinguish a print-string edit from a substantive source change.
-- Temporary branch-only CI is exceptional and requires explicit approval. Remove such workflow files **from the branch before merging** once the feature is accepted; if a test deserves permanent CI coverage, the owner must explicitly approve integrating it into the central workflow instead.
-- Do not commit test logs, CI reports, hashes, screenshots, or records of workflow runs as repository documentation. CI results belong in GitHub Actions and pull-request checks, not the source tree.
+- Development agents complete their assigned implementation, add or update relevant test code, and run available local tests without asking the user to make CI decisions. They do not create or change CI workflows as a side effect.
+- Only an explicitly assigned CI task may change jobs, triggers, matrices, schedules or required checks. CI-related ideas arising during ordinary work are not reasons to stop work or request approval.
+- Keep automatic checks few, small, and relevant. Expensive suites may be run manually; an ordinary source test need not become a CI job. Do not introduce a workflow per feature or branch.
+- Temporary branch-specific workflows must not be merged into `main`. An owner-assigned CI change can incorporate selected permanent checks into the single central workflow.
+- Do not commit work diaries, CI logs, screenshots or test reports into the repository. If a required GitHub check or infrastructure failure blocks a merge, complete the implementation and state the external blocker in the final response; do not bypass repository protections.
 
 ## Repository and agent policy
 
