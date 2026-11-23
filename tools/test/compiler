@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Run the existing 3c/3l arithmetic, ABI, MOV and context/atomic tests.
+
+Requires tools/hostcc/build, Node.js and a host C compiler. Host compilation
+is only an independent reference for these tests, never the OS toolchain.
+"""
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+RUNNER = r'''
+import { readFileSync } from 'node:fs';
+let inst, done = false;
+class Exit { constructor(status) { this.status = status; } }
+const string = (p) => {
+    const b = new Uint8Array(inst.exports.memory.buffer);
+    if (p < 0 || p >= b.length) throw new Error('invalid status pointer');
+    let end = p;
+    while (end < b.length && b[end]) end++;
+    if (end === b.length) throw new Error('unterminated status');
+    return new TextDecoder().decode(b.slice(p, end));
+};
+const imports = { plan9: { syscall: (n, a) => {
+    const d = new DataView(inst.exports.memory.buffer);
+    if (n === 51) {
+        if (d.getUint32(a, true) !== 1) throw new Error('unexpected output fd');
+        const p = d.getUint32(a + 4, true), len = d.getUint32(a + 8, true);
+        process.stdout.write(Buffer.from(inst.exports.memory.buffer, p, len));
+        return BigInt(len);
+    }
+    if (n === 8) { done = true; throw new Exit(string(d.getUint32(a, true))); }
+    throw new Error('unexpected syscall ' + n);
+} } };
+inst = new WebAssembly.Instance(new WebAssembly.Module(readFileSync(process.argv[2])), imports);
+try { inst.exports._start(); }
+catch (error) { if (!(error instanceof Exit) || error.status) throw error; }
+if (!done) throw new Error('test did not exit');
+'''
+
+
+def main():
+    compiler = ROOT / 'build/host/bin/3c'
+    linker = ROOT / 'build/host/bin/3l'
+    if not compiler.is_file() or not linker.is_file():
+        raise SystemExit('compiler: run PLAN9=... tools/hostcc/build first')
+    with tempfile.TemporaryDirectory(prefix='plan2001-compiler-') as directory:
+        out = Path(directory)
+        runner = out / 'run.mjs'
+        runner.write_text(RUNNER)
+        for number in range(1, 5):
+            name = 't%d' % number
+            source = ROOT / ('sys/src/cmd/3c/test/' + name + '.c')
+            obj, wasm, native = out / (name + '.3'), out / (name + '.wasm'), out / (name + '.host')
+            subprocess.run([str(compiler), '-o', str(obj), str(source)], check=True)
+            subprocess.run([str(linker), '-E_main', '-o', str(wasm), str(obj)], check=True)
+            subprocess.run(shlex.split(os.environ.get('CC', 'cc')) + [
+                '-O0', '-fwrapv', '-fno-strict-aliasing', str(source),
+                str(ROOT / 'sys/src/cmd/3c/test/gccshim.c'), '-o', str(native)], check=True)
+            actual = subprocess.check_output(['node', str(runner), str(wasm)], timeout=30)
+            expected = subprocess.check_output([str(native)], timeout=30)
+            if actual != expected:
+                raise SystemExit('FAIL %s: WebAssembly output differs from the host reference\nWASM:\n%s\nHOST:\n%s' %
+                                 (name, actual.decode(errors='replace'), expected.decode(errors='replace')))
+            print('PASS %s: 3c/3l matches host reference (%d lines)' % (name, len(actual.splitlines())), flush=True)
+
+
+if __name__ == '__main__':
+    main()
