@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""Compile and exercise the shared early parser itself with host service stubs."""
+import pathlib
+import subprocess
+import tempfile
+
+root = pathlib.Path(__file__).resolve().parents[2]
+source = (root / 'sys/src/9/port/bootinfo.c').read_text()
+source += (root / 'sys/src/9/port/bootfb.c').read_text()
+source = '\n'.join(l for l in source.splitlines() if not l.startswith('#include'))
+preamble = r'''
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <setjmp.h>
+typedef uint8_t uchar;
+typedef uint32_t u32int;
+typedef uint64_t u64int, uvlong;
+typedef uintptr_t uintptr;
+typedef unsigned long ulong;
+#define nil NULL
+#define BY2PG 4096
+#define nelem(x) (sizeof(x)/sizeof((x)[0]))
+#include "sys/include/bootinfo.h"
+#ifndef TESTARCH
+#define TESTARCH BootArchWasm32
+#endif
+enum { BootInfoArch=TESTARCH, BootClassRAM, BootClassACPI, BootClassReserved };
+static uintptr bootinfopa;
+static void (*hwrandbuf)(void*, ulong);
+static jmp_buf stopped;
+static uchar *area;
+static void halt(void) { longjmp(stopped, 1); }
+static void *bootearlymap(uvlong pa, uvlong n) {
+ return pa == bootinfopa && n <= 4096 ? area : nil;
+}
+static void todset(uvlong a, int b, int c) { (void)a; (void)b; (void)c; }
+#define print(...) ((void)0)
+int bootmemclass(u32int);
+enum { BMMain, BMMem, BMDevs, BMUser, BMExec, BMPanic };
+static void *framebuffer;
+static void *fbmap(uvlong pa, ulong n) { (void)pa; (void)n; return framebuffer; }
+'''
+tests = r'''
+static BootInfo *b;
+static BootMem *map;
+static unsigned checks;
+static void fresh(void) {
+ memset(area, 0, 4096); b=(BootInfo*)area;
+ b->magic=BootInfoMagic; b->version=1; b->headersize=sizeof *b;
+ b->totalsize=4096; b->arch=BootInfoArch;
+ b->configoff=256; b->configlen=1;
+ b->mmapoff=512; b->mmapcount=2; b->mmapentsize=sizeof(BootMem);
+ map=(BootMem*)(area+512);
+ map[0].base=0x1000; map[0].len=0x1000; map[0].type=BootMemConventional;
+ map[1].base=0x4000; map[1].len=0x1000; map[1].type=BootMemLoaderData;
+}
+static void check(int valid, const char *name) {
+ int rejected=setjmp(stopped);
+ if(!rejected) bootinfoinit();
+ if(valid == !!rejected) { fprintf(stderr,"bootinfo: %s failed\n",name); exit(1); }
+ checks++;
+}
+#define BAD(name, change) do { fresh(); change; check(0,name); } while(0)
+int main(void) {
+ area=aligned_alloc(4096,4096); if(!area) return 2; bootinfopa=(uintptr)area;
+ if(offsetof(BootInfo,arch)!=192 || offsetof(BootInfo,rdbase)!=208 ||
+    offsetof(BootInfo,manifestoff)!=224 || sizeof(BootMem)!=24) return 3;
+ fresh(); check(1,"current header");
+ fresh(); b->headersize=196; b->rdlen=123; check(1,"minimum header");
+ fresh(); b->headersize=208; b->rdbase=0xdeadbeef; check(1,"old browser header");
+ fresh(); b->headersize=224; check(1,"working browser header");
+ fresh(); b->headersize=248; check(1,"future header");
+ fresh(); b->rdbase=0x4000; b->rdlen=4096; check(1,"root image");
+ fresh(); b->manifestoff=800; b->manifestlen=2; area[800]='\n'; check(1,"legacy opaque manifest");
+ BAD("arch", b->arch=(int)BootInfoArch==(int)BootArchAmd64 ? BootArchWasm32 : BootArchAmd64);
+ BAD("magic", b->magic=0);
+ BAD("version", b->version=2);
+ BAD("short header", b->headersize=192);
+ BAD("short blob", b->totalsize=128);
+ BAD("section before header", b->configoff=0);
+ BAD("section overflow", b->configlen=~0U);
+ BAD("section overlap", b->configoff=512);
+ BAD("config terminator", area[256]=1);
+ BAD("empty map", b->mmapcount=0);
+ BAD("map multiplication", b->mmapcount=~0U);
+ BAD("map stride", b->mmapentsize=8);
+ BAD("unaligned map", b->mmapoff++);
+ BAD("unaligned stride", b->mmapentsize++);
+ BAD("map overflow", map[0].base=~(uvlong)0);
+ BAD("map type", map[0].type=99);
+ BAD("map overlap", map[1].base=0x1800);
+ BAD("entropy overflow", b->rngseedlen=65);
+ BAD("orphan root length", b->rdlen=1);
+ BAD("root in RAM", b->rdbase=0x1000; b->rdlen=1);
+ BAD("root overflow", b->rdbase=~(uvlong)0; b->rdlen=2);
+ BAD("root overlaps blob", map[1].base=bootinfopa; b->rdbase=bootinfopa; b->rdlen=1);
+ BAD("bad FDT", b->fdtoff=800; b->fdtlen=40);
+ BAD("tiny FDT total", b->fdtoff=800; b->fdtlen=40; area[800]=0xd0; area[801]=0x0d; area[802]=0xfe; area[803]=0xed);
+ fresh(); b->fdtoff=800; b->fdtlen=40; area[800]=0xd0; area[801]=0x0d; area[802]=0xfe; area[803]=0xed; area[807]=40; check(1,"optional FDT");
+ BAD("manifest overlap", b->manifestoff=512; b->manifestlen=2);
+ BAD("manifest terminator", b->manifestoff=800; b->manifestlen=2);
+ fresh(); b->fbbase=0x8000; b->fbwidth=b->fbstride=b->fbheight=1; b->fbdepth=32; strcpy(b->fbchan,"x8r8g8b8"); check(1,"framebuffer");
+ b->fbsize=3; check(0,"short framebuffer"); b->fbsize=4;
+ b->fbbase=0x1000; check(0,"framebuffer in RAM"); b->fbbase=0x8000;
+ b->fbdepth=1; check(0,"fractional pixel bytes"); b->fbdepth=32;
+ memset(b->fbchan,'x',16); check(0,"unterminated channel"); strcpy(b->fbchan,"x8r8g8b8");
+ b->fbwidth=b->fbstride=b->fbheight=~0U; check(0,"framebuffer multiplication");
+ fresh(); b->rngseedlen=64; memset(b->rngseed,0xaa,64); check(1,"entropy");
+ { uchar seed[64]={0}; bootinforandinit(); hwrandbuf(seed,64);
+   if(seed[0]!=0xaa || b->rngseedlen || bootinfo->rngseedlen || b->rngseed[0]) return 4; }
+
+ /* Exercise the actual marker renderer with an allocation of one pixel. */
+ fresh(); check(1,"marker setup");
+ b=bootinfo; b->fbbase=0x8000; b->fbwidth=b->fbstride=b->fbheight=1;
+ b->fbdepth=32; b->fbsize=4; strcpy(b->fbchan,"x8r8g8b8");
+ framebuffer=calloc(1,4); bootfbinit(); bootmark(BMMain); bootmark(BMPanic);
+ bootmark(-1); bootmark(99); free(framebuffer); fb=nil; reached=0;
+ b->fbwidth=b->fbstride=100; b->fbheight=16; b->fbsize=6400;
+ framebuffer=calloc(1,6400); bootfbinit(); bootmark(BMMain);
+ { u32int *pixels=framebuffer;
+   if(pixels[2*100+2] != 0 || pixels[2*100+32] != stagecolor[0]) return 5; }
+ free(framebuffer);
+ printf("bootinfo: %u checks passed; ABI offsets and entropy wipe passed\n",checks);
+ puts("bootfb: tiny framebuffer bounds and loader's first three slots passed");
+ free(area); return 0;
+}
+'''
+with tempfile.TemporaryDirectory(prefix='bootinfo-') as tmp:
+    c = pathlib.Path(tmp) / 'test.c'
+    exe = pathlib.Path(tmp) / 'test'
+    c.write_text(preamble + source + tests)
+    for arch in range(1, 5):
+        print(f"BootInfoArch={arch}", flush=True)
+        subprocess.run(['cc', '-DTESTARCH=' + str(arch), '-std=c11', '-Wall', '-Wextra', '-Werror', '-Wno-sign-compare', '-fsanitize=undefined,address', '-I', str(root), str(c), '-o', str(exe)], check=True)
+        subprocess.run([str(exe)], check=True)
