@@ -28,7 +28,8 @@ const imports = { plan9: { syscall: (n, a) => {
     if (n === 51) {
         if (d.getUint32(a, true) !== 1) throw new Error('unexpected output fd');
         const p = d.getUint32(a + 4, true), len = d.getUint32(a + 8, true);
-        process.stdout.write(Buffer.from(inst.exports.memory.buffer, p, len));
+        // pwrite consumes these bytes before the guest reuses its stack.
+        process.stdout.write(Buffer.from(new Uint8Array(inst.exports.memory.buffer, p, len)));
         return BigInt(len);
     }
     if (n === 8) { done = true; throw new Exit(string(d.getUint32(a, true))); }
