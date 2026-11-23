@@ -1,0 +1,51 @@
+Fixes to 9front's own code, as patches against the release the build
+takes (tools/release.conf: 9front-11952), to send upstream.  The patched
+file is in this tree too, at the same path, made from the release's copy
+with the diff:
+  cp build/release/sys/src/cmd/hjfs/auth.c sys/src/cmd/hjfs/auth.c
+  patch -p1 <patches/9front/hjfs-auth.diff
+tools/tree applies every patch to the release and fails when this tree's
+copy is not the result.
+
+hjfs-auth.diff	hjfs/auth.c: validuser measured a name as n - p, which is
+		never USERLEN or more, so any name passed and the strcpy()s
+		after it overran name, lead (the stack) and memb (the heap);
+		lookupuid and ingroup could read one past the end of their
+		arrays when the uid was above every one (the binary search ends
+		with i == n).  2026-10-02.
+
+libc-9syscall-wasm32.diff
+		libc/9syscall/mkfile: wasm32 has no system call instruction;
+		its stubs are C, each a call of the platform's _trap with the
+		call's number and its arguments in memory (3c's convention),
+		compiled by $CC.  The other machines' assembler as it was.
+		2026-10-04.
+
+libthread-wasm32.diff
+		libthread/mkfile: wasm32's machine part is its own -
+		wasm32/wasm32.c, main.c, sched.c (contexts, not longjmp) - in
+		place of $objtype.c, main.c and sched.c; the others as they
+		were.  2026-10-04.
+
+inst-bootsetup-9fat.diff
+		rc/bin/inst/bootsetup: the machine's other boot files,
+		/$cputype/9fat/*, onto the boot FAT with the kernel and
+		plan9.ini (wasm32: the kernel's boot file system and the page
+		that is its firmware; no other machine has the directory);
+		and not into plan9.ini what the firmware says each boot
+		(wasm32's *sdWn=, its disks' registers; init=, iso=).  2026-10-06.
+
+pcc-wasm32.diff
+		pcc.c: wasm32 in its objtypes (3c, 3l, .3), and 3 among the
+		object letters it knows.  2026-10-13.
+
+ape-syscall-wasm32.diff
+		ape/lib/ap/syscall/genall: APE's system call stubs on
+		wasm32 are C, as libc's (libc-9syscall-wasm32.diff): gencall
+		takes the other machines' assembler from libc's mkfile, which
+		has none for wasm32.  2026-10-13.
+
+The libc and libthread ones are for building wasm32 with 9front's mkfiles, with this
+tree's libc/wasm32/mkfile and libmp's, libsec's empty wasm32/mkfiles.
+wasm32 is not in 9front's CPUS: mk installall builds the CPUS, and wasm32
+is built by objtype=wasm32 mk install where it is wanted.

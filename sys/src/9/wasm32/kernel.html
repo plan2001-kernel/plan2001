@@ -1,0 +1,358 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=overlays-content">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<title>Plan9-wasm32</title>
+<meta name="plan9-version" content="@VERSION@">
+<style>
+	:root { --bg: #fff; --fg: #000; }
+	@media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #ddd; } }
+	html, body { margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: #000; }
+	body { color: var(--fg); font: 14px monospace; }
+	/* the machine's screen is the window (rio in all of it); ?console=1 the serial port below it */
+	canvas { display: block; width: 100vw; height: 100vh; background: #000; touch-action: none; outline: none; }
+	pre { display: none; margin: 0; padding: 16px; white-space: pre-wrap; word-break: break-all; background: var(--bg); }
+	/* before rio's first frame: the console, as 9front's boot shows it, in the window */
+	body.booting canvas { display: none; }
+	body.booting pre#eia0 { display: block; position: fixed; inset: 0; margin: 0; padding: 16px; overflow: auto; background: #000; color: #ddd; font: 14px/1.35 monospace; }
+	body.console { overflow: auto; }
+	body.console canvas { width: auto; height: auto; max-width: 100%; margin: 0 auto; }
+	body.console pre { display: block; }
+	/* a phone's keyboard: it opens for a text field, this one, out of sight (KBD focuses it; at the top, not under the keyboard) */
+	#kbd { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; resize: none; pointer-events: none; }
+	/* the machine's floating controls: a small strip at the top, out of Rio's way and above the phone's keyboard */
+	#controls { position: fixed; top: calc(env(safe-area-inset-top, 0px) + 4px); right: calc(env(safe-area-inset-right, 0px) + 4px); z-index: 2147483647; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font: 12px/1 monospace; pointer-events: none; }
+	#controls > div { display: flex; gap: 4px; pointer-events: auto; }
+	#controls button { min-width: 30px; height: 30px; padding: 0 6px; box-sizing: border-box; color: #fff; background: rgba(0, 0, 0, .62); border: 1px solid rgba(255, 255, 255, .3); border-radius: 5px; font: 12px/1 monospace; touch-action: manipulation; -webkit-user-select: none; user-select: none; }
+	#controls button.on { background: #286b4a; border-color: #5f9; }
+	#fnbar { flex-wrap: wrap; max-width: 190px; justify-content: flex-end; }
+	#fnbar[hidden] { display: none; }
+	#isopick { display: none; position: fixed; inset: 0; padding: 32px 16px; background: var(--bg); color: var(--fg); }
+	#isopick.on { display: block; }
+	#halt { display: none; position: fixed; left: 0; right: 0; bottom: 0; padding: 8px 16px; background: var(--bg); }
+</style>
+</head>
+<body class="booting">
+<!-- Plan9-wasm32's machine (sys/src/9/wasm32): its screen the window (?screen=WxH another size), its serial port with ?console=1 -->
+<canvas id="screen" width="800" height="600"></canvas>
+<pre id="eia0"></pre>
+<pre id="halt"></pre>
+<div id="isopick"><p>Insert the CD: choose the distribution's ISO image you downloaded (plan9-wasm32.iso). The machine reads it as its CD, sdW1, from this computer's disk; nothing is uploaded.</p><input type="file" accept=".iso,application/x-iso9660-image"><p><a href="?boot=disk&amp;iso=none">Boot without the CD</a> (from the disk, if it has a system)</p></div>
+<div id="controls" aria-label="machine controls">
+	<div id="buttons">
+		<button id="kbdbtn" type="button" aria-pressed="false" title="Show or hide the keyboard">KBD</button>
+		<button id="fsbtn" type="button" aria-pressed="false" title="Fullscreen">Full</button>
+		<button id="fnbtn" type="button" aria-expanded="false" title="Special keys">Fn</button>
+	</div>
+	<div id="fnbar" hidden>
+		<button type="button" data-k="Escape" title="Escape">esc</button>
+		<button type="button" data-k="Tab" title="Tab">tab</button>
+		<button type="button" data-k="Enter" title="Return">ret</button>
+		<button type="button" data-m="ctrl" title="Control: the next key">ctl</button>
+		<button type="button" data-k="Delete" title="Delete">del</button>
+		<button type="button" data-k="ArrowLeft" title="Left">&#8592;</button>
+		<button type="button" data-k="ArrowUp" title="Up">&#8593;</button>
+		<button type="button" data-k="ArrowDown" title="Down">&#8595;</button>
+		<button type="button" data-k="ArrowRight" title="Right">&#8594;</button>
+	</div>
+</div>
+<textarea id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="keyboard"></textarea>
+<script type="module">
+import { boot, diskboot } from './platform.js';
+/* the standalone PWA's fallback (manifest.webmanifest): installable, nothing cached */
+if (location.protocol === 'https:' && 'serviceWorker' in navigator)
+	navigator.serviceWorker.register('sw.js').catch(() => {});
+/* the keyboard overlays the page; the page and Rio's framebuffer keep their size */
+const vk = 'virtualKeyboard' in navigator ? navigator.virtualKeyboard : null;
+if (vk) { try { vk.overlaysContent = true; } catch (e) {} }
+const pre = document.getElementById('eia0'), dec = new TextDecoder();
+/* the page's version (tools/build: the commit and its time), so that a cached page shows */
+const version = document.querySelector('meta[name=plan9-version]')?.content ?? '';
+if (version && !version.startsWith('@')) {
+	pre.textContent = 'Plan9-wasm32 page ' + version + '\n';
+	document.title += ' ' + version;
+}
+// init: ?arg=... what it runs, /boot/init (kbdfs and rc) without; ?noinit=1 none (C2a's test);
+// ?conf=name=value plan9.ini's lines (BootInfo's config, as init's init=)
+const q = new URLSearchParams(location.search);
+if ((q.get('console') === '1')) document.body.classList.add('console');
+const args = q.has('noinit') ? [] : q.getAll('arg').length ? q.getAll('arg') : ['/bin/rc', '/boot/init'];
+/*
+ * plan9.ini from the server, if it has one (as 9front's ISO has its own): its lines go into
+ * BootInfo's config with the firmware's - e.g. secstore= (/boot/secstore gets factotum's keys
+ * from it) or passkeyrp= (#ω's rp, docs/webauthn.md); cpu= is the page's host.  iso=FILE is
+ * the firmware's: that file of the server's is the read-only disk sdW1 (the live image's
+ * distribution, with cdboot=yes: /boot/init mounts it as the root)
+ */
+const ini = await fetch('plan9.ini', { cache: 'no-store' }).then((r) => r.ok ? r.text() : '').catch(() => '');
+const iniconf = (t) => t.replace(/\r/g, '').split('\n').filter((l) => /^[a-zA-Z*][^=]*=/.test(l) && !/^iso=/.test(l)).map((l) => l + '\n').join('');	/* iso=: the firmware's */
+/* the firmware's own lines: cpu= the page's host, bootfile= the kernel it boots (as 9front's 9boot says it).
+ * cdboot= is the live image's, not an installed disk's: it is added below only for a CD boot. */
+const machine = 'cpu=' + location.hostname + '\nbootfile=9wasm32.wasm\n' + iniconf(ini.replace(/^cdboot=.*\n/mg, ''));
+const inival = (t, k) => (t.replace(/\r/g, '').match(new RegExp('^' + k + '=(\\S+)', 'm')) ?? [])[1];
+// the boot file system (tools/bootfs: devrootfs.c's archive), the kernel's companion as on the disk
+async function rootfs() {
+	const fs = await fetch('9wasm32.fs');
+	if (!fs.ok) throw new Error('9wasm32.fs: ' + fs.status);
+	return new Uint8Array(await fs.arrayBuffer());
+}
+
+// the keyboard: #b/kbd (devkbd.c) for kbdfs - each key down (r) and up (R)
+// as Plan 9's rune. Characters are the browser's (e.key: the system's
+// layout applied, äåö as they are), not scancodes: no kbmap
+const K = { Enter: '\n', Backspace: '\b', Tab: '\t', Escape: '\x1b', Delete: '\x7f',
+	Shift: '\uf016', Control: '\uf017', Alt: '\uf015', AltGraph: '\uf867', Meta: '\uf868',
+	ArrowUp: '\uf00e', ArrowDown: '\uf800', ArrowLeft: '\uf011', ArrowRight: '\uf012',
+	Home: '\uf00d', End: '\uf018', PageUp: '\uf00f', PageDown: '\uf013', Insert: '\uf014' };
+const down = new Map();	/* e.code: the rune its down sent, for its up */
+document.addEventListener('keydown', (e) => {
+	/* Meta itself is Plan 9's Kmod4; Meta with another key is the browser's (its shortcuts) */
+	if (!window.plan9 || e.metaKey && e.key !== 'Meta') return;
+	/* Ctrl-C with text selected (the console's) is the browser's copy */
+	if (e.ctrlKey && (e.key === 'c' || e.key === 'C' || e.key === 'Insert') && String(getSelection()).length) return;
+	/* Ctrl-V and Shift-Insert are the browser's paste: its paste event types the text (kernelpaste) */
+	if (e.ctrlKey && !e.altKey && (e.key === 'v' || e.key === 'V') || e.shiftKey && e.key === 'Insert') return;
+	const r = K[e.key] ?? ([...e.key].length === 1 ? e.key : undefined);
+	if (r === undefined) return;
+	down.set(e.code, r);
+	window.plan9.kbd('r' + r + '\0');
+	e.preventDefault();
+});
+document.addEventListener('keyup', (e) => {
+	if (!window.plan9) return;
+	const r = down.get(e.code);
+	if (r === undefined) return;
+	down.delete(e.code);
+	window.plan9.kbd('R' + r + '\0');
+	e.preventDefault();
+});
+window.addEventListener('blur', () => {	/* keys let go elsewhere */
+	for (const r of down.values()) window.plan9?.kbd('R' + r + '\0');
+	down.clear();
+});
+/*
+ * paste: each character as a key down and up - kbdfs's key path waits
+ * for its readers (its c path drops what it has no room for), and rio
+ * gets them as typed.  The modifiers let go first: Ctrl is down after
+ * Ctrl-V, and kbdfs would make the text control characters
+ */
+window.kernelpaste = (text) => {
+	if (!window.plan9) return;
+	for (const k of ['Shift', 'Control', 'Alt', 'AltGraph', 'Meta']) window.plan9.kbd('R' + K[k] + '\0');
+	for (const c of text.replace(/\r\n?/g, '\n')) window.plan9.kbd('r' + c + '\0R' + c + '\0');
+};
+/*
+ * a phone: its keyboard types into #kbd (its keydowns are 'Unidentified', or none): what goes in
+ * is typed as keys, Backspace and Return too, and the field kept empty.  The KBD control shows
+ * and hides it; no touch on the canvas does - a finger there is Rio's or the application's
+ */
+const kbdfield = document.getElementById('kbd');
+let ctrl = false;	/* the toolbar's ctl: the next key with Control down */
+let kbdShown = false;	/* the keyboard's state, so a system Back leaves KBD able to show it again */
+const kbdbtn = document.getElementById('kbdbtn'), fsbtn = document.getElementById('fsbtn');
+const fnbtn = document.getElementById('fnbtn'), fnbar = document.getElementById('fnbar');
+const ctrlbtn = fnbar.querySelector('[data-m=ctrl]');
+const setCtrl = (on) => {
+	ctrl = on;
+	ctrlbtn.classList.toggle('on', on);
+	ctrlbtn.setAttribute('aria-pressed', String(on));
+};
+const kbdopen = () => kbdShown;
+const setKbd = (on) => {
+	kbdShown = on;
+	kbdbtn.classList.toggle('on', on);
+	kbdbtn.setAttribute('aria-pressed', String(on));
+};
+const syncKbd = () => setKbd(vk ? vk.boundingRect.height > 0 : document.activeElement === kbdfield);
+const typeKey = (r) => {
+	if (!window.plan9) return;
+	if (ctrl) {
+		window.plan9.kbd('r' + K.Control + '\0');
+		window.plan9.kbd('r' + r + '\0R' + r + '\0');
+		window.plan9.kbd('R' + K.Control + '\0');
+		setCtrl(false);
+	} else
+		window.plan9.kbd('r' + r + '\0R' + r + '\0');
+};
+const kbdreset = () => { kbdfield.value = ' '; kbdfield.setSelectionRange(1, 1); };	/* a space: Backspace has something to delete */
+kbdfield.addEventListener('input', (e) => {
+	if (window.plan9) {
+		if (e.inputType === 'deleteContentBackward') window.plan9.kbd('r' + K.Backspace + '\0R' + K.Backspace + '\0');
+		else if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') window.plan9.kbd('r\n\0R\n\0');
+		else if (e.data && ctrl) {	/* the toolbar's ctl: the next key with it */
+			window.plan9.kbd('r' + K.Control + '\0');
+			for (const c of e.data) window.plan9.kbd('r' + c + '\0R' + c + '\0');
+			window.plan9.kbd('R' + K.Control + '\0');
+			setCtrl(false);
+		}
+		else if (e.data) for (const c of e.data) window.plan9.kbd('r' + c + '\0R' + c + '\0');
+	}
+	kbdreset();
+});
+kbdfield.addEventListener('focus', () => { kbdreset(); setKbd(true); });
+kbdfield.addEventListener('blur', () => setKbd(false));
+vk?.addEventListener('geometrychange', syncKbd);
+syncKbd();
+/*
+ * the controls: KBD shows or hides the system keyboard; Full enters and
+ * leaves fullscreen; Fn opens the keys a phone's keyboard lacks.  They
+ * keep their pointerdown (the keyboard stays open, no selection is lost),
+ * and a click is still a click for requestFullscreen's user gesture
+ */
+const showKbd = () => {
+	kbdfield.focus({ preventScroll: true });
+	try { vk?.show(); } catch (e) {}
+	setKbd(true);
+};
+const hideKbd = () => {
+	try { vk?.hide(); } catch (e) {}
+	if (document.activeElement === kbdfield) kbdfield.blur();
+	setKbd(false);
+};
+let kbdWasOpen = null;	/* the state before the tap: a blur on the way to the click does not reopen it */
+const syncFull = () => {
+	const on = !!document.fullscreenElement;
+	fsbtn.classList.toggle('on', on);
+	fsbtn.setAttribute('aria-pressed', String(on));
+	fsbtn.textContent = on ? 'Exit' : 'Full';
+	fsbtn.title = on ? 'Exit fullscreen' : 'Fullscreen';
+};
+for (const b of [kbdbtn, fsbtn, fnbtn]) b.addEventListener('pointerdown', (e) => e.preventDefault());
+fnbar.addEventListener('pointerdown', (e) => e.preventDefault());
+kbdbtn.addEventListener('pointerdown', () => { kbdWasOpen = kbdopen(); });
+kbdbtn.addEventListener('click', () => {
+	const open = kbdWasOpen ?? kbdopen();
+	kbdWasOpen = null;
+	if (open) hideKbd(); else showKbd();
+});
+fsbtn.addEventListener('click', () => {
+	try {
+		const p = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+		p?.catch(() => {});
+	} catch (e) {}
+});
+document.addEventListener('fullscreenchange', syncFull);
+syncFull();
+fnbtn.addEventListener('click', () => {
+	const on = fnbar.hidden;
+	fnbar.hidden = !on;
+	fnbtn.classList.toggle('on', on);
+	fnbtn.setAttribute('aria-expanded', String(on));
+});
+fnbar.addEventListener('click', (e) => {
+	const b = e.target.closest('button');
+	if (!b) return;
+	if (b.dataset.m === 'ctrl') { setCtrl(!ctrl); return; }
+	const r = K[b.dataset.k];
+	if (r !== undefined) typeKey(r);
+});
+document.addEventListener('paste', (e) => {
+	window.kernelpaste(e.clipboardData.getData('text'));
+	e.preventDefault();
+});
+
+/*
+ * where it boots from, as a machine's firmware: the disk's esp (an installed system: the
+ * installer put the kernel, its boot root and plan9.ini there) unless ?boot=net or a test's own
+ * init (?arg=, ?noinit); else the network's, this site's.  ?boot=disk the disk's whatever the args
+ */
+/*
+ * the BIOS's settings (the site's front page, its BIOS button; this origin's localStorage,
+ * 'plan9-wasm32 bios': { order: ['disk', 'cd'], disk: true, cd: true }): the boot order and
+ * the devices that may boot - the disk not booted from is still the machine's, a CD turned off
+ * is none.  The URL's ?boot= and ?iso= win, for one boot
+ */
+const bios = (() => { try { return JSON.parse(localStorage.getItem('plan9-wasm32 bios') ?? '{}') ?? {}; } catch (e) { return {}; } })();
+/*
+ * the site's network (docs/network.md): always connected, no passkey.  The gateway at this
+ * origin's /ether takes the card as it is; plan9.ini has no netauth=.
+ */
+window.plan9net ??= 'open';
+const bootdev = q.get('boot') ?? (bios.disk === false || (bios.order ?? [])[0] === 'cd' && bios.cd !== false ? 'net' : null);
+const usedisk = q.get('disk') !== '0' && (bootdev === 'disk' || bootdev !== 'net' && !q.has('noinit') && !q.getAll('arg').length);
+const fromdisk = usedisk ? await diskboot().catch(() => null) : null;
+/*
+ * the loader: a disk whose boot FAT has its own firmware (index.html and platform.js, the
+ * installer's: inst/bootsetup) boots with it - the system, its firmware, kernel and plan9.ini,
+ * is the disk's until it is installed again.  This page gives the machine over to it, as a
+ * PC's firmware starts the disk's loader; window.plan9firmware is 'disk' in the disk's page
+ */
+if (fromdisk && !window.plan9firmware) {
+	const page = await fromdisk.get('index.html'), js = await fromdisk.get('platform.js');
+	if (page && js) {
+		window.plan9firmware = 'disk';
+		const url = URL.createObjectURL(new Blob([js], { type: 'text/javascript' }));
+		const html = new TextDecoder().decode(page).replace("from './platform.js'", "from '" + url + "'");
+		document.open();
+		document.write(html);
+		document.close();
+		await new Promise(() => {});	/* the disk's page has the machine */
+	}
+}
+if (fromdisk) pre.textContent += 'Plan9-wasm32 boots from the disk' + (window.plan9firmware === 'disk' ? ', its own firmware' : '') + '\n';
+/*
+ * ?iso=URL another, ?iso=file a local file the person chooses (nothing downloaded) - to boot
+ * the live image and install from it: a machine that boots from its disk is not asked for it
+ * again (the page after the installer's fshalt -r has the same URL); ?boot=net boots the live
+ * image again
+ */
+let iso = q.get('iso') === 'file' && fromdisk ? null : q.get('iso') ?? (bios.cd === false ? null : fromdisk ? inival(fromdisk.conf, 'iso') : inival(ini, 'iso'));
+if (iso === 'none') iso = null;	/* no CD in the drive: the chooser's "without the CD" */
+const isofile = iso === 'file' ? await new Promise((done) => {
+	const d = document.getElementById('isopick'), f = d.querySelector('input');
+	d.classList.add('on');
+	f.addEventListener('change', () => { if (f.files.length) { d.classList.remove('on'); done(f.files[0]); } });
+}) : null;
+boot(fromdisk ? fromdisk.kernel : '9wasm32.wasm', {
+	eia: (b) => { pre.textContent += dec.decode(b, { stream: true }); },
+	halt: (why) => {
+		/*
+		 * the kernel's reboot (fshalt -r, #c/reboot): the page again, as a machine's firmware
+		 * starts over - without ?boot= and ?iso=, which were for one boot (the live image's, to
+		 * install: as a PC boots once from its CD): the installed system boots from its disk
+		 */
+		if (why === 'reboot' && !q.has('noreboot')) {
+			const u = new URL(location.href);
+			u.searchParams.delete('boot');
+			u.searchParams.delete('iso');
+			if (u.href === location.href) location.reload(); else location.replace(u.href);
+			return;
+		}
+		pre.textContent += '\n[halted: ' + why + ']\n';
+		if (!(q.get('console') === '1')) { const h = document.getElementById('halt'); h.textContent = 'Plan9-wasm32 halted: ' + why; h.style.display = 'block'; }
+	},
+	fs: args.length ? (fromdisk ? fromdisk.fs : await rootfs()) : undefined,
+	dist: isofile ? { file: isofile } : iso ? { url: new URL(iso, location.href).href } : null,
+	args,
+	/* the machine's disk (#S/sdW0): OPFS, ?disk=MB (4096: room for an installed system and its esp), ?disk=0 none */
+	disk: (q.get('disk') ?? '4096') !== '0' && navigator.storage?.getDirectory ? { name: 'sdW0', size: Number(q.get('disk') ?? 4096) * 1048576, fail: q.get('diskfail') } : null,
+	/* the disk's plan9.ini; a page's own init (?arg=) wins over its init= */
+	config: machine + (fromdisk ? iniconf(fromdisk.conf).replace(q.getAll('arg').length ? /^init=.*\n/mg : /$^/, '') : iso ? 'cdboot=yes\n' : '') + q.getAll('conf').map((c) => c + '\n').join(''),
+	canvas: document.getElementById('screen'),
+	drawn: () => document.body.classList.remove('booting'),
+	screen: (([w, h]) => ({ w: Number(w) || ((q.get('console') === '1') ? 800 : innerWidth), h: Number(h) || ((q.get('console') === '1') ? 600 : innerHeight) }))((q.get('screen') ?? '').split('x')),
+	/*
+	 * the machine's network: this origin's own gateway (its Ethernet's
+	 * frames: /ether), nothing a URL can change (a page pointed elsewhere
+	 * would be a man in the middle).  https: wss on this host; http only
+	 * on loopback, the next port (tools/serve's relay: offline and the
+	 * tests)
+	 */
+	ws: location.protocol === 'https:' ? `wss://${location.host}`
+		: /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname) ? `ws://${location.hostname}:${location.port ? +location.port + 1 : 8081}`
+		: 'ws://0.0.0.0:0',
+	ticket: null,
+	failfork: Number(q.get('failfork')) || 0,
+	failhelper: Number(q.get('failhelper')) || 0,
+	failrfmem: Number(q.get('failrfmem')) || 0,
+	pool: q.has('pool') ? Number(q.get('pool')) : undefined,	/* Worker-poolin koko (platform.js); 0: Worker per proc */
+	bad: q.get('bad'),	/* a test's: a BootInfo the kernel must refuse (arch, rd, fb; platform.js) */
+	oldheader: q.has('oldheader'),	/* a test's: an older v1 loader's shorter header */
+});
+</script>
+</body>
+</html>
