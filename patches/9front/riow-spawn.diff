@@ -1,0 +1,20 @@
+--- a/sys/src/cmd/riow.c
++++ b/sys/src/cmd/riow.c
+@@ -150,7 +150,7 @@
+ }
+ 
+ static void
+-spawn(char *s)
++spawnwindow(char *s)
+ {
+ 	if(rfork(RFPROC|RFNOWAIT|RFNAMEG|RFENVG|RFCFDG|RFREND) == 0)
+ 		execl("/bin/rc", "rc", s, nil);
+@@ -325,7 +325,7 @@
+ {
+ 	if(c == 'c'){
+ 		if(r == '\n' && mod == Mmod4){
+-			spawn("window");
++			spawnwindow("window");
+ 			return 0;
+ 		}
+ 		if(r == 'f' && mod == Mmod4){

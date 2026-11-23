@@ -1,0 +1,72 @@
+--- a/sys/src/9/pc/memory.c
++++ b/sys/src/9/pc/memory.c
+@@ -341,13 +341,45 @@
+ 	}
+ }
+ 
++/*
++ * UEFI-loaderin muistikartta BootInfo-blobista (pc64/bootarch.c
++ * bootmement()), kun ydin käynnistettiin sillä; nil muuten (pc).
++ * Merkintä i e820-tyyppinä (1 RAM, 3 ACPI, muu varattu); 0, kun
++ * merkintöjä ei ole enempää.
++ */
++int (*bootmement)(int, uvlong*, uvlong*, int*);
++
++static void
++e820add(uvlong base, uvlong top, int type)
++{
++	if(base >= top)
++		return;
++	switch(type){
++	case 1:
++		memmapadd(base, top - base, MemRAM);
++		break;
++	case 3:
++		memmapadd(base, top - base, MemACPI);
++		break;
++	default:
++		memmapadd(base, top - base, MemReserved);
++	}
++}
++
+ static int
+ e820scan(void)
+ {
+ 	uvlong base, top, size;
+-	int type;
++	int i, type;
+ 	char *s;
+ 
++	if(bootmement != nil){
++		for(i = 0; (*bootmement)(i, &base, &top, &type); i++)
++			e820add(base, top, type);
++		if(i > 0)
++			goto Mapped;
++	}
++
+ 	/* passed by bootloader */
+ 	if((s = getconf("*e820")) == nil)
+ 		if((s = getconf("e820")) == nil)
+@@ -369,20 +401,10 @@
+ 		top  = strtoull(s, &s, 16);
+ 		if(*s != ' ' && *s != 0)
+ 			break;
+-		if(base >= top)
+-			continue;
+-		switch(type){
+-		case 1:
+-			memmapadd(base, top - base, MemRAM);
+-			break;
+-		case 3:
+-			memmapadd(base, top - base, MemACPI);
+-			break;
+-		default:
+-			memmapadd(base, top - base, MemReserved);
+-		}
++		e820add(base, top, type);
+ 	}
+ 
++Mapped:
+ 	/* RAM needs to be writeback */
+ 	mtrrexclude(MemRAM, "wb");
+ 

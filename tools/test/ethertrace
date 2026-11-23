@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+"""Trace ARP and ICMP at the isolated gateway's TAP for local diagnostics.
+
+Run as the helper inside its network namespace:
+  tools/gateway -n -- tools/test/ethertrace
+Frames received from the guest are IN; Linux replies sent to it are OUT.
+"""
+import errno
+import socket
+import struct
+import time
+
+sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(3))
+sock.bind(('tap0', 0))
+while True:
+    try:
+        frame, address = sock.recvfrom(65536)
+    except OSError as error:
+        if error.errno == errno.ENETDOWN:
+            break
+        raise
+    direction = 'OUT' if address[2] == socket.PACKET_OUTGOING else 'IN'
+    kind = struct.unpack_from('!H', frame, 12)[0] if len(frame) >= 14 else 0
+    if kind == 0x806 and len(frame) >= 42:
+        opcode = struct.unpack_from('!H', frame, 20)[0]
+        detail = 'ARP op=%d %s -> %s' % (opcode, socket.inet_ntoa(frame[28:32]), socket.inet_ntoa(frame[38:42]))
+    elif kind == 0x800 and len(frame) >= 42 and frame[23] == 1:
+        offset = 14 + (frame[14] & 15) * 4
+        if len(frame) < offset + 8:
+            continue
+        typ, code, checksum, ident, seq = struct.unpack_from('!BBHHH', frame, offset)
+        detail = 'ICMP type=%d code=%d id=%d seq=%d %s -> %s' % (typ, code, ident, seq, socket.inet_ntoa(frame[26:30]), socket.inet_ntoa(frame[30:34]))
+    elif kind == 0x800 and len(frame) >= 34:
+        detail = 'IPv4 proto=%d %s -> %s' % (frame[23], socket.inet_ntoa(frame[26:30]), socket.inet_ntoa(frame[30:34]))
+    else:
+        detail = 'Ethernet type=%04x len=%d' % (kind, len(frame))
+    print('%.6f %s %s' % (time.monotonic(), direction, detail), flush=True)

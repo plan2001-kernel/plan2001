@@ -216,6 +216,7 @@ bwrap)
 		/bin/rc $PLAN9/bin/rc
 		/lib/ucd $ucd
 		/lib/keyboard $ucd/keyboard
+		/lib/face $tree/lib/face
 	Y
 	for d in $( [ ! -d "$ov" ] || (cd "$ov" && find . -type l -printf '%h\n' | sort -u) ); do
 		d=${d#.}
@@ -223,7 +224,7 @@ bwrap)
 	done
 	# PLAN9 may be under /tmp, which the namespace replaces with a tmpfs.
 	wrap+=(--bind "$PLAN9" "$PLAN9")
-	wrap+=(--bind "$tree/sys" /sys --bind "$ucd" "$ucd")
+	wrap+=(--bind "$tree/sys" /sys --bind "$tree/rc" /rc --bind "$ucd" "$ucd")
 	for d in "$tree"/*; do
 		n=$(basename "$d")
 		case $n in sys|lib|rc|usr|adm|tmp|mnt|n|dev|env|proc|fd|srv|net|bin) continue ;; esac
@@ -233,6 +234,7 @@ bwrap)
 	done
 	[ -e /lib/ucd ] && wrap+=(--bind "$ucd" /lib/ucd)
 	[ -e /lib/keyboard ] && wrap+=(--bind "$ucd/keyboard" /lib/keyboard)
+	[ -e /lib/face ] && wrap+=(--bind "$tree/lib/face" /lib/face)
 	;;
 proot)
 	# Termux/Android: no user namespaces and no bwrap.  proot is not a

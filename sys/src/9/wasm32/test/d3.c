@@ -209,7 +209,10 @@ proxy(char *dom)
 			fprint(q[1], "server: %r");
 			exits("server");
 		}
-		print("server: cuid %s suid %s, a %d-byte secret\n", ai->cuid, ai->suid, ai->nsecret);
+		/* One writer prints both results: worker scheduling must not reorder them. */
+		memset(buf, 0, sizeof buf);
+		snprint(buf, sizeof buf, "server: cuid %s suid %s, a %d-byte secret\n", ai->cuid, ai->suid, ai->nsecret);
+		write(q[1], buf, sizeof buf);
 		write(q[1], ai->secret, ai->nsecret);
 		exits(nil);
 	}
@@ -218,10 +221,17 @@ proxy(char *dom)
 	ai = auth_proxy(p[0], nil, "proto=p9any role=client dom=%s user=glenda", dom);
 	if(ai == nil)
 		print("client: %r\n");
-	else
-		print("client: cuid %s suid %s, a %d-byte secret\n", ai->cuid, ai->suid, ai->nsecret);
 	close(p[0]);
-	n = read(q[0], sec, sizeof sec);
+	if(ai != nil){
+		n = readn(q[0], buf, sizeof buf);
+		if(n == sizeof buf && memchr(buf, 0, sizeof buf) != nil)
+			print("%s", buf);
+		else
+			print("server: incomplete authentication result\n");
+		print("client: cuid %s suid %s, a %d-byte secret\n", ai->cuid, ai->suid, ai->nsecret);
+	}
+	n = readn(q[0], sec, sizeof sec);
+	close(q[0]);
 	waitpid();
 	if(ai == nil)
 		return;

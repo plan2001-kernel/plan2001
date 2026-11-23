@@ -1,7 +1,7 @@
 /*
  * tools/test/run riotouch: one finger in a Rio text window.  The window
- * is at -r -10 0 390 300 (TOUCH=1: a 400x700 phone), its text frame at
- * x=11, y=5, and the default 8x16 font's rows 16 pixels apart.  Rio's
+ * is requested at -r -10 0 390 300; Rio clamps it to 0 0 400 300
+ * (TOUCH=1: a 400x700 phone). Its text frame starts at x=21, y=5, and the default 8x16 font's rows 16 pixels apart.  Rio's
  * riotest=1 writes each touch double click's range and text to
  * /tmp/riotest, which the test's rc cats after these gestures.
  */
@@ -30,14 +30,16 @@
 	at(20.5, () => ctrl("b"));		/* the output point, after the prompt */
 	at(21, () => type("echo alpha beta"));
 	at(22, () => dbl(384, 10));		/* right margin: current input, no prompt */
+	/* Enter replaces selected text; collapse at the end before executing. */
+	at(22.7, () => ctrl("e"));
 	at(23, () => key("\n"));
 	at(24.5, () => dbl(384, 10));		/* the command's historical line */
 	at(25.5, () => dbl(384, 26));		/* its output, alpha beta */
 	at(26.5, () => dbl(384, 42));		/* the new prompt-only line */
-	at(27.5, () => dbl(25, 26));		/* a word: alpha */
-	at(28.5, () => dbl(9, 26));		/* the left margin: alpha beta */
+	at(27.5, () => dbl(37, 26));		/* a word: alpha */
+	at(28.5, () => dbl(19, 26));		/* the left margin: alpha beta */
 	at(30, () => ctrl("b"));		/* after the prompt again */
 	at(30.5, () => type("echo " + digits));
 	at(31.5, () => key("\n"));
-	at(33.5, () => dbl(9, 74));		/* left margin of the wrapped output */
+	at(33.5, () => dbl(19, 74));		/* left margin of the wrapped output */
 })();

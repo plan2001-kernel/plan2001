@@ -1,0 +1,30 @@
+--- a/sys/src/9/pc/screen.c
++++ b/sys/src/9/pc/screen.c
+@@ -719,7 +719,12 @@
+ 	ulong chan, sz;
+ 	char *s, *p, *err;
+ 
+-	/* *bootscreen=WIDTHxHEIGHTxDEPTH CHAN PA [SZ] */
++	/*
++	 * *bootscreen=WIDTHxHEIGHTxDEPTH CHAN PA [SZ]
++	 * tai BootInfon (port/bootargs.c) *bootscreen=WIDTHxHEIGHTxSTRIDExDEPTH CHAN PA [SZ]:
++	 * silloin leveydeksi otetaan rivin pituus pikseleinä (STRIDE), kuten
++	 * 9frontin oma EFI-loader antaa (PixelsPerScanLine).
++	 */
+ 	s = getconf("*bootscreen");
+ 	if(s == nil)
+ 		return;
+@@ -733,6 +738,13 @@
+ 		return;
+ 
+ 	z = strtoul(s, &s, 0);
++	if(*s == 'x'){
++		s++;
++		if(z < x)
++			return;
++		x = z;
++		z = strtoul(s, &s, 0);
++	}
+ 	if(*s != ' ')
+ 		return;
+ 	if((p = strchr(++s, ' ')) == nil)

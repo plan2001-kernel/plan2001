@@ -103,10 +103,10 @@ def ensimmainen(vm, tk):
     tk.ok("1: IPv6-silmukka (ip/ping -6 ::1)", "rtt" in out and "lost" not in out, " ".join(out.split()))
     out, st = a("ip/ping -n 3 -i 500 10.99.0.1 >/dev/null >[2=1] & sleep 1; cat /net/arp; wait", 60, True)
     tk.ok("1: ARP-pyyntö ether0:lle (/net/arp: 10.99.0.1)", "10.99.0.1" in out, " ".join(out.split())[:200])
-    out, st = a("cd /tmp && {echo '#include <u.h>'; echo '#include <libc.h>'; "
-                "echo 'void main(void){ print(\"p2-userland-%d\\n\", 6*7); exits(nil); }'} >p2.c && "
+    out, st = a("cd /tmp && {echo '#include <u.h>'; echo '#include <libc.h>'; echo '#include <bootinfo.h>'; "
+                "echo 'void main(void){ print(\"p2-userland-%d bootinfo-%d\\n\", 6*7, sizeof(BootInfo)); exits(nil); }'} >p2.c && "
                 "6c p2.c && 6l -o p2 p2.6 && ./p2", 120, True)
-    tk.ok("1: 6c/6l käännös ja ajo asennetussa järjestelmässä", "p2-userland-42" in out, " ".join(out.split()))
+    tk.ok("1: 6c/6l käännös ja ajo asennetussa järjestelmässä", st == "" and "p2-userland-42 bootinfo-232" in out, " ".join(out.split()))
     out, st = a("echo p2-persist >/usr/glenda/p2persist && cat /usr/glenda/p2persist", 30, True)
     tk.ok("1: kirjoitus juuritiedostojärjestelmään", "p2-persist" in out)
 

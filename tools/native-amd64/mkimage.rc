@@ -8,7 +8,7 @@
 #					ja 9front-11952:n jakelu (allproto)
 #
 # Levyt: sdE1 pinnattu ISO (jakelu), sdE2 sisään (tämä skripti, 9pc64,
-# bootx64.efi, plan9.ini; purettu hakemistoon /tmp/p2), sdE3 kohdelevy.
+# bootx64.efi, rc, plan9.ini ja lähdeoverlay; purettu hakemistoon /tmp/p2), sdE3 kohdelevy.
 #
 # Käyttö: rc mkimage.rc LEVY
 #	LEVY	kohdelevyn nimi kohdekoneessa, esim. sdE0 (plan9.ini:n
@@ -30,6 +30,11 @@ fn die {
 9660srv >[2]/dev/null
 mount /srv/9660 /n/dist /dev/sdE1/data || die 'ISO ei liity'
 test -d /n/dist/dist/9front || die 'ISO:lla ei ole jakelua'
+
+# Käytä varmennetun julkaisun työkaluja ja kopiointiprotoa, ei
+# käännöskoneeseen mahdollisesti muutettuja versioita.
+bind -b /n/dist/amd64/bin /bin
+bind -b /n/dist/rc/bin /bin
 
 # GPT-osiot ctl-tiedostoon (diskparts: disk/edisk -p)
 diskparts $t
@@ -109,11 +114,17 @@ while(! mount -c /srv/$sname /n/newfs){
 }
 
 echo '--- jakelu (inst/copydist)'
-disk/mkfs -z 16372 -U -s /n/dist -d /n/newfs /sys/lib/sysconfig/proto/allproto >/tmp/mkfs.p2 >[2=1]
+disk/mkfs -z 16372 -U -s /n/dist -d /n/newfs /n/dist/sys/lib/sysconfig/proto/allproto >/tmp/mkfs.p2 >[2=1]
 tail -5 /tmp/mkfs.p2
 if(grep -s 'can''t (create|write)|file system full' /tmp/mkfs.p2)
 	die 'jakelun kopio epäonnistui (cwfs:n välimuisti liian pieni? suurenna --size)'
 test -x /n/newfs/amd64/bin/rc || die 'jakelun kopio epäonnistui'
+
+# Asennetun ytimen lähteiden ja BootInfo-otsakkeen on vastattava
+# käännöksen overlayta; pelkkä ISO:n lähde palauttaisi vanhan bootin.
+dircp $p2/ov/sys /n/newfs/sys || die 'ytimen lähdeoverlay'
+test -f /n/newfs/sys/include/bootinfo.h || die 'BootInfo-otsake puuttuu'
+cp $p2/rc /n/newfs/amd64/bin/rc || die 'yhdistetyn rc:n kopio'
 
 # Plan2001:n ydin ja loader myös asennettuun järjestelmään, jotta
 # 9frontin omat työkalut (inst/bootsetup, 9fs 9fat) käyttävät niitä

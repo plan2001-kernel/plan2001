@@ -10,7 +10,7 @@ levy), joka käynnistyy ilman verkkoa:
     tools/native-amd64/mkimage [--in HAK] [--out KUVA] [--size GiB, oletus 8]
                                [--disk sdE0] [--console 0]
 
---in: tools/native-amd64/build:n tulokset (9pc64, bootx64.efi).  --disk on
+--in: tools/native-amd64/build:n tulokset (9pc64, bootx64.efi, rc).  --disk on
 levyn nimi kohdekoneessa (9frontin #S: AHCI sdE0, NVMe sdN0, ...):
 plan9.ini:n bootargs/nvram ja cwfs:n asetuslohko viittaavat siihen.
 --console 0 lisää plan9.ini:hin console=0 (sarjakonsoli, testit).
@@ -100,10 +100,11 @@ def main():
     ap.add_argument("--console")
     ap.add_argument("--iso")
     ap.add_argument("--buildvm")
+    ap.add_argument("--shared", default=vm9.JUURI, help="käännöstä vastaava yhteisen BootInfon lähdepuu")
     a = ap.parse_args()
 
     ulos = a.out or os.path.join(a.sisaan, "plan2001-amd64.img")
-    for t in ("9pc64", "bootx64.efi"):
+    for t in ("9pc64", "bootx64.efi", "rc"):
         if not os.path.isfile(os.path.join(a.sisaan, t)):
             raise vm9.VirheVM("%s puuttuu hakemistosta %s: aja ensin tools/native-amd64/build" % (t, a.sisaan))
     if a.size < 8:
@@ -124,8 +125,9 @@ def main():
             ("mkimage.rc", os.path.join(vm9.TAMA, "mkimage.rc")),
             ("9pc64", os.path.join(a.sisaan, "9pc64")),
             ("bootx64.efi", os.path.join(a.sisaan, "bootx64.efi")),
+            ("rc", os.path.join(a.sisaan, "rc")),
             ("plan9.ini", plan9ini(a.disk, a.console)),
-        ])
+        ] + vm9.overlay_jasenet(os.path.abspath(a.shared)))
         vm = vm9.Kone([(kone, "qcow2", False, "hd"),
                        (iso, "raw", True, "cd"),
                        (sisaan, "raw", False, "hd"),

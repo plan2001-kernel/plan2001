@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Plan2001 AMD64: 9front-11952:n pc64-ydin (9pc64) ja UEFI-loader
+Plan2001 AMD64: 9front-11952:n pc64-ydin (9pc64), rc ja UEFI-loader
 (bootx64.efi) 9frontin omalla työkaluketjulla (mk, 6c, 6a, 6l,
 aux/aout2efi) 9front-11952-koneessa QEMU:ssa.  Linux-isäntä vain
 valmistelee levyt ja lukee tulokset; isännän GCC:tä ei käytetä.
 
-    tools/native-amd64/build [--shared HAK] [--out HAK] [--aa64]
+    tools/native-amd64/build [--shared HAK] [--out HAK] [--aa64] [--check-pc]
 
 Lähteet: pinnattu 9front-11952-ISO (SHA256 tarkistetaan) + tämän puun
-AMD64-overlay (sys/src/9/pc64, sys/src/9/pc, sys/src/boot/efi) + yhteinen
+AMD64- ja yhteinen kernel-overlay (pc64, pc, port, ip, boot/efi) + yhteinen
 BootInfo v1 (sys/include/bootinfo.h, sys/src/9/port/boot{info,args,fb}.c)
 hakemistosta --shared (oletus: tämä puu).  Käännöskone: PLAN2001_BUILDVM
 (oletus ~/.cache/plan2001/base.qcow2), ajetaan kertakäyttöisen
 qcow2-kerroksen päällä ilman verkkoa.  Tulokset: --out (oletus
-~/.cache/plan2001/native-amd64): 9pc64, bootx64.efi, build.log.
+~/.cache/plan2001/native-amd64): 9pc64, bootx64.efi, rc, build.log.
 """
 
 import argparse
@@ -27,19 +27,7 @@ import vm9  # noqa: E402
 
 
 def jasenet(jaettu):
-    j = [("build.rc", os.path.join(vm9.TAMA, "build.rc"))]
-    for hak in vm9.OVERLAY:
-        lahde = os.path.join(vm9.JUURI, hak)
-        if not os.path.isdir(lahde):
-            raise vm9.VirheVM("overlay puuttuu: %s" % lahde)
-        j.append(("ov/" + hak, lahde))
-    puuttuu = [p for p in vm9.JAETUT if not os.path.isfile(os.path.join(jaettu, p))]
-    if puuttuu:
-        raise vm9.VirheVM("yhteinen BootInfo v1 puuttuu hakemistosta %s: %s\n"
-                          "(Codexin haara: anna --shared sen työpuuhun)" % (jaettu, " ".join(puuttuu)))
-    for p in vm9.JAETUT:
-        j.append(("ov/" + p, os.path.join(jaettu, p)))
-    return j
+    return [("build.rc", os.path.join(vm9.TAMA, "build.rc"))] + vm9.overlay_jasenet(jaettu)
 
 
 def main():
@@ -49,6 +37,7 @@ def main():
     ap.add_argument("--iso")
     ap.add_argument("--buildvm")
     ap.add_argument("--aa64", action="store_true", help="käännä myös bootaa64.efi (tarkistus)")
+    ap.add_argument("--check-pc", action="store_true", help="käännä myös jaetut pc/386-muisti- ja näyttötiedostot")
     a = ap.parse_args()
 
     iso = vm9.etsi_iso(a.iso)
@@ -71,12 +60,13 @@ def main():
         try:
             vm9.kaynnista_9front(vm, 300)
             vm.aja("rm -rf /tmp/p2 && mkdir -p /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data", 120)
-            vm.aja("rc /tmp/p2/build.rc" + (" aa64" if a.aa64 else ""), 3600)
+            vm.aja("rc /tmp/p2/build.rc" + (" aa64" if a.aa64 else "")
+                   + (" checkpc" if a.check_pc else ""), 3600)
         finally:
             vm.sammuta()
         tiedostot = vm9.tar_levylta(ulos, a.out)
 
-    for t in ("9pc64", "bootx64.efi"):
+    for t in ("9pc64", "bootx64.efi", "rc"):
         if t not in tiedostot:
             raise vm9.VirheVM("%s puuttuu tuloksista (%s)" % (t, loki))
     magic, entry = vm9.aout_entry(os.path.join(a.out, "9pc64"))

@@ -171,6 +171,7 @@ mkargv(word *a)
 	return argv;
 }
 
+#ifdef HAVE_SPAWN
 enum {
 	Maxops	= 64,	/* spawnin kuvaajaoperaatiot: sanaa, parit */
 };
@@ -233,6 +234,15 @@ execspawn(void)
 	free(argv);
 	return pid;
 }
+
+#else
+/* Only WASM32 provides spawn(2); other ports keep fork/exec. */
+int
+execspawn(void)
+{
+	return -1;
+}
+#endif
 
 void
 execexec(void)

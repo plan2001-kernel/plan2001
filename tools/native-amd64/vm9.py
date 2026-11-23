@@ -284,8 +284,24 @@ JAETUT = [
     "sys/src/9/port/bootfb.c",
 ]
 
-# tämän haaran AMD64-overlay 9frontin hakemistorakenteessa
-OVERLAY = ["sys/src/9/pc64", "sys/src/9/pc", "sys/src/boot/efi"]
+# AMD64 ja yhteiset ytimen lähteet samasta 9front-overlaysta.
+OVERLAY = ["sys/src/9/pc64", "sys/src/9/pc", "sys/src/9/port", "sys/src/9/ip", "sys/src/boot/efi", "sys/src/cmd/rc"]
+
+
+def overlay_jasenet(jaettu):
+    """Sama lähdeoverlay käännöskoneeseen ja asennetulle levylle."""
+    jasenet = []
+    for hak in OVERLAY:
+        lahde = os.path.join(JUURI, hak)
+        if not os.path.isdir(lahde):
+            raise VirheVM("overlay puuttuu: %s" % lahde)
+        jasenet.append(("ov/" + hak, lahde))
+    for p in JAETUT:
+        lahde = os.path.join(jaettu, p)
+        if not os.path.isfile(lahde):
+            raise VirheVM("yhteinen BootInfo v1 puuttuu: %s" % lahde)
+        jasenet.append(("ov/" + p, lahde))
+    return jasenet
 
 
 def valimuisti():
