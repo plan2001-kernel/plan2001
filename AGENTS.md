@@ -10,17 +10,17 @@ Read the root README.md before making changes. It is the **sole authoritative st
 4. **Keep changes narrowly scoped.** Import only explicitly approved additions, placing them within the original 9front structure. Share BootInfo and necessary boot logic without imposing a full UEFI emulator on the browser.
 5. **Keep technical information where it belongs.** Source comments, build instructions required to operate the software, and interface definitions are allowed when technically necessary. They must not turn into records of agent activity. Goals belong only in README.md.
 
-## CI: explicit owner control
+## CI: fixed policy, autonomous task completion
 
-**Do not make CI policy decisions.** The project owner decides whether CI exists, which checks run, when they run, and how much compute they consume. Reading README.md does **not** authorize creation of a workflow.
+**Finish the assigned software task without requesting CI decisions from the user.** CI configuration is outside the scope of ordinary development tasks. Do not interrupt, stop, or defer coding, testing, or delivery because a CI workflow could be added or changed.
 
-1. **One central workflow at most.** If explicitly authorized, keep all permanent automated checks in `.github/workflows/ci.yml`. Do not introduce one workflow per branch, feature, architecture, or bug fix.
-2. **Approval required for any CI change.** Do not create, edit, enable, or expand workflow files, schedules, triggers, matrices, required checks, third-party actions, or external CI integrations unless the owner explicitly requests that exact CI change. A failing test is not permission to change CI.
-3. **Minimal automatic work.** The default proposed gate is one small, approved smoke test for relevant PR changes. Do not run full builds, lengthy browser suites, multi-architecture matrices, or unrelated tests on every push. Owner-approved heavy tests run manually or under explicitly approved conditions.
-4. **No branch-CI accumulation.** Feature branches must not add CI workflows by default. Any exceptionally authorized temporary branch workflow must be removed from the branch before merge, after its feature is accepted. A useful feature-specific test may become part of the central CI **only after explicit owner approval**; otherwise it remains an ordinary manually runnable test.
-5. **Trivial edits are not a reason for mass testing.** Avoid full CI for comments, README edits, print-message changes, and other cosmetic changes. Do not claim that path filters can identify print-only changes inside source files. When scope is uncertain, leave existing CI policy unchanged and ask the owner before modifying workflow behavior.
-6. **Never write CI reports into the repo.** No test logs, run summaries, screenshots, hash listings, branch status notes, or other generated evidence committed as documentation. Refer to the checks and logs in GitHub Actions when needed.
+1. **Never alter CI as a side effect.** Unless the user's actual task explicitly requests CI administration, do not create, edit, enable, delete or otherwise change workflows, jobs, triggers, matrices, required checks, schedules, or external CI services. Do not ask permission during an unrelated task; simply leave CI unchanged.
+2. **Tests are part of implementation.** Create or modify relevant source-level tests where needed, and run them locally with available tools. Run existing CI checks when available, but do not turn every test into a GitHub Actions workflow. Fix code defects exposed by tests without altering CI.
+3. **At most one permanent workflow.** When the user explicitly tasks an agent with CI changes, prefer one small central workflow at `.github/workflows/ci.yml`. Do not accumulate feature- or branch-specific CI. Remove any temporary CI workflow from the branch before merging it; tests worth retaining should remain ordinary test scripts unless the user has explicitly requested central CI coverage.
+4. **Keep CI cheap.** Do not run entire multi-architecture, browser, or long-running suites on every small change. Cosmetic changes (including print strings) must not motivate new automatic checks. Path filters alone cannot identify cosmetic edits within source files.
+5. **Never weaken checks or bypass branch protection to force a merge.** Resolve code failures. If an external infrastructure failure or repository rule prevents the final GitHub operation, finish all work that can be completed and report that specific blocker in the response, not a repository document.
+6. **No work documentation or CI artifacts in Git.** Do not commit test output, screenshots, logbooks, workflow run reports, hashes, or branch progress notes.
 
-**No workflow files are to be added in the specification phase.** This section is a rule for subsequent implementation, not an instruction to implement CI now.
+**CI is not a decision point in normal agent work. Complete the requested implementation without user intervention and without changing CI.**
 
 The repository must contain **software and its current requirements**, not a history of how agents worked on it.
