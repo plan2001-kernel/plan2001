@@ -1,0 +1,12 @@
+--- a/sys/src/9/ip/arp.c
++++ b/sys/src/9/ip/arp.c
+@@ -153,6 +153,9 @@
+ 	}
+ 	cleanarpent(arp, a);
+ 
++	/* No request has been sent: permit resolution even just after boot. */
++	a->ctime = NOW - RETRANS_TIMER;
++
+ 	ipmove(a->ip, ip);
+ 	a->ifc = ifc;
+ 	a->ifcid = ifc->ifcid;

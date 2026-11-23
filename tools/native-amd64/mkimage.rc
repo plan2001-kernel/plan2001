@@ -115,6 +115,11 @@ if(grep -s 'can''t (create|write)|file system full' /tmp/mkfs.p2)
 	die 'jakelun kopio epäonnistui (cwfs:n välimuisti liian pieni? suurenna --size)'
 test -x /n/newfs/amd64/bin/rc || die 'jakelun kopio epäonnistui'
 
+# Asennetun ytimen lähteiden ja BootInfo-otsakkeen on vastattava
+# käännöksen overlayta; pelkkä ISO:n lähde palauttaisi vanhan bootin.
+dircp $p2/ov/sys /n/newfs/sys || die 'ytimen lähdeoverlay'
+test -f /n/newfs/sys/include/bootinfo.h || die 'BootInfo-otsake puuttuu'
+
 # Plan2001:n ydin ja loader myös asennettuun järjestelmään, jotta
 # 9frontin omat työkalut (inst/bootsetup, 9fs 9fat) käyttävät niitä
 cp $p2/9pc64 /n/newfs/amd64/9pc64 || die 'ytimen kopio juureen'

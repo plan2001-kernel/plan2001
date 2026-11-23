@@ -43,6 +43,14 @@ echo '--- ydin: /sys/src/9/pc64'
 cd /sys/src/9/pc64 || die pc64
 mk 'CONF=pc64' >[2=1] || die 'ytimen käännös'
 
+# Jaetut pc-tiedostot kuuluvat myös 386-porttiin. Tarkista ne sen
+# omalla mkfilellä ja 8c:llä, muuttamatta pc:n käynnistysreittiä.
+for(arg in $*) if(~ $arg checkpc){
+	echo '--- pc/386: jaetut memory.c ja screen.c'
+	cd /sys/src/9/pc || die pc
+	mk memory.8 screen.8 >[2=1] || die 'pc/386-yhteensopivuus'
+}
+
 echo '--- UEFI-loader: /sys/src/boot/efi'
 cd /sys/src/boot/efi || die efi
 mk bootx64.efi >[2=1] || die 'bootx64.efi:n käännös'

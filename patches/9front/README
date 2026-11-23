@@ -49,3 +49,22 @@ The libc and libthread ones are for building wasm32 with 9front's mkfiles, with 
 tree's libc/wasm32/mkfile and libmp's, libsec's empty wasm32/mkfiles.
 wasm32 is not in 9front's CPUS: mk installall builds the CPUS, and wasm32
 is built by objtype=wasm32 mk install where it is wanted.
+
+
+pc-memory-bootinfo.diff
+		pc/memory.c: optional architecture callback supplies the BootInfo
+		memory map. The ordinary pc e820/ramscan path remains unchanged
+		when no callback is installed.
+
+pc-screen-bootinfo.diff
+		pc/screen.c: accept the shared BootInfo WIDTHxHEIGHTxSTRIDExDEPTH
+		configuration as well as the stock WIDTHxHEIGHTxDEPTH form.
+
+riow-spawn.diff
+		riow.c: name its private window launcher spawnwindow, avoiding a
+		declaration collision with libc's process-spawn interface.
+
+arp-first-request.diff
+		arp.c: a fresh entry has not sent a request. Backdate its request
+		time by RETRANS_TIMER so early boot does not suppress the first
+		ARP request and discard the first queued packet on the next send.
