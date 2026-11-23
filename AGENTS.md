@@ -10,17 +10,17 @@ Read the root README.md before making changes. It is the **sole authoritative st
 4. **Keep changes narrowly scoped.** Import only explicitly approved additions, placing them within the original 9front structure. Share BootInfo and necessary boot logic without imposing a full UEFI emulator on the browser.
 5. **Keep technical information where it belongs.** Source comments, build instructions required to operate the software, and interface definitions are allowed when technically necessary. They must not turn into records of agent activity. Goals belong only in README.md.
 
-## CI: fixed policy, autonomous task completion
+## CI: disabled
 
-**Finish the assigned software task without requesting CI decisions from the user.** CI configuration is outside the scope of ordinary development tasks. Do not interrupt, stop, or defer coding, testing, or delivery because a CI workflow could be added or changed.
+**CI IS DISABLED. Do not create, enable, modify, import or run GitHub Actions workflows or any other automated CI pipelines.** This prohibition applies to `main`, feature branches, and migrations from other repositories. Do not copy existing source-repository workflow directories.
 
-1. **Never alter CI as a side effect.** Unless the user's actual task explicitly requests CI administration, do not create, edit, enable, delete or otherwise change workflows, jobs, triggers, matrices, required checks, schedules, or external CI services. Do not ask permission during an unrelated task; simply leave CI unchanged.
-2. **Tests are part of implementation.** Create or modify relevant source-level tests where needed, and run them locally with available tools. Run existing CI checks when available, but do not turn every test into a GitHub Actions workflow. Fix code defects exposed by tests without altering CI.
-3. **At most one permanent workflow.** When the user explicitly tasks an agent with CI changes, prefer one small central workflow at `.github/workflows/ci.yml`. Do not accumulate feature- or branch-specific CI. Remove any temporary CI workflow from the branch before merging it; tests worth retaining should remain ordinary test scripts unless the user has explicitly requested central CI coverage.
-4. **Keep CI cheap.** Do not run entire multi-architecture, browser, or long-running suites on every small change. Cosmetic changes (including print strings) must not motivate new automatic checks. Path filters alone cannot identify cosmetic edits within source files.
-5. **Never weaken checks or bypass branch protection to force a merge.** Resolve code failures. If an external infrastructure failure or repository rule prevents the final GitHub operation, finish all work that can be completed and report that specific blocker in the response, not a repository document.
-6. **No work documentation or CI artifacts in Git.** Do not commit test output, screenshots, logbooks, workflow run reports, hashes, or branch progress notes.
+1. **Complete the assigned task autonomously.** Never stop work to request CI approval; simply leave CI disabled and finish the coding task.
+2. **Test locally.** Create and run relevant tests as ordinary source files or scripts when needed. Do not convert them to automatic CI jobs.
+3. **Do not create temporary or branch-specific workflows.** No `.github/workflows/` files are permitted while CI remains disabled.
+4. **Only an explicit project-owner decision to enable CI may change this policy.** If CI is enabled later, the default design is one small centrally controlled workflow, not feature-by-feature CI.
+5. **Do not bypass repository protections or weaken tests to finish a task.** Report an external blocker in the final response if it cannot be resolved without changing policy.
+6. **No CI artifacts or work documentation in Git.** Do not commit test output, screenshots, hashes, logs or task reports.
 
-**CI is not a decision point in normal agent work. Complete the requested implementation without user intervention and without changing CI.**
+**CI is not a dependency for completing software tasks.**
 
 The repository must contain **software and its current requirements**, not a history of how agents worked on it.
