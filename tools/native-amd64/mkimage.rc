@@ -31,6 +31,11 @@ fn die {
 mount /srv/9660 /n/dist /dev/sdE1/data || die 'ISO ei liity'
 test -d /n/dist/dist/9front || die 'ISO:lla ei ole jakelua'
 
+# Käytä varmennetun julkaisun työkaluja ja kopiointiprotoa, ei
+# käännöskoneeseen mahdollisesti muutettuja versioita.
+bind -b /n/dist/amd64/bin /bin
+bind -b /n/dist/rc/bin /bin
+
 # GPT-osiot ctl-tiedostoon (diskparts: disk/edisk -p)
 diskparts $t
 test -f $t/esp || die 'kohdelevyllä ei ole ESP:tä'
@@ -109,7 +114,7 @@ while(! mount -c /srv/$sname /n/newfs){
 }
 
 echo '--- jakelu (inst/copydist)'
-disk/mkfs -z 16372 -U -s /n/dist -d /n/newfs /sys/lib/sysconfig/proto/allproto >/tmp/mkfs.p2 >[2=1]
+disk/mkfs -z 16372 -U -s /n/dist -d /n/newfs /n/dist/sys/lib/sysconfig/proto/allproto >/tmp/mkfs.p2 >[2=1]
 tail -5 /tmp/mkfs.p2
 if(grep -s 'can''t (create|write)|file system full' /tmp/mkfs.p2)
 	die 'jakelun kopio epäonnistui (cwfs:n välimuisti liian pieni? suurenna --size)'
