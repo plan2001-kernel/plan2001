@@ -1,0 +1,66 @@
+#!/bin/rc
+# Plan2001 AMD64 -käännös 9front-11952-koneessa (tools/native-amd64/build).
+# 9frontin oma työkaluketju: mk, 6c, 6a, 6l, aux/aout2efi.
+#
+# Levyt (AHCI, katso vm9.py):
+#	sdE1	pinnattu 9front-11952.amd64.iso: lähteet, otsakkeet, kirjastot
+#		ja työkalut, ei koneen omaa (mahdollisesti muutettua) /sys/src:tä
+#	sdE2	sisään: tämä skripti ja overlay (ov/sys/...) tar-muodossa,
+#		purettu hakemistoon /tmp/p2 ennen tätä
+#	sdE3	ulos: 9pc64, bootx64.efi (ja bootaa64.efi) tar-muodossa
+#
+# Käyttö: rc build.rc [aa64]
+rfork ne
+p2=/tmp/p2
+
+fn die {
+	echo 'build.rc: '^$"* >[1=2]
+	exit $"*
+}
+
+9660srv >[2]/dev/null
+mount /srv/9660 /n/dist /dev/sdE1/data || die 'ISO ei liity'
+test -d /n/dist/sys/src/9/pc64 || die 'ISO:lla ei ole /sys/src/9/pc64'
+
+# kääntäjät, kirjastot ja otsakkeet julkaisusta; BootInfo-otsake overlaysta
+bind -b /n/dist/amd64/bin /bin
+bind /n/dist/amd64 /amd64
+bind /n/dist/sys/include /sys/include
+bind -b $p2/ov/sys/include /sys/include
+
+# 9frontin lähdepuu + overlay kirjoitettavaan hakemistoon
+rm -rf $p2/src
+mkdir -p $p2/src/9 $p2/src/boot
+dircp /n/dist/sys/src/9 $p2/src/9 || die 'sys/src/9 kopio'
+dircp /n/dist/sys/src/boot $p2/src/boot || die 'sys/src/boot kopio'
+dircp $p2/ov/sys/src/9 $p2/src/9 || die 'overlay sys/src/9'
+dircp $p2/ov/sys/src/boot $p2/src/boot || die 'overlay sys/src/boot'
+bind /n/dist/sys/src /sys/src
+bind $p2/src/9 /sys/src/9
+bind $p2/src/boot /sys/src/boot
+
+echo '--- ydin: /sys/src/9/pc64'
+cd /sys/src/9/pc64 || die pc64
+mk 'CONF=pc64' >[2=1] || die 'ytimen käännös'
+
+echo '--- UEFI-loader: /sys/src/boot/efi'
+cd /sys/src/boot/efi || die efi
+mk bootx64.efi >[2=1] || die 'bootx64.efi:n käännös'
+aa64=()
+if(~ $1 aa64){
+	if(mk bootaa64.efi >[2=1])
+		aa64=bootaa64.efi
+	if not
+		echo 'build.rc: bootaa64.efi ei käänny (ARM64 ei kuulu AMD64-vaiheeseen)'
+}
+
+rm -rf $p2/out
+mkdir -p $p2/out
+cp /sys/src/9/pc64/9pc64 /sys/src/boot/efi/bootx64.efi $p2/out || die kopio
+if(! ~ $#aa64 0)
+	cp /sys/src/boot/efi/bootaa64.efi $p2/out
+cd $p2/out
+nm /sys/src/9/pc64/9pc64 | grep -e ' _efi64$' -e ' T main$' >entry.txt
+ls -l
+tar c * >/dev/sdE3/data || die 'tulosten kirjoitus'
+echo 'build.rc: valmis'

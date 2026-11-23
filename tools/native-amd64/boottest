@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+Plan2001 AMD64 -levykuvan käynnistystesti QEMU:ssa: OVMF (UEFI) ->
+Plan2001 EFI-loader -> BootInfo v1 -> 9front pc64 -ydin -> init -> rc,
+ilman verkkoa (-nic none), kuvan omalta ESP:ltä ja cwfs:ltä.
+
+    tools/native-amd64/boottest [--image KUVA] [--keep]
+
+Kuvasta tehdään harva kopio; kopion ESP:n plan9.ini:hin lisätään vain
+console=0 (sarjakonsoli), ellei siinä jo ole console-riviä.  Testi
+käynnistää kopion kahdesti: ensimmäisellä kerralla tarkistetaan loaderin
+ja ytimen merkit, BootInfo-asetukset, laitteet (#l, #I, #S), IPv4/IPv6-
+silmukka, ARP-taulu ja käyttäjäohjelmien käännös ja ajo (6c, 6l) sekä
+kirjoitetaan tiedosto juureen; toisella kerralla tiedoston on oltava
+tallella (asennettu järjestelmä käynnistyy omalta levyltään).
+Konsolin loki: KUVA.boottest.log.  Vaatii mtoolsin (mtype, mcopy).
+"""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vm9  # noqa: E402
+
+ESP_OFFSET = 2048 * 512   # mkimage: ESP alkaa 1 MiB:stä
+
+
+def esp_ini(kuva, tyo):
+    mt = "%s@@%d" % (kuva, ESP_OFFSET)
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    ini = subprocess.check_output(["mtype", "-i", mt, "::/plan9.ini"], env=env).decode()
+    if not any(r.startswith("console=") for r in ini.splitlines()):
+        ini = ini.rstrip("\n") + "\nconsole=0\n"
+        p = os.path.join(tyo, "plan9.ini")
+        open(p, "w").write(ini)
+        subprocess.check_call(["mcopy", "-o", "-i", mt, p, "::/plan9.ini"], env=env)
+    return ini
+
+
+class Tarkistus:
+    def __init__(self):
+        self.tulokset = []
+
+    def ok(self, nimi, ehto, tieto=""):
+        self.tulokset.append((nimi, bool(ehto), tieto))
+        print("%-4s %s%s" % ("OK" if ehto else "FAIL", nimi, (": " + tieto) if tieto else ""))
+        sys.stdout.flush()
+
+    def kaikki_ok(self):
+        return all(t[1] for t in self.tulokset)
+
+
+def kaynnistys(kuva, loki, tk, kerta):
+    # NIC tyhjään QEMU-hubiin: #l:n ajuri toimii, mutta verkkoyhteyttä ei ole
+    vm = vm9.Kone([(kuva, "raw", False, "hd")], vm9.Ovmf.etsi(), loki, muisti="2048", cpu="2",
+                  ylim=["-netdev", "hubport,id=n0,hubid=0", "-device", "virtio-net-pci,netdev=n0"])
+    vm.kaynnista()
+    try:
+        vm.odota(r"\[P2 L01\] Plan2001 loader", 120)
+        tk.ok("%d: Plan2001 EFI-loader käynnistyi" % kerta, True)
+        vm.odota(r"\[P2 L24\] boot", 120)
+        tk.ok("%d: loader ohitti ExitBootServicesin valmistelut ([P2 L24])" % kerta, True)
+        vm.odota(r"Plan 9", 120)
+        tk.ok("%d: 9front pc64 -ydin tulostaa konsoliin" % kerta, True)
+        kehote = vm9.kaynnista_9front(vm, 300)
+        tk.ok("%d: init ja rc (%s)" % (kerta, kehote), True)
+        if kerta == 1:
+            ensimmainen(vm, tk)
+        else:
+            out, st = vm.aja("cat /usr/glenda/p2persist", 30, True)
+            tk.ok("2: ensimmäisellä käynnistyksellä kirjoitettu tiedosto säilyi", st == "" and "p2-persist" in out, out.strip())
+    finally:
+        vm.sammuta(120)
+
+
+def ensimmainen(vm, tk):
+    a = vm.aja
+    out, _ = a("cat /dev/user; echo; cat /dev/sysname; echo; cat /env/service", 30)
+    tk.ok("1: käyttäjä glenda", out.split()[0] == "glenda", " ".join(out.split()))
+    out, _ = a("grep -e '^bootinfo: ' -e '^Plan 9' /dev/kmesg", 30, True)
+    tk.ok("1: ydin käytti BootInfoa (bootinfo.c bootinfoclock)", "bootinfo: epoch" in out, out.strip().replace("\n", " | "))
+    out, _ = a("ls '#ec' | sed 's,.*/,,' | grep -e '^\\*'; cat '#ec/*bootscreen'", 30, True)
+    tk.ok("1: *acpi ja *bootscreen BootInfosta, ei *e820:ta",
+          "*acpi" in out and "*bootscreen" in out and "*e820" not in out, " ".join(out.split()))
+    out, _ = a("ls '#S'; cat /dev/sdE0/ctl | sed 3q", 30, True)
+    tk.ok("1: #S: juurilevy sdE0", "sdE0" in out, " ".join(out.split())[:200])
+    out, st = a("ls '#l' && cat '#l/ether0/addr'", 30, True)
+    tk.ok("1: #l: ether0 (virtio-net, ei verkkoyhteyttä)", st == "" and "ether0" in out, " ".join(out.split()))
+    out, st = a("ip/ipconfig loopback /dev/null 127.1 && "
+                "for(i in /net/ipifc/[0-9]*) if(grep -s '^device /dev/null ' $i/status) echo add ::1 /128 >$i/ctl; "
+                "ip/ipconfig ether /net/ether0 10.99.0.2 255.255.255.0 && ip/ipconfig -6 ether /net/ether0 && "
+                "cat /net/ipselftab", 60, True)
+    tk.ok("1: #I: IPv4- ja IPv6-osoitteet (ipconfig)", st == "" and "127.0.0.1" in out and "10.99.0.2" in out
+          and "::1" in out and "fe80::" in out, " ".join(out.split())[:300])
+    out, st = a("ip/ping -n 2 127.0.0.1 >[2=1] | tail -1", 60, True)
+    tk.ok("1: IPv4-silmukka (ip/ping 127.0.0.1)", "rtt" in out and "lost" not in out, " ".join(out.split()))
+    out, st = a("ip/ping -6 -n 2 ::1 >[2=1] | tail -1", 60, True)
+    tk.ok("1: IPv6-silmukka (ip/ping -6 ::1)", "rtt" in out and "lost" not in out, " ".join(out.split()))
+    out, st = a("ip/ping -n 3 -i 500 10.99.0.1 >/dev/null >[2=1] & sleep 1; cat /net/arp; wait", 60, True)
+    tk.ok("1: ARP-pyyntö ether0:lle (/net/arp: 10.99.0.1)", "10.99.0.1" in out, " ".join(out.split())[:200])
+    out, st = a("cd /tmp && {echo '#include <u.h>'; echo '#include <libc.h>'; "
+                "echo 'void main(void){ print(\"p2-userland-%d\\n\", 6*7); exits(nil); }'} >p2.c && "
+                "6c p2.c && 6l -o p2 p2.6 && ./p2", 120, True)
+    tk.ok("1: 6c/6l käännös ja ajo asennetussa järjestelmässä", "p2-userland-42" in out, " ".join(out.split()))
+    out, st = a("echo p2-persist >/usr/glenda/p2persist && cat /usr/glenda/p2persist", 30, True)
+    tk.ok("1: kirjoitus juuritiedostojärjestelmään", "p2-persist" in out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--image", default=os.path.join(vm9.oletus_ulos(), "plan2001-amd64.img"))
+    ap.add_argument("--keep", action="store_true", help="säilytä testikopio (KUVA.boottest.img)")
+    a = ap.parse_args()
+    for t in ("mtype", "mcopy"):
+        if shutil.which(t) is None:
+            raise vm9.VirheVM("%s puuttuu (mtools)" % t)
+    if not os.path.isfile(a.image):
+        raise vm9.VirheVM("%s puuttuu: aja tools/native-amd64/mkimage" % a.image)
+    loki = os.path.splitext(a.image)[0] + ".boottest.log"
+    if os.path.exists(loki):
+        os.unlink(loki)
+    tk = Tarkistus()
+    with tempfile.TemporaryDirectory(prefix="p2boot-") as tyo:
+        kopio = os.path.splitext(a.image)[0] + ".boottest.img" if a.keep else os.path.join(tyo, "kuva.img")
+        subprocess.check_call(["cp", "--sparse=always", a.image, kopio])
+        ini = esp_ini(kopio, tyo)
+        print("plan9.ini (ESP):\n  " + "\n  ".join(ini.strip().splitlines()))
+        try:
+            kaynnistys(kopio, loki, tk, 1)
+            kaynnistys(kopio, loki, tk, 2)
+        except vm9.VirheVM as e:
+            tk.ok("käynnistys", False, str(e)[-2000:])
+    print("loki: %s" % loki)
+    if not tk.kaikki_ok():
+        sys.exit(1)
+    print("boottest: kaikki tarkistukset OK")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except vm9.VirheVM as e:
+        print("boottest: %s" % e, file=sys.stderr)
+        sys.exit(1)
