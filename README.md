@@ -54,6 +54,16 @@ The user chooses what to start. Opening a URL starts that URL's system; selectin
 5. Migrate only approved programs and improvements; do not automatically import whole obsolete repositories.
 6. This document defines architecture and scope. Implementation, CI additions and new test campaigns are separate subsequent work, not prerequisites for writing this specification.
 
+## Continuous integration policy
+
+**CI is controlled by the project owner, not designed autonomously by agents.** The intended steady state is at most **one centrally maintained GitHub Actions workflow**, `.github/workflows/ci.yml`, running a small, explicitly approved core smoke test. It is not yet authorized for implementation by this specification alone.
+
+- Agents must obtain explicit project-owner approval before adding, modifying or enabling any CI workflow, event trigger, job, matrix, scheduled run, test gate, or external CI service.
+- Avoid a growing collection of feature-specific CI workflows. Existing source tests can remain without all becoming automatic CI jobs.
+- Prefer the single lightweight, approved gate for relevant pull requests and optional manual runs for more expensive or architecture-specific tests. Do not automatically launch an entire test matrix for documentation, comments, diagnostics, text, or similarly trivial changes. GitHub path filters alone cannot reliably distinguish a print-string edit from a substantive source change.
+- Temporary branch-only CI is exceptional and requires explicit approval. Remove such workflow files **from the branch before merging** once the feature is accepted; if a test deserves permanent CI coverage, the owner must explicitly approve integrating it into the central workflow instead.
+- Do not commit test logs, CI reports, hashes, screenshots, or records of workflow runs as repository documentation. CI results belong in GitHub Actions and pull-request checks, not the source tree.
+
 ## Repository and agent policy
 
 **This root README is the single authoritative statement of project goals. Update it when goals or architecture decisions change.**
