@@ -68,3 +68,7 @@ arp-first-request.diff
 		arp.c: a fresh entry has not sent a request. Backdate its request
 		time by RETRANS_TIMER so early boot does not suppress the first
 		ARP request and discard the first queued packet on the next send.
+
+spawn-wasm32.diff
+		The rc spawn fast path is enabled only for objtype=wasm32. Native
+		rc continues to fork/exec and links against stock 9front libc.

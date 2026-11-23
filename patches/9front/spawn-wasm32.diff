@@ -41,10 +41,11 @@
  		return -1;
 --- a/sys/src/cmd/rc/simple.c
 +++ b/sys/src/cmd/rc/simple.c
-@@ -171,6 +171,69 @@
+@@ -171,6 +171,79 @@
  	return argv;
  }
  
++#ifdef HAVE_SPAWN
 +enum {
 +	Maxops	= 64,	/* spawnin kuvaajaoperaatiot: sanaa, parit */
 +};
@@ -108,6 +109,26 @@
 +	return pid;
 +}
 +
++#else
++/* Only WASM32 provides spawn(2); other ports keep fork/exec. */
++int
++execspawn(void)
++{
++	return -1;
++}
++#endif
++
  void
  execexec(void)
  {
+--- a/sys/src/cmd/rc/mkfile
++++ b/sys/src/cmd/rc/mkfile
+@@ -31,7 +31,7 @@
+ 
+ BIN=/$objtype/bin
+ 
+-CFLAGS=$CFLAGS -DPlan9
++CFLAGS=$CFLAGS -DPlan9 `{if(~ $objtype wasm32) echo -DHAVE_SPAWN; if not echo}
+ 
+ </sys/src/cmd/mkone
+ 

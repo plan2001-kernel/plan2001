@@ -40,7 +40,7 @@ PY
 )
 	TREE=$tree MKFLAGS=-k "$here/native" "$dd:$t" >>"$d/build.log" 2>&1 || true
 done
-grep '^mk: ' "$d/build.log" >"$d/failed" || true
+grep '^mk: ' "$d/build.log" | grep -v ' is up to date$' >"$d/failed" || true
 # the boot materials
 w=$tree/sys/src/9/wasm32
 [ -e "$tree/wasm32/9wasm32.wasm" ] || { echo "dist: no kernel (build/dist/build.log)" >&2; exit 1; }

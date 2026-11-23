@@ -8,7 +8,7 @@
 #					ja 9front-11952:n jakelu (allproto)
 #
 # Levyt: sdE1 pinnattu ISO (jakelu), sdE2 sisään (tämä skripti, 9pc64,
-# bootx64.efi, plan9.ini; purettu hakemistoon /tmp/p2), sdE3 kohdelevy.
+# bootx64.efi, rc, plan9.ini ja lähdeoverlay; purettu hakemistoon /tmp/p2), sdE3 kohdelevy.
 #
 # Käyttö: rc mkimage.rc LEVY
 #	LEVY	kohdelevyn nimi kohdekoneessa, esim. sdE0 (plan9.ini:n
@@ -119,6 +119,7 @@ test -x /n/newfs/amd64/bin/rc || die 'jakelun kopio epäonnistui'
 # käännöksen overlayta; pelkkä ISO:n lähde palauttaisi vanhan bootin.
 dircp $p2/ov/sys /n/newfs/sys || die 'ytimen lähdeoverlay'
 test -f /n/newfs/sys/include/bootinfo.h || die 'BootInfo-otsake puuttuu'
+cp $p2/rc /n/newfs/amd64/bin/rc || die 'yhdistetyn rc:n kopio'
 
 # Plan2001:n ydin ja loader myös asennettuun järjestelmään, jotta
 # 9frontin omat työkalut (inst/bootsetup, 9fs 9fat) käyttävät niitä

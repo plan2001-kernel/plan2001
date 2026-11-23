@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Plan2001 AMD64: 9front-11952:n pc64-ydin (9pc64) ja UEFI-loader
+Plan2001 AMD64: 9front-11952:n pc64-ydin (9pc64), rc ja UEFI-loader
 (bootx64.efi) 9frontin omalla työkaluketjulla (mk, 6c, 6a, 6l,
 aux/aout2efi) 9front-11952-koneessa QEMU:ssa.  Linux-isäntä vain
 valmistelee levyt ja lukee tulokset; isännän GCC:tä ei käytetä.
@@ -13,7 +13,7 @@ BootInfo v1 (sys/include/bootinfo.h, sys/src/9/port/boot{info,args,fb}.c)
 hakemistosta --shared (oletus: tämä puu).  Käännöskone: PLAN2001_BUILDVM
 (oletus ~/.cache/plan2001/base.qcow2), ajetaan kertakäyttöisen
 qcow2-kerroksen päällä ilman verkkoa.  Tulokset: --out (oletus
-~/.cache/plan2001/native-amd64): 9pc64, bootx64.efi, build.log.
+~/.cache/plan2001/native-amd64): 9pc64, bootx64.efi, rc, build.log.
 """
 
 import argparse
@@ -66,7 +66,7 @@ def main():
             vm.sammuta()
         tiedostot = vm9.tar_levylta(ulos, a.out)
 
-    for t in ("9pc64", "bootx64.efi"):
+    for t in ("9pc64", "bootx64.efi", "rc"):
         if t not in tiedostot:
             raise vm9.VirheVM("%s puuttuu tuloksista (%s)" % (t, loki))
     magic, entry = vm9.aout_entry(os.path.join(a.out, "9pc64"))
