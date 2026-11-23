@@ -1,0 +1,6 @@
+/build/
+*.o
+*.a
+9pterm
+drawterm
+kern/9pjobd.h
