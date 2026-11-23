@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""
+Plan2001 AMD64: UEFI-käynnistyvä raaka levykuva (USB-tikku tai sisäinen
+levy), joka käynnistyy ilman verkkoa:
+
+    GPT: 1 ESP (FAT)   \\EFI\\BOOT\\BOOTX64.EFI (Plan2001-loader), 9pc64, plan9.ini
+         2 Plan 9      nvram fscache fsworm other: cwfs64x ja 9front-11952:n
+                       jakelu (allproto) pinnatulta ISO:lta
+
+    tools/native-amd64/mkimage [--in HAK] [--out KUVA] [--size GiB, oletus 8]
+                               [--disk sdE0] [--console 0]
+
+--in: tools/native-amd64/build:n tulokset (9pc64, bootx64.efi).  --disk on
+levyn nimi kohdekoneessa (9frontin #S: AHCI sdE0, NVMe sdN0, ...):
+plan9.ini:n bootargs/nvram ja cwfs:n asetuslohko viittaavat siihen.
+--console 0 lisää plan9.ini:hin console=0 (sarjakonsoli, testit).
+Osiointi, FAT, cwfs ja kopiointi tehdään 9front-11952-koneessa 9frontin
+omilla työkaluilla (mkimage.rc); isäntä kirjoittaa vain GPT:n.
+"""
+
+import argparse
+import os
+import struct
+import sys
+import tempfile
+import uuid
+import zlib
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vm9  # noqa: E402
+
+SEKTORI = 512
+ESP_TYYPPI = uuid.UUID("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
+PLAN9_TYYPPI = uuid.UUID("c91818f9-8025-47af-89d2-f030d7000c2c")  # 9frontin disk/edisk
+
+
+def gpt(polku, koko, esp_mib):
+    """Suojaava MBR, ensisijainen ja varaosio-GPT: ESP ja Plan 9 -osio."""
+    sektorit = koko // SEKTORI
+    nent, entkoko = 128, 128
+    taulu = nent * entkoko // SEKTORI          # 32 sektoria
+    eka = 2048                                 # 1 MiB tasaus
+    viimeinen = sektorit - 1 - taulu - 1
+    esp_loppu = eka + esp_mib * 2048 - 1
+    osiot = [
+        (ESP_TYYPPI, eka, esp_loppu, "EFI System Partition"),
+        (PLAN9_TYYPPI, esp_loppu + 1, viimeinen, "Plan 9"),
+    ]
+    entries = b""
+    for tyyppi, a, b, nimi in osiot:
+        entries += (tyyppi.bytes_le + uuid.uuid4().bytes_le + struct.pack("<QQQ", a, b, 0)
+                    + nimi.encode("utf-16le").ljust(72, b"\0"))
+    entries = entries.ljust(nent * entkoko, b"\0")
+    ecrc = zlib.crc32(entries) & 0xffffffff
+    levy = uuid.uuid4().bytes_le
+
+    def otsake(oma, vara, taulu_lba):
+        h = struct.pack("<8sIIIIQQQQ16sQIII", b"EFI PART", 0x10000, 92, 0, 0,
+                        oma, vara, eka, viimeinen, levy, taulu_lba, nent, entkoko, ecrc)
+        h = h[:16] + struct.pack("<I", zlib.crc32(h) & 0xffffffff) + h[20:]
+        return h.ljust(SEKTORI, b"\0")
+
+    mbr = bytearray(SEKTORI)
+    mbr[446:462] = struct.pack("<BBBBBBBBII", 0, 0, 2, 0, 0xee, 0xff, 0xff, 0xff, 1,
+                               min(sektorit - 1, 0xffffffff))
+    mbr[510:512] = b"\x55\xaa"
+    with open(polku, "wb") as f:
+        f.truncate(koko)
+        f.seek(0)
+        f.write(bytes(mbr))
+        f.write(otsake(1, sektorit - 1, 2))
+        f.write(entries)
+        f.seek((sektorit - 1 - taulu) * SEKTORI)
+        f.write(entries)
+        f.write(otsake(sektorit - 1, 1, sektorit - 1 - taulu))
+
+
+def plan9ini(levy, konsoli):
+    rivit = [
+        "bootfile=9pc64",
+        "bootargs=local!/dev/%s/fscache" % levy,
+        "nobootprompt=local!/dev/%s/fscache" % levy,
+        "nvram=/dev/%s/nvram" % levy,
+        "mouseport=ps2",
+        "user=glenda",
+    ]
+    if konsoli is not None:
+        rivit.append("console=%s" % konsoli)
+    return ("\n".join(rivit) + "\n").encode()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--in", dest="sisaan", default=vm9.oletus_ulos())
+    ap.add_argument("--out")
+    ap.add_argument("--size", type=int, default=8, help="levykuvan koko GiB (oletus 8; harva tiedosto)")
+    ap.add_argument("--esp", type=int, default=128, help="ESP:n koko MiB (oletus 128)")
+    ap.add_argument("--disk", default="sdE0")
+    ap.add_argument("--console")
+    ap.add_argument("--iso")
+    ap.add_argument("--buildvm")
+    a = ap.parse_args()
+
+    ulos = a.out or os.path.join(a.sisaan, "plan2001-amd64.img")
+    for t in ("9pc64", "bootx64.efi"):
+        if not os.path.isfile(os.path.join(a.sisaan, t)):
+            raise vm9.VirheVM("%s puuttuu hakemistosta %s: aja ensin tools/native-amd64/build" % (t, a.sisaan))
+    if a.size < 8:
+        # disk/prep antaa fscachelle noin 1/6 Plan 9 -osiosta; jakelu ei
+        # mahdu pienempään cwfs:n välimuistiin ennen ensimmäistä dumpia
+        raise vm9.VirheVM("--size vähintään 8 GiB (cwfs:n välimuisti)")
+    iso = vm9.etsi_iso(a.iso)
+    pohja = vm9.etsi_buildvm(a.buildvm)
+    loki = os.path.splitext(ulos)[0] + ".log"
+    if os.path.exists(loki):
+        os.unlink(loki)
+
+    valmis = ulos + ".tmp"
+    gpt(valmis, a.size << 30, a.esp)
+    with tempfile.TemporaryDirectory(prefix="p2image-") as tyo:
+        kone = vm9.overlay_kone(pohja, tyo, "buildvm.qcow2")
+        sisaan = vm9.tar_levylle(os.path.join(tyo, "in.img"), [
+            ("mkimage.rc", os.path.join(vm9.TAMA, "mkimage.rc")),
+            ("9pc64", os.path.join(a.sisaan, "9pc64")),
+            ("bootx64.efi", os.path.join(a.sisaan, "bootx64.efi")),
+            ("plan9.ini", plan9ini(a.disk, a.console)),
+        ])
+        vm = vm9.Kone([(kone, "qcow2", False, "hd"),
+                       (iso, "raw", True, "cd"),
+                       (sisaan, "raw", False, "hd"),
+                       (valmis, "raw", False, "hd")],
+                      vm9.Ovmf.etsi(), loki, muisti="2048", cpu="2")
+        vm.kaynnista()
+        try:
+            vm9.kaynnista_9front(vm, 300)
+            vm.aja("rm -rf /tmp/p2 && mkdir -p /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data", 120)
+            vm.aja("rc /tmp/p2/mkimage.rc " + a.disk, 3600)
+        finally:
+            vm.sammuta()
+    os.replace(valmis, ulos)
+    print("%s: %d GiB, käynnistyslevy kohdekoneessa %s (%s)" % (ulos, a.size, a.disk, loki))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except vm9.VirheVM as e:
+        print("mkimage: %s" % e, file=sys.stderr)
+        sys.exit(1)

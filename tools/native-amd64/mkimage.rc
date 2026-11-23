@@ -1,0 +1,134 @@
+#!/bin/rc
+# Plan2001 AMD64 -levykuva 9front-11952-koneessa (tools/native-amd64/mkimage).
+# Samat vaiheet kuin 9frontin asentajassa (inst/prepdisk, mountcwfs,
+# copydist, bootsetup "use esp as 9fat"), ilman kysymyksiä:
+#
+#	ESP (GPT, isännän tekemä)	FAT: \EFI\BOOT\BOOTX64.EFI, 9pc64, plan9.ini
+#	Plan 9 -osio (GPT)		nvram fscache fsworm other, cwfs64x
+#					ja 9front-11952:n jakelu (allproto)
+#
+# Levyt: sdE1 pinnattu ISO (jakelu), sdE2 sisään (tämä skripti, 9pc64,
+# bootx64.efi, plan9.ini; purettu hakemistoon /tmp/p2), sdE3 kohdelevy.
+#
+# Käyttö: rc mkimage.rc LEVY
+#	LEVY	kohdelevyn nimi kohdekoneessa, esim. sdE0 (plan9.ini:n
+#		bootargs ja cwfs:n asetuslohko viittaavat siihen)
+rfork ne
+p2=/tmp/p2
+t=/dev/sdE3
+disk=$1
+user=glenda
+sname=cwfs.newfs
+
+fn die {
+	echo 'mkimage.rc: '^$"* >[1=2]
+	exit $"*
+}
+
+~ $#disk 1 || die 'käyttö: mkimage.rc LEVY'
+
+9660srv >[2]/dev/null
+mount /srv/9660 /n/dist /dev/sdE1/data || die 'ISO ei liity'
+test -d /n/dist/dist/9front || die 'ISO:lla ei ole jakelua'
+
+# GPT-osiot ctl-tiedostoon (diskparts: disk/edisk -p)
+diskparts $t
+test -f $t/esp || die 'kohdelevyllä ei ole ESP:tä'
+test -f $t/plan9 || die 'kohdelevyllä ei ole Plan 9 -osiota'
+
+echo '--- Plan 9 -osion jako (inst/prepdisk, ESP 9fatina)'
+disk/prep -bw -a^(nvram fscache fsworm other) $t/plan9 || die 'disk/prep'
+disk/prep -p $t/plan9 >$t/ctl >[2]/dev/null
+for(p in nvram fscache fsworm other)
+	test -f $t/$p || die 'osio puuttuu: '^$p
+
+echo '--- ESP'
+disk/format -d -l PLAN2001 $t/esp || die 'ESP:n alustus'
+rm -f /srv/dos.p2
+dossrv -f $t/esp dos.p2 || die dossrv
+mount -c /srv/dos.p2 /n/esp || die 'ESP ei liity'
+mkdir -p /n/esp/efi/boot
+cp $p2/bootx64.efi /n/esp/efi/boot/bootx64.efi || die 'loaderin kopio'
+cp $p2/9pc64 /n/esp/9pc64 || die 'ytimen kopio'
+cp $p2/plan9.ini /n/esp/plan9.ini || die 'plan9.ini:n kopio'
+ls -l /n/esp /n/esp/efi/boot
+# dossrv synkronoi jokaisen clunkin yhteydessä (dosfs.c rclunk)
+unmount /n/esp
+rm -f /srv/dos.p2
+
+echo '--- cwfs64x (inst/mountcwfs)'
+# cwfs tallettaa laitepolut asetuslohkoon: kohdelevy näkyy tässä
+# nimiavaruudessa nimellä, joka sillä on kohdekoneessa (oma juuri ei muutu)
+mkdir -p $p2/dev/$disk
+bind $t $p2/dev/$disk || die 'bind '^$disk
+bind -b $p2/dev /dev
+test -f /dev/$disk/fscache || die 'kohdelevy ei näy nimellä '^$disk
+fs=/dev/$disk/fscache
+fsworm=/dev/$disk/fsworm
+fsother=/dev/$disk/other
+{
+	echo service cwfs
+	echo config $fs
+	echo noauth
+	echo filsys main c'('$fs')('$fsworm')'
+	echo filsys dump o
+	echo filsys other '('$fsother')'
+	echo ream other
+	echo ream main
+	echo end
+} >/tmp/fsconfig.p2
+rm -f /srv/$sname /srv/$sname.cmd
+cwfs64x -n $sname -f $fs -C -c </tmp/fsconfig.p2 || die 'cwfs ream'
+{
+	echo noattach
+	echo allow
+	echo users default
+	echo cfs main
+	echo create /adm adm adm 775 d
+	echo create /adm/users adm adm 664
+	echo create /dist sys sys 775 d
+	echo create /usr sys sys 775 d
+	echo newuser $user
+	echo newuser adm +$user
+	echo newuser sys +$user
+	echo newuser upas +$user
+	echo cfs other
+	echo create /usr sys sys 775 d
+	echo create /usr/$user $user $user 775 d
+	echo create /usr/$user/tmp $user $user 750 d
+	echo cfs main
+	echo noattach
+	sleep 2
+} >>/srv/$sname.cmd
+n=0
+while(! mount -c /srv/$sname /n/newfs){
+	n=`{echo $n + 1 | hoc}
+	if(~ $n 30)
+		die 'cwfs ei liity'
+	sleep 2
+}
+
+echo '--- jakelu (inst/copydist)'
+disk/mkfs -z 16372 -U -s /n/dist -d /n/newfs /sys/lib/sysconfig/proto/allproto >/tmp/mkfs.p2 >[2=1]
+tail -5 /tmp/mkfs.p2
+if(grep -s 'can''t (create|write)|file system full' /tmp/mkfs.p2)
+	die 'jakelun kopio epäonnistui (cwfs:n välimuisti liian pieni? suurenna --size)'
+test -x /n/newfs/amd64/bin/rc || die 'jakelun kopio epäonnistui'
+
+# Plan2001:n ydin ja loader myös asennettuun järjestelmään, jotta
+# 9frontin omat työkalut (inst/bootsetup, 9fs 9fat) käyttävät niitä
+cp $p2/9pc64 /n/newfs/amd64/9pc64 || die 'ytimen kopio juureen'
+cp $p2/bootx64.efi /n/newfs/386/bootx64.efi || die 'loaderin kopio juureen'
+
+echo '--- cwfs: sync ja halt'
+unmount /n/newfs
+echo sync >>/srv/$sname.cmd
+sleep 5
+echo halt >>/srv/$sname.cmd
+n=0
+while(test -e /srv/$sname && ! ~ $n 60){
+	n=`{echo $n + 1 | hoc}
+	sleep 1
+}
+test -e /srv/$sname && die 'cwfs ei pysähtynyt'
+echo 'mkimage.rc: valmis'
