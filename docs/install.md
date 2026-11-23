@@ -2,7 +2,7 @@
 
 As 9front is installed on a PC: boot the live image, run `inst/start`,
 reboot from the disk; then the machine builds its own system from its
-source, and updates it with git.
+source contained in the distribution. Keep the 9front-11952 baseline pinned.
 
 ## The distribution
 
@@ -12,8 +12,8 @@ A binary base, the tools, and the whole source with its git:
   a snapshot: 9front's release (its commit's files, not its history -
   9front's own is `github.com/9front/9front`) and this tree's files over
   it (the port, 3c/3a/3l, the patched files), without 9front's jokes and
-  quotations (`tools/dist.deny`); a new release or a new main is one more
-  commit.  Its root is the machine's `/`.
+  quotations (`tools/dist.deny`). `tools/treebranch` records overlay source
+  snapshots over the pinned release. Its root is the machine's `/`.
 - **The ISO** (`tools/dist`: `build/dist/plan9-wasm32.iso`, plan9port's
   dump9660, `-c9j` as 9front's mkfile) has the branch's files, and built
   for wasm32 only the base system and the tools (`tools/dist.base`: the
@@ -26,12 +26,12 @@ A binary base, the tools, and the whole source with its git:
   ISO has its repository.  `tools/dist` builds the whole
   release here too (`build/dist/failed`: what does not build yet): a
   check of the source, and where the base comes from.
-- **Public distribution:** https://plan2001.com/plan9-wasm32/ downloads the
-  ISO from `/iso/` and boots it from the server (HTTP Range requests), or
-  the page boots the installed system from the browser's disk.  Locally,
-  serve `build/dist/live` with `tools/serve -d build/dist/live`, or use a
-  local ISO with `?iso=file`.  The page and kernel are the browser guest's
-  firmware, independently of the HTTP host's operating system.
+- **Live distribution:** serve `build/dist/live` with
+  `tools/serve -d build/dist/live`. The page reads its configured ISO with
+  HTTP Range requests, or accepts a local ISO with `?iso=file`. It can
+  also boot an installed system from the browser's disk. The page and
+  kernel are the browser guest's firmware, independently of the HTTP
+  host's operating system.
 
 After the install, on the machine (as 9front's sysupdate):
 
@@ -39,23 +39,23 @@ After the install, on the machine (as 9front's sysupdate):
     cd /sys/src
     mk install                  # the rest of the system, built here
 
-and to update it, from this repository (the machine's network must
-reach GitHub; the public instance and local `tools/gateway` both provide
-DHCP, DNS and NAT by default):
+To update the overlay from the distribution's configured source remote,
+keep the same frozen 9front release and rebuild the tools first. Network
+access requires a configured gateway (`docs/network.md`); `-n` provides
+an isolated test network without Internet access:
 
     bind -ac /dist/9front /
-    cd / && git/pull            # origin: https://github.com/plan2001-kernel/plan9-wasm32, branch tree
+    cd / && git/pull            # the configured distribution source remote
     cd /sys/src/cmd
     for(i in cc 3c 3a 3l cpp mk) @{cd $i && mk install}
     mk pcc.install yacc.install # the tools first
     cd /sys/src && mk install
 
-The tools first, as 9front's 386 was built after a pull: the source may
-want of its compilers what the ones the machine has do not know yet (APE
-needed pcc's wasm32 and 3l's $M, 2026-10-13).
+Rebuild the compilers before the rest of the system when the overlay
+requires newer compiler support. The installation medium includes the
+source repository at `/dist/9front`; it can be restored from there
+without fetching another release.
 
-A machine without `/dist/9front` gets it with
-`git/clone -b tree https://github.com/plan2001-kernel/plan9-wasm32 /dist/9front`.
 The kernel, once built (`cd /sys/src/9/wasm32; mk install`), goes onto
 the boot FAT as inst/bootsetup puts it there.
 

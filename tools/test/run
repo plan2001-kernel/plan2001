@@ -106,8 +106,8 @@ want boot $names && RUNS=40 DRAWS=10 KEYDELAY=12 MOUSE='[[0.4, 0.4, 1]]' KEYS='[
 	PAGEARGS='&x=boot' run boot '[]'
 # Ctrl-V as a browser has it (Windows, Chrome): its keydown left to the browser, whose paste event
 # types the text - not ^V typed as a key
-want ctrlv $names && EVAL='setTimeout(() => { const k = new KeyboardEvent("keydown", { key: "v", code: "KeyV", ctrlKey: true, cancelable: true, bubbles: true }); document.dispatchEvent(k); const d = new DataTransfer(); d.setData("text/plain", "invite-abc123\n"); document.dispatchEvent(new ClipboardEvent("paste", { clipboardData: d, cancelable: true, bubbles: true })); }, 4000)' \
-	run ctrlv '["/bin/rc", "-c", "aux/kbdfs -q -s cons /dev/eia0; x=`{read </dev/cons}; echo got $x | xd -c >/dev/eia0; echo done"]'
+want ctrlv $names && WAITFOR=ctrlv-ready EVAL='setTimeout(() => { const k = new KeyboardEvent("keydown", { key: "v", code: "KeyV", ctrlKey: true, cancelable: true, bubbles: true }); document.dispatchEvent(k); const d = new DataTransfer(); d.setData("text/plain", "invite-abc123\n"); document.dispatchEvent(new ClipboardEvent("paste", { clipboardData: d, cancelable: true, bubbles: true })); }, 4000)' \
+	run ctrlv '["/bin/rc", "-c", "aux/kbdfs -q -s cons /dev/eia0; echo ctrlv-ready >/dev/eia0; x=`{read </dev/cons}; echo got $x | xd -c >/dev/eia0; echo done"]'
 # a phone (a touch screen): no permanent bar; a canvas finger is the
 # machine's (the menus are Rio's) and never opens the keyboard; KBD shows
 # and hides the hidden field explicitly, Fn opens the special keys, and
@@ -120,9 +120,9 @@ want touchui $names && TOUCH=1 EXPECT=$t/touchbar.out EXPECTJS='window.touchok =
 # lines, both empty margins, and a wrapped line.  riotest=1 makes Rio
 # write each double click's range and text to /tmp/riotest; the checks
 # below assert both.
-want riotouch $names && TOUCH=1 HALTWAIT=120 EXPECT=$t/riotouch.out \
+want riotouch $names && WAITFOR=riotouch-ready TOUCH=1 HALTWAIT=120 EXPECT=$t/riotouch.out \
 	EXPECTJS="$(cat "$here/riotouch.check")" EVAL="$(cat "$here/riotouch.js")" \
-	run riotouch '["/bin/rc", "-c", "aux/kbdfs -q -s cons /dev/eia0; rm -f /tmp/riotest; riotest=1 rio -i '"'"'window -r -10 0 390 300 rc'"'"' >[2]/dev/null & sleep 45; echo BEGIN; cat /tmp/riotest; echo END"]'
+	run riotouch '["/bin/rc", "-c", "aux/kbdfs -q -s cons /dev/eia0; rm -f /tmp/riotest; riotest=1 rio -i '"'"'window -r -10 0 390 300 rc'"'"' >[2]/dev/null & echo riotouch-ready; sleep 45; echo BEGIN; cat /tmp/riotest; echo END"]'
 want paste $names && HALTWAIT=150 EVAL='setTimeout(() => { window.kernelpaste(("x".repeat(199) + "\r\n").repeat(100)); setTimeout(() => window.plan9.kbd("c\x04\0"), 40000); }, 4000)' \
 	run paste '["/bin/rc", "-c", "aux/kbdfs -q -s cons /dev/eia0; wc -c </dev/cons >/dev/eia0; echo pasted"]'
 want crypto $names && run crypto '["/bin/d3"]'
