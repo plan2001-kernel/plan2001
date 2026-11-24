@@ -21,6 +21,15 @@
 set -e
 here=$(cd "$(dirname "$0")" && pwd); root=$(dirname "$here")
 [ -x "${PLAN9:-}/bin/mk" ] && [ -x "$PLAN9/bin/rc" ] || { echo "native: PLAN9 must name a plan9port with mk and rc" >&2; exit 2; }
+# Use host tools for GNU options and regular expressions in build setup.
+hostsed=sed
+hostgrep=grep
+hosttouch=touch
+if ! sed --version >/dev/null 2>&1; then
+	hostsed=/usr/bin/sed
+	hostgrep=/usr/bin/grep
+	hosttouch=/usr/bin/touch
+fi
 tree=${TREE:-$root/build/tree}
 [ -n "${TREE:-}" ] || "$here/tree" "$tree" >/dev/null
 tree=$(cd "$tree" && pwd)
@@ -52,7 +61,7 @@ rm -f "$bin/mk" "$bin/rc.mk"
 if [ -e "$tree/sys/src/cmd/mpc.y" ] && [ ! -x "$bin/mpc" ]; then
 	m=$(mktemp -d)
 	cp "$tree/sys/src/cmd/mpc.y" "$m/"
-	sed -i 's/strtomp(f->s->n, nil, 0, nil)/strtomp0(f->s->n)/; 0,/^#include[ \t]*<mp.h>/s//&\nstatic mpint *strtomp0(char*);/' "$m/mpc.y"
+	"$hostsed" -i 's/strtomp(f->s->n, nil, 0, nil)/strtomp0(f->s->n)/; 0,/^#include[ \t]*<mp.h>/s//&\nstatic mpint *strtomp0(char*);/' "$m/mpc.y"
 	cat >>"$m/mpc.y" <<'C'
 
 static mpint*
@@ -76,7 +85,7 @@ strtomp0(char *a)
 	return strtomp(a, nil, base, nil);
 }
 C
-	grep -q 'strtomp0(f->s->n)' "$m/mpc.y" && grep -q '^static mpint \*strtomp0(char\*);' "$m/mpc.y" || { echo "native: mpc.y: its strtomp is not where it was" >&2; exit 1; }
+	"$hostgrep" -q 'strtomp0(f->s->n)' "$m/mpc.y" && "$hostgrep" -q '^static mpint \*strtomp0(char\*);' "$m/mpc.y" || { echo "native: mpc.y: its strtomp is not where it was" >&2; exit 1; }
 	(cd "$m" && PATH=$PLAN9/bin:$PATH "$PLAN9/bin/yacc" -d mpc.y >/dev/null &&
 		PATH=$PLAN9/bin:$PATH 9c y.tab.c && PATH=$PLAN9/bin:$PATH 9l -o "$bin/mpc" y.tab.o) || { echo "native: mpc" >&2; exit 1; }
 	rm -rf "$m"
@@ -95,7 +104,7 @@ for p in sys.argv[1:]:
 		'#include <u.h>\n#include <stdio.h>\n#include <libc.h>\n')
 	open(p, 'w').write(s)
 PY
-	sed -i 's/^extern[ \t]*int getopt(int, char \*\*, char \*);//' "$m/nlist.c"	# POSIX's getopt is declared already
+	"$hostsed" -i 's/^extern[ \t]*int getopt(int, char \*\*, char \*);//' "$m/nlist.c"	# POSIX's getopt is declared already
 	gcc -O2 -w -fcommon -Wno-int-conversion -I"$PLAN9/include" -o "$bin/cpp" "$m"/*.c -L"$PLAN9/lib" -l9 -lm ||
 		{ echo "native: cpp" >&2; exit 1; }
 	rm -rf "$m"
@@ -104,8 +113,8 @@ fi
 # plan9port, running the host's cpp, 3c and 3l (here) - not /bin's
 if [ -e "$tree/sys/src/cmd/pcc.c" ] && { [ ! -x "$bin/pcc" ] || [ "$tree/sys/src/cmd/pcc.c" -nt "$bin/pcc" ]; }; then
 	m=$(mktemp -d)
-	sed "s|\"/bin/cpp\"|\"$bin/cpp\"|g; s|smprint(\"/bin/%s\"|smprint(\"$bin/%s\"|g" "$tree/sys/src/cmd/pcc.c" >"$m/pcc.c"
-	grep -q "\"$bin/cpp\"" "$m/pcc.c" && ! grep -q '"/bin/' "$m/pcc.c" || { echo "native: pcc.c: its /bin is not where it was" >&2; exit 1; }
+	"$hostsed" "s|\"/bin/cpp\"|\"$bin/cpp\"|g; s|smprint(\"/bin/%s\"|smprint(\"$bin/%s\"|g" "$tree/sys/src/cmd/pcc.c" >"$m/pcc.c"
+	"$hostgrep" -q "\"$bin/cpp\"" "$m/pcc.c" && ! "$hostgrep" -q '"/bin/' "$m/pcc.c" || { echo "native: pcc.c: its /bin is not where it was" >&2; exit 1; }
 	(cd "$m" && PATH=$PLAN9/bin:$PATH 9c pcc.c && PATH=$PLAN9/bin:$PATH 9l -o "$bin/pcc" pcc.o) || { echo "native: pcc" >&2; exit 1; }
 	rm -rf "$m"
 fi
@@ -144,7 +153,7 @@ fi
 # those programs (sys/src/9/wasm32/bootfs.proto)
 libs="libc libthread libmp libsec libbio libregexp libString libauth libauthsrv lib9p libip libndb libdraw libmemdraw libmemlayer libframe libcomplete libplumb libcontrol libflate libdisk libavl"
 one="basename cat cleanname cp date dd echo ls mkdir mv rm sleep sort touch wc xd bind unmount ns sed mount pwd ps read test chmod tlsclient mntgen ramfs tar stats webcookies clock"
-cmds="cmd/rc cmd/hjfs cmd/rio cmd/aux/kbdfs cmd/auth/factotum cmd/auth/secstore:secstore.install,aescbc.install cmd/aux/seckeys cmd/exportfs cmd/plumb cmd/disk/prep cmd/disk:format.install,mkfs.install,mkext.install cmd/dossrv cmd/9660srv cmd/gefs cmd/cwfs cmd/gzip:gunzip.install cmd/webfs cmd/ip/ipconfig cmd/ip:ping.install cmd/ndb:cs.install cmd/aux:listen1.install,dial.install cmd/ethergw cmd:$(echo $one | sed 's/\([^ ]*\)/\1.install/g; s/ /,/g')"
+cmds="cmd/rc cmd/hjfs cmd/rio cmd/aux/kbdfs cmd/auth/factotum cmd/auth/secstore:secstore.install,aescbc.install cmd/aux/seckeys cmd/exportfs cmd/plumb cmd/disk/prep cmd/disk:format.install,mkfs.install,mkext.install cmd/dossrv cmd/9660srv cmd/gefs cmd/cwfs cmd/gzip:gunzip.install cmd/webfs cmd/ip/ipconfig cmd/ip:ping.install cmd/ndb:cs.install cmd/aux:listen1.install,dial.install cmd/ethergw cmd:$(echo $one | "$hostsed" 's/\([^ ]*\)/\1.install/g; s/ /,/g')"
 dirs=${*:-$libs 9/wasm32 $cmds}
 # /lib/ucd: libc/ucd's tables are made from it, but they come made (its *data
 # files); stand-ins older than the tables.  aux/kbdfs's latin1.h, made from
@@ -153,9 +162,9 @@ dirs=${*:-$libs 9/wasm32 $cmds}
 ucd=$(mktemp -d)
 trap 'rm -rf "$ucd"' EXIT
 for f in CompositionExclusions DerivedNormalizationProps GraphemeBreakProperty UnicodeData WordBreakProperty emoji-data; do
-	touch -d 1980-01-01 "$ucd/$f.txt"	# not 0: mk takes that as no file
+	"$hosttouch" -d 1980-01-01 "$ucd/$f.txt"	# not 0: mk takes that as no file
 done
-touch -d 1980-01-01 "$ucd/keyboard"
+"$hosttouch" -d 1980-01-01 "$ucd/keyboard"
 # the tree's 9front root in a mount namespace of the build's own: with bwrap
 # a root of its own (the host's directories, the tree's /sys and every
 # /$objtype it has: libmach includes /arm/include/ureg.h ...), no root
@@ -251,9 +260,9 @@ unshare)
 	exit 2
 	;;
 esac
-"${wrap[@]}" bash -s "$tree" "$bin" "$PLAN9" "$ucd" $dirs <<'X'
+"${wrap[@]}" bash -s "$tree" "$bin" "$PLAN9" "$ucd" "$hosttouch" $dirs <<'X'
 set -e
-tree=$1 bin=$2 P9=$3 ucd=$4; shift 4
+tree=$1 bin=$2 P9=$3 ucd=$4 hosttouch=$5; shift 5
 if [ ! -d /sys/src ]; then	# unshare: the mounts here
 	/usr/bin/mount --bind "$tree/sys" /sys
 	/usr/bin/mount --bind "$tree/wasm32" /wasm32
@@ -262,16 +271,16 @@ if [ ! -d /sys/src ]; then	# unshare: the mounts here
 fi
 k=/sys/src/cmd/aux/kbdfs
 if [ -e $k/latin1.h ]; then
-	: >$k/mklatin.amd64; touch -d '+1 min' $k/latin1.h
+	: >$k/mklatin.amd64; "$hosttouch" -d '+1 min' $k/latin1.h
 fi
 # awk's proctab.c (made by maketab, a program for the host) and awkgram.c, y.tab.h (yacc's): they
 # come made too; a stand-in maketab newer than its inputs, the made files newer than both
 a=/sys/src/cmd/awk
 if [ -e $a/proctab.c ]; then
-	touch -d '-3 min' $a/awkgram.y $a/maketab.c
-	touch -d '-2 min' $a/y.tab.h $a/awkgram.c
-	: >$a/amd64.maketab; touch -d '-1 min' $a/amd64.maketab
-	touch $a/proctab.c
+	"$hosttouch" -d '-3 min' $a/awkgram.y $a/maketab.c
+	"$hosttouch" -d '-2 min' $a/y.tab.h $a/awkgram.c
+	: >$a/amd64.maketab; "$hosttouch" -d '-1 min' $a/amd64.maketab
+	"$hosttouch" $a/proctab.c
 fi
 export CPP=$bin/cpp PATH=$bin:$P9/bin:$PATH PLAN9=$P9 objtype=wasm32 cputype=amd64 FORCERCFORMK=1	# FORCERCFORMK: plan9port's mk runs recipes in rc, as 9front's mkfiles are written
 for d in "$@"; do
