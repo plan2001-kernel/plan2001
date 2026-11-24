@@ -74,6 +74,20 @@
 #define	PHYSBASE	0ULL
 #endif
 
+/*
+ * INITMAP: alkukartan osa, jota ../arm64/mmu.c:n kmapram() ei kartoita
+ * uudelleen.  Stock-ydin purkaa julkaisun tapaan KZERO-ikkunan ytimen
+ * 512 MiB:n lohkon yläpuolelta (Pi3:n oheislaitteet 0x3F000000 ovat
+ * ikkunassa, eivät saa jäädä välimuistilliseksi muistiksi) ja kartoittaa
+ * RAM:n uudelleen (mem.c).  UEFI-ydin pitää koko 1 GiB:n ikkunan: loaderin
+ * efibootmap=0,0x40000000, ja BCM2711:n oheislaitteet ovat sen yläpuolella.
+ */
+#ifdef UEFI
+#define	INITMAP		((uintptr)-KZERO)
+#else
+#define	INITMAP		(ROUND((uintptr)end + BY2PG, PGLSZ(1))-KZERO)
+#endif
+
 #define SPINTABLE	(KZERO+PHYSBASE+0xd8)
 #define CONFADDR	(KZERO+PHYSBASE+0x100)
 #define	REBOOTADDR	(PHYSBASE+0x1c00)	/* reboot code - physical address */

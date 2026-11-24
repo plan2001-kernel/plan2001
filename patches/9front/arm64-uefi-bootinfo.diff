@@ -281,17 +281,17 @@
 +enum { BootClassRAM, BootClassACPI, BootClassReserved };
 --- a/sys/src/9/arm64/l.s
 +++ b/sys/src/9/arm64/l.s
-@@ -48,6 +48,10 @@
- 	MOV	ZR, (R1)8!
+@@ -49,6 +49,10 @@
  	CMP	R1, R2
  	BNE	_zerobss
-+
+ 
 +	/* X0 is the shared BootInfo physical pointer; BSS is now clear. */
 +	MOV	$bootinfopa-KZERO(SB), R1
 +	MOV	R26, (R1)
- 
++
  	/* setup page tables */
  	MOV	$(L1BOT-KZERO), R0
+ 	BL	mmuidmap(SB)
 --- a/sys/src/9/arm64/main.c
 +++ b/sys/src/9/arm64/main.c
 @@ -173,7 +173,9 @@
@@ -336,10 +336,7 @@
  {
 -	char *p;
 -	uintptr l = GiB + 128 * MiB;
-+	BootMem *bm;
-+	uintptr b, e, size;
-+	int i;
- 
+-
 -	if(p = getconf("*maxmem"))
 -		l = strtoull(p, 0, 0);
 -	conf.mem[0].base = PGROUND((uintptr)end - KZERO);
@@ -350,6 +347,10 @@
 -	kmapram(conf.mem[0].base, l);
 -
 -	conf.mem[0].npage = (conf.mem[0].limit - conf.mem[0].base)/BY2PG;
++	BootMem *bm;
++	uintptr b, e, size;
++	int i;
++
 +	size = 0;
 +	for(i = 0; i < bootinfo->mmapcount; i++){
 +		bm = bootmem(i);
@@ -416,13 +417,19 @@
 +	$LD -o $target $prereq
 --- a/sys/src/9/arm64/mmu.c
 +++ b/sys/src/9/arm64/mmu.c
-@@ -4,7 +4,8 @@
+@@ -4,7 +4,14 @@
  #include "dat.h"
  #include "fns.h"
  
 -#define INITMAP	(ROUND((uintptr)end + BY2PG, PGLSZ(1))-KZERO)
-+/* QEMU virt: the initial direct map covers RAM below 2 GiB. */
++/*
++ * The part of the initial direct map that kmapram() leaves alone.  A
++ * board's mem.h may give it (bcm64); QEMU virt's initial direct map
++ * covers RAM below 2 GiB, the whole KZERO window.
++ */
++#ifndef INITMAP
 +#define INITMAP	((uintptr)-KZERO)
++#endif
  
  void
  mmu1init(void)

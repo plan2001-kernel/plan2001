@@ -50,10 +50,9 @@ def main():
     ap.add_argument('--archives', type=pathlib.Path)
     args = ap.parse_args()
     release = pathlib.Path(subprocess.check_output([str(ROOT / 'tools/release')], text=True).strip())
-    cmd_mk = ROOT / 'build/tree/sys/src/cmd/syscall/mkfile'
-    if not cmd_mk.exists():
-        subprocess.run([str(ROOT / 'tools/tree')], check=True)
-    recipe = cmd_mk.read_text()
+    # tämän puun kopio: tools/tree varmistaa, että se on patchattu julkaisun tiedosto
+    # (build/tree voi olla vanhentunut)
+    recipe = (ROOT / 'sys/src/cmd/syscall/mkfile').read_text()
     assert 'syscalls $objtype $SYSCALL defines' in recipe
     assert 'mktab.awk $SYSCALL' not in recipe
     print('PASS: cmd/syscall table uses the architecture-aware selector')

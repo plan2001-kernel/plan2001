@@ -4,13 +4,7 @@
 #include "dat.h"
 #include "fns.h"
 
-#define INITMAP	(ROUND((uintptr)end + BY2PG, PGLSZ(1))-KZERO)
-
-/*
- * Alkukartoitus, jonka ../arm64/mmu.c:n kmapram() olettaa olevan
- * voimassa (sen INITMAP): koko KZERO-ikkuna (1 GiB).  Sitä ei pureta.
- */
-#define KMAPINIT	((uintptr)-KZERO)
+/* INITMAP: mem.h (sama ../arm64/mmu.c:n kmapram():lle) */
 
 /*
  * Create initial identity map in top-level page table
@@ -125,10 +119,9 @@ meminit(void)
 	 * now we know the real memory regions, unmap
 	 * everything above INITMAP and map again with
 	 * the proper sizes.
-	 * (KMAPINIT: KZERO-ikkunan yläpuolelta; ikkunaa kmapram() ei toista.)
 	 */
 	coherence();
-	for(va = KMAPINIT+KZERO; va != 0; va += PGLSZ(1))
+	for(va = INITMAP+KZERO; va != 0; va += PGLSZ(1))
 		((uintptr*)L1)[PTL1X(va, 1)] = 0;
 	flushtlb();
 
