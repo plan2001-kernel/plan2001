@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""
+Raspberry Pi 4:n UEFI-käynnistysmedia (EDK2, pftf/RPi4) levykuvaksi
+tiedostoon: MBR + yksi FAT32-osio (ESP), jossa pinnattu RPi4 UEFI
+-laiteohjelmisto ja valinnaisesti Plan2001:n EFI-loader
+(EFI/BOOT/BOOTAA64.EFI).  Vain mtools; ei root-oikeuksia, ei loop-
+laitteita, ei kirjoitusta oikealle levylle.
+
+    tools/rpi4/uefi-esp [--zip ZIP] [--loader BOOTAA64.EFI] [--out KUVA]
+
+Laiteohjelmisto: RPi4_UEFI_Firmware_v1.53.zip (pftf/RPi4, SHA256 alla).
+Ilman --zip sitä haetaan välimuistista ~/.cache/plan2001/rpi4-uefi; jos se
+puuttuu, se ladataan tästä nimenomaisesta versiosta ja tarkistetaan.
+Väärä tarkistussumma keskeyttää.
+
+Tämä on Pi4:n UEFI/EDK2-vaihe (b), ei Plan2001:n BootInfo-käynnistys:
+stock bcm64-ydin (9pi4) ei toimi EDK2:n alla sellaisenaan (docs/rpi4.md).
+"""
+
+import argparse
+import hashlib
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import urllib.request
+import zipfile
+
+VERSIO = "v1.53"
+ZIP = "RPi4_UEFI_Firmware_%s.zip" % VERSIO
+URL = "https://github.com/pftf/RPi4/releases/download/%s/%s" % (VERSIO, ZIP)
+SHA256 = "ca9973e2a7a546b3df871cfb7382e656829114b6dfa424f40dc67cc90a217d88"
+
+KOKO_MT = 64          # koko kuva
+OSIO_ALKU = 2048      # sektori (1 MiB)
+
+
+class Virhe(Exception):
+    pass
+
+
+def valimuisti():
+    return os.path.join(os.environ.get("PLAN2001_CACHE", os.path.expanduser("~/.cache/plan2001")), "rpi4-uefi")
+
+
+def sha256(polku):
+    h = hashlib.sha256()
+    with open(polku, "rb") as f:
+        for lohko in iter(lambda: f.read(1 << 20), b""):
+            h.update(lohko)
+    return h.hexdigest()
+
+
+def hae_zip(annettu):
+    polku = annettu or os.path.join(valimuisti(), ZIP)
+    if not os.path.exists(polku):
+        if annettu:
+            raise Virhe("%s puuttuu" % polku)
+        os.makedirs(os.path.dirname(polku), exist_ok=True)
+        print("uefi-esp: haetaan %s" % URL, file=sys.stderr)
+        with urllib.request.urlopen(URL, timeout=60) as r, open(polku + ".part", "wb") as f:
+            shutil.copyfileobj(r, f)
+        os.rename(polku + ".part", polku)
+    if sha256(polku) != SHA256:
+        raise Virhe("%s: SHA256 ei ole pinnatun %s:n (%s)" % (polku, VERSIO, SHA256))
+    return polku
+
+
+def mbr(osio_alku, osio_koko):
+    """Yksi aktiivinen FAT32 LBA (0x0c) -osio; CHS-kentät LBA-tilassa."""
+    m = bytearray(512)
+    m[446:462] = struct.pack("<B3sB3sII", 0x80, b"\xfe\xff\xff", 0x0C, b"\xfe\xff\xff",
+                             osio_alku, osio_koko)
+    m[440:444] = os.urandom(4)          # levyn tunniste
+    m[510:512] = b"\x55\xaa"
+    return bytes(m)
+
+
+def mtools(*k):
+    ymp = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    subprocess.check_call(list(k), env=ymp)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--zip")
+    ap.add_argument("--loader", help="Plan2001:n bootaa64.efi (Codex #12:n käännös)")
+    ap.add_argument("--out", default=os.path.join(valimuisti(), "plan2001-rpi4-uefi.img"))
+    a = ap.parse_args()
+
+    if os.path.realpath(a.out).startswith("/dev/"):
+        raise Virhe("tulos on laite (%s): kirjoitetaan vain tiedostoon" % a.out)
+    for t in ("mformat", "mcopy", "mmd"):
+        if not shutil.which(t):
+            raise Virhe("%s puuttuu (mtools)" % t)
+    if a.loader and not os.path.isfile(a.loader):
+        raise Virhe("%s puuttuu" % a.loader)
+    lahde = hae_zip(a.zip)
+
+    sektorit = KOKO_MT << 11
+    osio = sektorit - OSIO_ALKU
+    with tempfile.TemporaryDirectory(prefix="p2uefi-") as tyo:
+        with zipfile.ZipFile(lahde) as z:
+            for n in z.namelist():
+                if os.path.isabs(n) or ".." in n.split("/"):
+                    raise Virhe("%s: kelvoton polku %r" % (lahde, n))
+            z.extractall(os.path.join(tyo, "fw"))
+        os.unlink(os.path.join(tyo, "fw", "Readme.md"))
+        osa = a.out + ".part"
+        with open(osa, "wb") as f:
+            f.write(mbr(OSIO_ALKU, osio))
+            f.truncate(sektorit * 512)
+        kohde = "%s@@%d" % (osa, OSIO_ALKU * 512)
+        mtools("mformat", "-i", kohde, "-F", "-T", str(osio), "-v", "RPI4UEFI", "::")
+        fw = os.path.join(tyo, "fw")
+        mtools("mcopy", "-i", kohde, "-s", "-Q", *[os.path.join(fw, n) for n in sorted(os.listdir(fw))], "::")
+        if a.loader:
+            mtools("mmd", "-i", kohde, "::/EFI", "::/EFI/BOOT")
+            mtools("mcopy", "-i", kohde, a.loader, "::/EFI/BOOT/BOOTAA64.EFI")
+        os.rename(osa, a.out)
+    print("uefi-esp: %s (RPi4 UEFI %s%s)" % (a.out, VERSIO, ", BOOTAA64.EFI" if a.loader else ""))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (Virhe, subprocess.CalledProcessError, OSError) as e:
+        print("uefi-esp: %s" % e, file=sys.stderr)
+        sys.exit(1)

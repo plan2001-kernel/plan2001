@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""
+Raspberry Pi -savutesti QEMU:ssa (BCM-emulaatio, ei oikea Pi4 eikä
+generinen -M virt), tools/rpi4/build:n tuloksilla, sarjakonsolin kautta.
+Konsoli on mini-UART (QEMU:n toinen sarjaportti), kuten config.txt:n
+enable_uart=1 ja console=0 oikeassa Pi:ssä.
+
+    tools/rpi4/boottest [--dir HAK] [--machine raspi4b|raspi3b|both]
+
+raspi4b (9pi4): QEMU lataa ytimen kuten Pi-firmware (fyysinen 0x80000,
+X0 = DTB).  Vaihe: ydin käynnistyy ja tulostaa muistikartan ja bannerin.
+QEMU:n raspi4b antaa CBAR_EL1:ksi oheislaitealueen alun (0xfe000000),
+josta bcm64/gic.c laskee GIC:n osoitteen; oikeassa BCM2711:ssä GIC on
+ARM-local-alueella.  Siksi 9pi4 pysähtyy QEMU:ssa bannerin jälkeen
+(ulkoinen väylävirhe ennen keskeytysvektoreita), eikä tämä testi voi
+mennä raspi4b:ssä pidemmälle.  Ei PCIe:tä (USB) eikä GENETiä.
+
+raspi3b (9pi3 samalta levykuvalta): sama bcm64-portti ja sama arm64-
+userland, juuri SD-kortin hjfs:ltä, init, rc, 7c/7l ja oma ohjelma.
+Tämä testaa käännetyn userlandin, ei Pi4:ää.
+
+Levykuvasta tehdään kertakäyttöinen kopio; alkuperäistä ei muuteta.
+Pi-firmwaren start*.elf-vaihetta ja config.txt:tä QEMU ei aja.
+"""
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+sys.dont_write_bytecode = True
+TAMA = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(TAMA), "native-amd64"))
+import vm9  # noqa: E402
+
+
+class Pi(vm9.Kone):
+    """vm9.Kone, mutta qemu-system-aarch64 -M raspi*; konsoli mini-UART."""
+
+    def __init__(self, kone, ydin, dtb, sd, loki, cmdline):
+        super().__init__([], None, loki)
+        self.kone = kone
+        self.ydin = ydin
+        self.dtb = dtb
+        self.sd = sd
+        self.cmdline = cmdline
+
+    def komento(self):
+        k = [os.environ.get("QEMU_AARCH64", "qemu-system-aarch64"),
+             "-M", self.kone, "-kernel", self.ydin, "-append", self.cmdline,
+             "-serial", "null", "-serial", "stdio",
+             "-monitor", "none", "-display", "none", "-no-reboot"]
+        if self.kone == "raspi4b":
+            k += ["-m", "2G"]
+        if self.dtb:
+            k += ["-dtb", self.dtb]
+        if self.sd:
+            k += ["-drive", "file=%s,if=sd,format=raw" % self.sd]
+        return k
+
+    def sammuta(self, aikaraja=30):
+        if self.proc is not None and self.proc.poll() is None:
+            try:
+                self.laheta("fshalt\n")
+                self.odota(r"done halting|halted|cpu0: exiting", aikaraja)
+            except vm9.VirheVM:
+                pass
+        self.tapa()
+
+
+def raspi4b(hak, dtb, tulos):
+    loki = os.path.join(hak, "boottest-raspi4b.log")
+    if os.path.exists(loki):
+        os.unlink(loki)
+    vm = Pi("raspi4b", os.path.join(hak, "9pi4"), dtb, None, loki, "console=0")
+    vm.kaynnista()
+    try:
+        vm.odota(r"bytes free", 60)
+        vm.odota(r"Plan 9", 30)
+        tulos["raspi4b 9pi4: ydin, muistikartta ja banneri"] = "PASS"
+        try:
+            vm.odota(r"cpu0: ", 30)
+            tulos["raspi4b 9pi4: cpu0 ja jatko"] = "PASS (odottamaton: tarkista loki)"
+        except vm9.VirheVM:
+            tulos["raspi4b 9pi4: cpu0 ja jatko"] = "NOT REACHED (QEMU raspi4b: CBAR_EL1/GIC)"
+    finally:
+        vm.tapa()
+
+
+def raspi3b(hak, tyo, aikaraja, tulos):
+    loki = os.path.join(hak, "boottest-raspi3b.log")
+    if os.path.exists(loki):
+        os.unlink(loki)
+    sd = os.path.join(tyo, "sd.img")
+    shutil.copyfile(os.path.join(hak, "plan2001-rpi4.img"), sd)
+    vm = Pi("raspi3b", os.path.join(hak, "9pi3"), None, sd, loki, "console=0")
+    vm.kaynnista()
+    try:
+        vm.odota(r"Plan 9", 60)
+        vm.odota(r"bootfs: ", 60)
+        tulos["raspi3b 9pi3: ydin ja bootfs"] = "PASS"
+        mallit = [r"bootargs is \([^)]*\) *\[[^\]]*\]:? *$",   # 0
+                  r"user *\[[^\]]*\]:? *$",                     # 1
+                  r"(term|cpu)% $",                             # 2
+                  r"panic: ",                                   # 3
+                  r"mouseport is \([^)]*\) *\[[^\]]*\]:? *$",   # 4
+                  r"vgasize \[[^\]]*\]:? *$",                    # 5
+                  r"monitor is \([^)]*\) *\[[^\]]*\]:? *$"]     # 6
+        loppu = time.time() + aikaraja
+        while True:
+            i, m = vm.odota_jokin(mallit, max(1, loppu - time.time()))
+            if i == 0:
+                # oletus on kuvan oma juuri: SD-kortin plan9-osion hjfs
+                if b"local!/dev/sd" not in m.group(0):
+                    raise vm9.VirheVM("bootargs-oletus ei ole SD-kortti: %r" % m.group(0))
+                # mini-UART-konsolin rivinvaihto on CR
+                vm.laheta("\r")
+                tulos["raspi3b: juuri SD-kortilta (hjfs)"] = "PASS"
+            elif i == 1:
+                vm.laheta("glenda\r")
+            elif i == 2:
+                break
+            elif i == 3:
+                vm.odota(r"\n", 5)
+                raise vm9.VirheVM("ydin panikoi:\n" + vm.kaikki[-3000:].decode("latin-1"))
+            elif i == 5:
+                vm.laheta("text\r")
+            else:
+                vm.laheta("\r")
+        tulos["raspi3b: init ja rc"] = "PASS"
+        out, _ = vm.aja("echo $cputype $objtype; cat /dev/user; echo; ls '#S'; "
+                        "file /bin/rc /bin/7c; ls /arm64/bin | wc -l", 120)
+        if "arm64" not in out:
+            raise vm9.VirheVM("cputype ei ole arm64:\n" + out)
+        vm.aja("cd /tmp && echo '#include <u.h>' >t.c && echo '#include <libc.h>' >>t.c && "
+               "echo 'void main(void){print(\"P2OK %d\\n\", 6*7); exits(nil);}' >>t.c && "
+               "7c t.c && 7l -o t t.7 && ./t", 600)
+        if b"P2OK 42" not in vm.kaikki:
+            raise vm9.VirheVM("käännetty arm64-ohjelma ei tulostanut")
+        tulos["raspi3b: arm64-userland (rc, 7c, 7l, oma ohjelma)"] = "PASS"
+        print(out)
+    finally:
+        vm.sammuta()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dir", default=os.environ.get("PLAN2001_RPI4_OUT",
+                                                    os.path.join(vm9.valimuisti(), "rpi4")))
+    ap.add_argument("--dtb", help="oletus: julkaisun /sys/src/boot/bcm/bcm2711-rpi-4-b.dtb")
+    ap.add_argument("--machine", choices=("raspi4b", "raspi3b", "both"), default="both")
+    ap.add_argument("--timeout", type=int, default=900, help="raspi3b: bootrc ja SDIO-luotaus ovat hitaita")
+    a = ap.parse_args()
+
+    dtb = a.dtb or os.path.join(vm9.JUURI, "build", "release", "sys", "src", "boot", "bcm", "bcm2711-rpi-4-b.dtb")
+    if not os.path.exists(dtb):
+        subprocess.check_call([os.path.join(vm9.JUURI, "tools", "release")], stdout=subprocess.DEVNULL)
+    for t in ("9pi4", "9pi3", "plan2001-rpi4.img"):
+        if not os.path.exists(os.path.join(a.dir, t)):
+            raise vm9.VirheVM("%s puuttuu (tools/rpi4/build)" % os.path.join(a.dir, t))
+    tulos = {}
+    try:
+        if a.machine in ("raspi4b", "both"):
+            raspi4b(a.dir, dtb, tulos)
+        if a.machine in ("raspi3b", "both"):
+            with tempfile.TemporaryDirectory(prefix="p2pit-", dir=a.dir) as tyo:
+                raspi3b(a.dir, tyo, a.timeout, tulos)
+    finally:
+        for k, v in tulos.items():
+            print("%-52s %s" % (k, v))
+    return tulos
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except vm9.VirheVM as e:
+        print("boottest: FAIL: %s" % e, file=sys.stderr)
+        sys.exit(1)

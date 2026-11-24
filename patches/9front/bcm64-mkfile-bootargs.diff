@@ -1,0 +1,14 @@
+--- a/sys/src/9/bcm64/mkfile
++++ b/sys/src/9/bcm64/mkfile
+@@ -102,6 +102,11 @@
+ ^($REPCC)\.$O:R:	'../bcm/\1.c'
+ 	$CC $CFLAGS -I. -. ../bcm/$stem1.c
+ 
++# ../port/bootargs.c (BootInfo) and ../bcm/bootargs.c make the same
++# object by two metarules; this kernel's boot arguments are bcm's (DTB).
++bootargs.$O:	../bcm/bootargs.c
++	$CC $CFLAGS -I. -. ../bcm/bootargs.c
++
+ <../boot/bootmkfile
+ <../port/portmkfile
+ <|../port/mkbootrules $CONF

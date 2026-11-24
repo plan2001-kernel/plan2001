@@ -74,3 +74,10 @@ arp-first-request.diff
 spawn-wasm32.diff
 		The rc spawn fast path is enabled only for objtype=wasm32. Native
 		rc continues to fork/exec and links against stock 9front libc.
+
+bcm64-mkfile-bootargs.diff
+		9/bcm64/mkfile: an explicit rule for bootargs.$O from
+		../bcm/bootargs.c.  With ../port/bootargs.c (the shared
+		BootInfo arguments) mk finds two metarules for it and
+		stops; the Raspberry Pi kernels keep bcm's, which reads
+		the firmware's DTB.
