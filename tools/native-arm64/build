@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+"""Build frozen 9front ARM64 in a disposable native 9front build VM.
+
+    tools/native-arm64/build [--out build/native-arm64] [--buildvm PATH]
+
+Requires the verified 11952 ISO and the same build VM as native-amd64/build.
+The host only prepares disks; target code is compiled by 9front 7c/7a/7l.
+"""
+import argparse
+import pathlib
+import sys
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / 'tools/native-amd64'))
+import vm9
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--out', default=str(ROOT / 'build/native-arm64'))
+    ap.add_argument('--buildvm')
+    ap.add_argument('--iso')
+    a = ap.parse_args()
+    out = pathlib.Path(a.out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    (out / 'build.log').unlink(missing_ok=True)
+    iso = vm9.etsi_iso(a.iso)
+    base = vm9.etsi_buildvm(a.buildvm)
+    members = [('build.rc', str(ROOT / 'tools/native-arm64/build.rc'))]
+    for p in ['sys/include/bootinfo.h', 'sys/src/9/arm64',
+              'sys/src/9/port', 'sys/src/boot/efi', 'sys/src/cmd/rc',
+              'sys/src/cmd/hjfs']:
+        members.append(('ov/' + p, str(ROOT / p)))
+    with tempfile.TemporaryDirectory(prefix='p2arm64-') as td:
+        disk = vm9.overlay_kone(base, td, 'build.qcow2')
+        src = vm9.tar_levylle(td + '/in.img', members)
+        dst = vm9.tyhja_levy(td + '/out.img', 256 << 20)
+        vm = vm9.Kone([(disk, 'qcow2', False, 'hd'),
+                       (iso, 'raw', True, 'cd'), (src, 'raw', False, 'hd'),
+                       (dst, 'raw', False, 'hd')], vm9.Ovmf.etsi(),
+                      str(out / 'build.log'), muisti='2048', cpu='2')
+        vm.kaynnista()
+        try:
+            vm9.kaynnista_9front(vm, 300)
+            vm.aja('mkdir -p /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data', 120)
+            vm.aja('rc /tmp/p2/build.rc', 7200)
+        finally:
+            vm.sammuta()
+        files = vm9.tar_levylta(dst, str(out))
+    for name in ['9qemu', 'bootaa64.efi']:
+        if name not in files:
+            raise vm9.VirheVM('missing ' + name + '; see ' + str(out / 'build.log'))
+    magic, entry = vm9.aout_entry(str(out / '9qemu'))
+    if magic != 0x8c47 or entry != 0xffffffffc0100000:
+        raise vm9.VirheVM('unexpected ARM64 a.out header: %#x, %#x' % (magic, entry))
+    print('PASS: 9qemu and bootaa64.efi built with 9front toolchain')
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except vm9.VirheVM as e:
+        sys.exit(str(e))

@@ -1,0 +1,14 @@
+#!/bin/rc
+# Serial live environment for QEMU virt. The root is the embedded paqfs.
+bind -a '#p' /proc
+bind -a '#S' /dev
+bind -a '#t' /dev
+bind -a '#l0' /net
+bind -a '#I' /net
+aux/kbdfs -q -s cons /dev/eia0
+home=/
+user=none
+sysname=plan2001-arm64
+path=(/arm64/bin /rc/bin)
+echo 'BootInfo v1: ARM64 UEFI live root'
+exec /arm64/init -c -m </dev/cons >/dev/cons >[2=1]

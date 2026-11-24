@@ -3,14 +3,8 @@
 #include "efi.h"
 #include "mem.h"
 
-/*
- * The ARM64 side of the loader, for bootaa64.efi (see archx64.c for the
- * AMD64 one and fns.h for the calls).  The experimental Plan2001-O ARM64
- * boot kernel is a freestanding ELF linked at KZERO 0xffffffff80000000
- * plus its physical address, loaded at 0x40100000 in QEMU virt's RAM.
- * Its entry builds a 2 GiB identity/high map, so the BootInfo blob must
- * also stay inside that window.  Plan2001 Boot ABI v1, ARM64 entry:
- * X0 = BootInfo physical address, X1 = 0.
+/* 9front-11952 ARM64 QEMU virt: KZERO + physical address, X0=BootInfo.
+ * The kernel handles EL1/EL2 entry and builds its own translation tables.
  */
 
 void jump(void *pc, void *bootinfo);
@@ -54,7 +48,7 @@ archdataround(void)
 int
 archblobok(uvlong pa, uvlong len)
 {
-	return pa >= KernelLow && pa + len <= KernelMap;
+	return pa >= KernelLow && pa < KernelMap && len <= KernelMap - pa;
 }
 
 /* ELF-ytimen e_machine (sub.c bootelf()): EM_AARCH64 */
@@ -80,7 +74,7 @@ archentryok(uvlong entry)
  * The loader wrote the image through the firmware's caches.  Clean each
  * loaded range to the point of coherency before the kernel entry turns the
  * MMU and caches off; archcachesync() then makes the instructions visible.
- * aa64gcc.S implements both.
+ * aa64.s implements both.
  */
 void
 archcacheclean(uvlong pa, uvlong len)
@@ -106,9 +100,9 @@ archcheck(void)
 }
 
 /*
- * Enter the kernel: X0 = BootInfo physical address (aa64gcc.S).  jump()
- * turns the MMU and caches off and drops to EL1; the kernel entry then
- * invalidates its .bss before enabling the data cache.
+ * Enter the kernel: X0 = BootInfo physical address (aa64.s).  jump()
+ * cleans firmware cache writes. The frozen kernel entry handles EL1/EL2,
+ * disables the MMU, clears BSS and installs its own mappings.
  */
 void
 archjump(void *entry, void *bootinfo)

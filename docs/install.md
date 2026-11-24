@@ -142,3 +142,38 @@ branch, at origin, the work tree clean) and a small build with the
 machine's own tools - echo and hoc from `/sys/src/cmd` (mk, 3c, 3l,
 yacc), installed and run.  The whole system's build (`cd /sys/src; mk
 install`) is people's to run.
+
+## ARM64 QEMU virt live image
+
+The serial live image uses the frozen release's `sys/src/9/arm64` QEMU
+board and native `7c`, `7a`, `7l`, `mk`, and `aux/aout2efi`. Linux needs
+QEMU for AMD64 (the cross-build VM) and AArch64 (the target), OVMF,
+AAVMF/EDK2 and mtools. The verified 11952 AMD64 ISO supplies sources and
+cross-compilers; `PLAN2001_BUILDVM` selects the same native build VM used
+by `tools/native-amd64/build` (default `~/.cache/plan2001/base.qcow2`).
+
+    tools/native-arm64/build
+    tools/native-arm64/mkimage
+    tools/native-arm64/boottest
+
+Artifacts and serial captures stay under `build/native-arm64`. `mkimage`
+creates a new 128 MiB FAT image containing `EFI/BOOT/BOOTAA64.EFI`,
+`9qemu` and `plan9.ini`; it refuses to overwrite an existing path. Use
+`--build` and `--image` to select another artifact directory or image.
+`build` accepts `--out`, `--iso` and `--buildvm`.
+
+The target command uses `virt,gic-version=3,highmem=off`, a Cortex-A72,
+one CPU and 1024 MiB RAM. These settings match the pinned board's GICv3,
+PCI ECAM and MMIO addresses. The virtio PCI devices use
+`disable-legacy=on`, matching the board's virtio 1.0 drivers. `AAVMF_CODE` and `AAVMF_VARS` override the
+firmware paths. The firmware variables and test disk are disposable; the
+boot image is attached read-only. The firmware loads the existing EFI
+loader, which passes the shared BootInfo v1 physical pointer in X0.
+
+The embedded paqfs live root contains 9front init, rc and basic commands;
+`ramfs` supplies writable temporary files and `hjfs` can use a disposable
+virtio disk. The boot volume is not an installed writable root. The
+initial direct map covers QEMU RAM below physical `0x80000000`; memory
+allocation uses its largest conventional UEFI RAM bank, retaining all
+firmware and loader allocations. Other boards, additional CPUs, larger
+RAM configurations and graphical consoles require separate validation.

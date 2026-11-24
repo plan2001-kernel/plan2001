@@ -1,0 +1,58 @@
+#!/bin/rc
+# Cross-build frozen 9front ARM64 with its native 7c/7a/7l in the build VM.
+rfork ne
+p2=/tmp/p2
+fn die { echo 'arm64 build: '^$"* >[1=2]; exit $"* }
+9660srv >[2]/dev/null
+mount /srv/9660 /n/dist /dev/sdE1/data || die ISO
+bind -b /n/dist/amd64/bin /bin
+bind /n/dist/amd64 /amd64
+bind /n/dist/lib /lib
+bind /n/dist/adm/timezone /adm/timezone
+mkdir -p $p2/src $p2/arm64
+# All target libraries and programs are built from the verified release.
+dircp /n/dist/sys/src $p2/src || die sources
+dircp $p2/ov/sys/src $p2/src || die overlay
+bind $p2/src /sys/src
+bind /n/dist/rc /rc
+bind /n/dist/sys/include /sys/include
+bind -b $p2/ov/sys/include /sys/include
+cp /n/dist/arm64/mkfile $p2/arm64/mkfile
+mkdir -p $p2/arm64/include
+dircp /n/dist/arm64/include $p2/arm64/include || die headers
+mkdir -p $p2/arm64/lib $p2/arm64/bin
+bind -c $p2/arm64 /arm64
+objtype=arm64
+for(lib in libc libbio libmp libsec libip libdraw libmemdraw libmemlayer libflate lib9p libauthsrv libauth libndb libString libavl libdisk libgeometry libthread libregexp){
+ cd /sys/src/$lib || die $lib
+ mk install >[2=1] || die $lib
+}
+mkdir -p /arm64/bin/auth /arm64/bin/ip /arm64/bin/aux
+cd /sys/src/cmd
+for(cmd in cat echo ls bind mount unmount mkdir rm test sleep dd ramfs init){
+ mk $cmd.install >[2=1] || die $cmd
+}
+cd /sys/src/cmd/auth/factotum
+mk /arm64/bin/auth/factotum >[2=1] || die factotum
+cd /sys/src/cmd/ip
+mk ping.install >[2=1] || die ping
+for(cmd in rc paqfs hjfs ip/ipconfig aux/kbdfs){
+ cd /sys/src/cmd/$cmd || die $cmd
+ mk install >[2=1] || die $cmd
+}
+cd /sys/src/boot/efi
+mk bootaa64.efi >[2=1] || die EFI
+cd /sys/src/9/arm64
+# The live image deliberately has a small, explicitly enumerated root.
+mk 'BOOTFSPROTOS=qemu.bootfs.proto' 9qemu >[2=1] || die kernel
+mkdir -p /n/checkarm
+/bin/paqfs -q -m /n/checkarm qemu.bootfs.paq || die checkpaq
+ls -l /n/checkarm/arm64/bin /n/checkarm/rc/bin
+
+mkdir -p $p2/out
+cp 9qemu $p2/out
+cp /sys/src/boot/efi/bootaa64.efi $p2/out
+cd $p2/out
+# The kernel embeds the cross-built live root.
+tar c 9qemu bootaa64.efi >/dev/sdE3/data || die output
+echo 'arm64 build: complete'

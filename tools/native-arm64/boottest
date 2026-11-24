@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Assert UEFI -> shared BootInfo -> 9front ARM64 init -> rc on QEMU virt.
+
+    tools/native-arm64/boottest [--build build/native-arm64] [--image PATH]
+
+Requires AAVMF, qemu-system-aarch64, and a FAT image from mkimage. All
+firmware variables and writable test disks are disposable. Captures serial
+output in build/native-arm64/boot.log. The live root is read-only paqfs.
+"""
+import argparse
+import os
+import pathlib
+import re
+import time
+import shutil
+import sys
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(ROOT / 'tools/native-amd64'))
+import vm9
+
+
+class ArmVM(vm9.Kone):
+    def komento(self):
+        variables = os.path.join(self.tyohak, 'vars.fd')
+        shutil.copyfile(self.ovmf.muuttujat, variables)
+        return ['qemu-system-aarch64', '-M', 'virt,gic-version=3,highmem=off',
+                '-accel', 'tcg', '-cpu', 'cortex-a72', '-m', '1024', '-smp', '1',
+                '-drive', 'if=pflash,format=raw,readonly=on,file=' + self.ovmf.koodi,
+                '-drive', 'if=pflash,format=raw,file=' + variables,
+                '-drive', 'if=none,format=raw,readonly=on,id=boot,file=' + self.levyt[0][0],
+                '-device', 'virtio-blk-pci,disable-legacy=on,drive=boot',
+                '-drive', 'if=none,format=raw,id=scratch,file=' + self.levyt[1][0],
+                '-device', 'virtio-blk-pci,disable-legacy=on,drive=scratch',
+                '-netdev', 'hubport,id=n0,hubid=0',
+                '-device', 'virtio-net-pci,disable-legacy=on,netdev=n0',
+                '-display', 'none', '-serial', 'stdio', '-monitor', os.environ.get('ARM64_MONITOR', 'none'), '-no-reboot'] + (['-d', 'int', '-D', os.environ['ARM64_TRACE']]
+                                  if 'ARM64_TRACE' in os.environ else [])
+
+    def aja(self, command, aikaraja=120, sallittu_virhe=False):
+        # Kernel messages can contain earlier console command markers. Parse
+        # this command's bounded capture, not the last marker in the whole log.
+        token = '%x' % time.monotonic_ns()
+        begin, end = 'P2A' + token, 'P2L' + token
+        offset = len(self.kaikki)
+        self.laheta("echo P2A^%s; { %s } </dev/null; echo P2L^%s^' '^$status^' 'P2Z\n"
+                    % (token, command, token))
+        self.odota(re.escape(begin) + r'\r?\n', aikaraja)
+        match = self.odota(re.escape(end) + r' ?(.*?) P2Z', aikaraja)
+        capture = self.kaikki[offset:]
+        first = re.search(re.escape(begin.encode()) + rb'\r?\n', capture).end()
+        last = re.search(re.escape(end.encode()) + rb' ?(.*?) P2Z', capture[first:]).start() + first
+        output = capture[first:last].decode('utf-8', errors='replace').replace('\r', '')
+        status = match.group(1).decode(errors='replace').strip()
+        if status and not sallittu_virhe:
+            raise vm9.VirheVM('command failed: ' + command + '\n' + output)
+        return output, status
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--build', type=pathlib.Path, default=ROOT / 'build/native-arm64')
+    ap.add_argument('--image', type=pathlib.Path)
+    a = ap.parse_args()
+    image = (a.image or a.build / 'arm64.img').resolve()
+    code = os.environ.get('AAVMF_CODE', '/usr/share/AAVMF/AAVMF_CODE.fd')
+    variables = os.environ.get('AAVMF_VARS', '/usr/share/AAVMF/AAVMF_VARS.fd')
+    for p in (image, code, variables):
+        if not pathlib.Path(p).is_file():
+            sys.exit('missing ' + str(p))
+    log = a.build / 'boot.log'
+    log.unlink(missing_ok=True)
+    with tempfile.TemporaryDirectory(prefix='p2armtest-') as td:
+        scratch = vm9.tyhja_levy(td + '/scratch.img', 32 << 20)
+        vm = ArmVM([(str(image), 'raw', True, 'hd'), (scratch, 'raw', False, 'hd')],
+                   vm9.Ovmf(code, variables), str(log))
+        vm.kaynnista()
+        try:
+            vm.odota(r'\[P2 L01\] Plan2001 loader', 120)
+            print('PASS: ARM64 UEFI loaded Plan2001 EFI loader', flush=True)
+            vm.odota(r'BootInfo v1: ARM64 UEFI live root', 180)
+            vm.odota(r'init: starting /bin/rc', 120)
+            print('PASS: shared BootInfo v1 -> ARM64 9front -> init -> rc', flush=True)
+            for command, expected in [
+                ("echo arm64-user-program; cat /env/cputype", 'arm64'),
+                ("cat '#c/kmesg'", 'Plan 9'),
+                ("cat '#¶/swap'", 'memory'),
+                ("ls '#S'", 'sdG0'),
+                ("cat '#S/sdctl'", 'virtio10'),
+                ("ls '#l0'", 'ether0'),
+                ("ls '#$/pci'", 'ctl'),
+                ("cat '#l0/ether0/stats'", 'in:'),
+                ("ramfs -p; echo arm64-fs-io >/tmp/check; cat /tmp/check", 'arm64-fs-io'),
+                ("ip/ipconfig loopback /dev/null 127.0.0.1; ip/ping -n 2 127.0.0.1", 'rtt'),
+                ("ip/ipconfig -6 loopback /dev/null ::1; ip/ping -6 -n 2 ::1", 'rtt'),
+                ("hjfs -r -S -n armtest -f /dev/sdG0/data; mkdir /tmp/disk; "
+                 "mount -c /srv/armtest /tmp/disk; echo arm64-disk-io >/tmp/disk/check; "
+                 "cat /tmp/disk/check", 'arm64-disk-io'),
+                ("unmount /tmp/disk; echo halt >>/srv/armtest.cmd; sleep 2; "
+                 "hjfs -S -n armagain -f /dev/sdG0/data; mount -c /srv/armagain /tmp/disk; "
+                 "cat /tmp/disk/check", 'arm64-disk-io'),
+            ]:
+                output, _ = vm.aja(command, 60)
+                if expected not in output:
+                    raise vm9.VirheVM('assertion failed: ' + command + '\n' + output)
+                print('PASS: ' + command, flush=True)
+        finally:
+            vm.tapa()
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except vm9.VirheVM as e:
+        sys.exit('FAIL: ' + str(e))
