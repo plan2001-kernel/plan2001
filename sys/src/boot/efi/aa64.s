@@ -1,6 +1,8 @@
 #define	SYSREG(op0,op1,Cn,Cm,op2)	SPR(((op0)<<19|(op1)<<16|(Cn)<<12|(Cm)<<8|(op2)<<5))
 #define	SCTLR_EL1			SYSREG(3,0,1,0,0)
 
+#define CTR_EL0 SYSREG(3,3,0,0,1)
+
 #define NSH	(1<<2 | 3)
 #define NSHST	(1<<2 | 2)
 #define	SY	(3<<2 | 3)
@@ -36,60 +38,55 @@ TEXT eficall(SB), 1, $-4
 	MOV	0x40(FP), R7
 	B	(R8)
 
-TEXT mmudisable<>(SB), 1, $-4
-#define SCTLRCLR \
-	/* RES0 */	( 3<<30 \
-	/* RES0 */	| 1<<27 \
-	/* UCI */	| 1<<26 \
-	/* EE */	| 1<<25 \
-	/* RES0 */	| 1<<21 \
-	/* E0E */	| 1<<24 \
-	/* WXN */	| 1<<19 \
-	/* nTWE */	| 1<<18 \
-	/* RES0 */	| 1<<17 \
-	/* nTWI */	| 1<<16 \
-	/* UCT */	| 1<<15 \
-	/* DZE */	| 1<<14 \
-	/* RES0 */	| 1<<13 \
-	/* RES0 */	| 1<<10 \
-	/* UMA */	| 1<<9 \
-	/* SA0 */	| 1<<4 \
-	/* SA */	| 1<<3 \
-	/* A */		| 1<<1 )
-#define SCTLRSET \
-	/* RES1 */	( 3<<28 \
-	/* RES1 */	| 3<<22 \
-	/* RES1 */	| 1<<20 \
-	/* RES1 */	| 1<<11 )
-#define SCTLRMMU \
-	/* I */		( 1<<12 \
-	/* C */		| 1<<2 \
-	/* M */		| 1<<0 )
-
-	/* initialise SCTLR, MMU and caches off */
-	ISB	$SY
-	MRS	SCTLR_EL1, R0
-	BIC	$(SCTLRCLR | SCTLRMMU), R0
-	ORR	$SCTLRSET, R0
-	ISB	$SY
-	MSR	R0, SCTLR_EL1
-	ISB	$SY
-
-	DSB	$NSHST
-	TLBI	R0, 0,8,7,0	/* VMALLE1 */
-	DSB	$NSH
-	ISB	$SY
-	RETURN
-
 /*
- * Enter the kernel: MMU and caches off (mmudisable), then Plan2001 Boot
+ * Enter the kernel after cleaning firmware cache writes, Plan2001 Boot
  * ABI v1, ARM64 entry (sys/include/bootinfo.h): X0 = BootInfo, X1 = 0.
  * jump(entry, bootinfo), called by archjump() in archaa64.c.
  */
 TEXT jump(SB), 1, $-4
+	MSR	$0xF, DAIFSet
 	MOV	R0, R3
 	MOV	0x08(FP), R4
-	BL	mmudisable<>(SB)
+	BL	cachehandoff<>(SB)
 	MOV	R4, R0
 	MOV	$0, R1
 	B	(R3)
+
+/* Clean QEMU L1/L2 data caches before the kernel disables its MMU.
+ * The frozen cache.v8.s supplies the set/way implementation. */
+TEXT cachehandoff<>(SB), 1, $-4
+	MOV	LR, R20
+	MOV	R3, R21
+	MOV	R4, R22
+	BL	cachedwbinv(SB)
+	BL	l2cacheuwbinv(SB)
+	BL	cachesync(SB)
+	MOV	R21, R3
+	MOV	R22, R4
+	RET	R20
+
+/* Clean an image range to PoC; CTR_EL0 gives the minimum D-cache line. */
+TEXT cacheclean(SB), 1, $-4
+	MOV	8(FP), R1
+	ADD	R0, R1
+	MRS	CTR_EL0, R2
+	LSR	$16, R2
+	AND	$15, R2
+	MOV	$4, R5
+	LSL	R2, R5
+	SUB	$1, R5, R6
+	BIC	R6, R0
+_clean:
+	DC	R0, 3,7,10,1
+	ADD	R5, R0
+	CMP	R1, R0
+	BLT	_clean
+	DSB	$SY
+	RETURN
+
+TEXT cachesync(SB), 1, $-4
+	DSB	$SY
+	IC	R0, 0,7,5,0
+	DSB	$SY
+	ISB	$SY
+	RETURN

@@ -1,0 +1,39 @@
+arm64
+ init 775 sys sys /arm64/init
+ bin
+  rc
+  cat
+  echo
+  ls
+  bind
+  mount
+  unmount
+  mkdir
+  rm
+  test
+  sleep
+  dd
+  ramfs
+  hjfs
+  aux
+   kbdfs
+  ip
+   ipconfig
+   ping
+rc
+ lib
+  rcmain
+ bin
+  bootrc 555 sys sys qemu.bootrc
+adm
+ timezone
+  local 444 sys sys /adm/timezone/GMT
+usr
+tmp
+n
+net
+proc
+srv
+env
+dev
+mnt

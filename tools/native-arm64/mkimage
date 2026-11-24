@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+"""Create a disposable ARM64 UEFI FAT boot image; never opens host devices.
+
+    tools/native-arm64/mkimage [--build build/native-arm64] [--image PATH]
+"""
+import argparse
+import pathlib
+import subprocess
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--build', type=pathlib.Path, default=ROOT / 'build/native-arm64')
+    ap.add_argument('--image', type=pathlib.Path)
+    a = ap.parse_args()
+    image = a.image or a.build / 'arm64.img'
+    image.parent.mkdir(parents=True, exist_ok=True)
+    # Exclusive creation prevents truncating existing images or devices.
+    with image.open('xb') as f:
+        f.truncate(128 << 20)
+    subprocess.run(['mformat', '-i', str(image), '-F', '::'], check=True)
+    subprocess.run(['mmd', '-i', str(image), '::/efi', '::/efi/boot'], check=True)
+    for src, dst in [('bootaa64.efi', '::/efi/boot/bootaa64.efi'), ('9qemu', '::/9qemu')]:
+        subprocess.run(['mcopy', '-i', str(image), str(a.build / src), dst], check=True)
+    with tempfile.TemporaryDirectory() as td:
+        ini = pathlib.Path(td) / 'plan9.ini'
+        ini.write_text('bootfile=/9qemu\nconsole=0\n*ncpu=1\n')
+        subprocess.run(['mcopy', '-i', str(image), str(ini), '::/plan9.ini'], check=True)
+    print(image)
+
+
+if __name__ == '__main__':
+    main()
