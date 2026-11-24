@@ -1,0 +1,7 @@
+#!/bin/rc
+# Shared BootInfo configuration is opt-in, unlike ordinary port files.
+../port/mkfilelist ../port | awk -F'|' '{
+ s=""
+ for(i=1;i<=NF;i++) if($i!="bootargs") {printf "%s%s",s,$i; s="|"}
+ print ""
+}'

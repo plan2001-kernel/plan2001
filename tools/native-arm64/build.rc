@@ -9,24 +9,32 @@ bind -b /n/dist/amd64/bin /bin
 bind /n/dist/amd64 /amd64
 bind /n/dist/lib /lib
 bind /n/dist/adm/timezone /adm/timezone
-mkdir -p $p2/src $p2/arm64
-# All target libraries and programs are built from the verified release.
-dircp /n/dist/sys/src $p2/src || die sources
-dircp $p2/ov/sys/src $p2/src || die overlay
+# tools/tree already verified and assembled these writable sources/headers.
+mkdir -p $p2/arm64
 bind $p2/src /sys/src
 bind /n/dist/rc /rc
-bind /n/dist/sys/include /sys/include
-bind -b $p2/ov/sys/include /sys/include
+bind $p2/include /sys/include
 cp /n/dist/arm64/mkfile $p2/arm64/mkfile
 mkdir -p $p2/arm64/include
 dircp /n/dist/arm64/include $p2/arm64/include || die headers
-mkdir -p $p2/arm64/lib $p2/arm64/bin
+mkdir -p $p2/arm64/lib/ape $p2/arm64/bin
 bind -c $p2/arm64 /arm64
 objtype=arm64
+if(~ $1 loaderonly){
+ cd /sys/src/boot/efi
+ mk bootaa64.efi >[2=1] || die EFI
+ mkdir -p $p2/out
+ cp bootaa64.efi $p2/out
+ cd $p2/out
+ tar c bootaa64.efi >/dev/sdE3/data || die output
+ exit ''
+}
 for(lib in libc libbio libmp libsec libip libdraw libmemdraw libmemlayer libflate lib9p libauthsrv libauth libndb libString libavl libdisk libgeometry libthread libregexp){
  cd /sys/src/$lib || die $lib
  mk install >[2=1] || die $lib
 }
+cd /sys/src/ape
+mk lib.install >[2=1] || die APE
 mkdir -p /arm64/bin/auth /arm64/bin/ip /arm64/bin/aux
 cd /sys/src/cmd
 for(cmd in cat echo ls bind mount unmount mkdir rm test sleep dd ramfs init){
@@ -48,11 +56,16 @@ mk 'BOOTFSPROTOS=qemu.bootfs.proto' 9qemu >[2=1] || die kernel
 mkdir -p /n/checkarm
 /bin/paqfs -q -m /n/checkarm qemu.bootfs.paq || die checkpaq
 ls -l /n/checkarm/arm64/bin /n/checkarm/rc/bin
+bind /n/dist/arm /arm
+rc $p2/native-rules.rc || die native-rules
 
 mkdir -p $p2/out
 cp 9qemu $p2/out
 cp /sys/src/boot/efi/bootaa64.efi $p2/out
+nm /arm64/lib/libc.a /arm64/lib/ape/libap.a | grep -e ' [Tt] (spawn|_SPAWN)$' && die 'native spawn interface leaked'
+cp /arm64/lib/libc.a $p2/out/libc.a || die libc-output
+cp /arm64/lib/ape/libap.a $p2/out/libap.a || die ape-output
 cd $p2/out
 # The kernel embeds the cross-built live root.
-tar c 9qemu bootaa64.efi >/dev/sdE3/data || die output
+tar c 9qemu bootaa64.efi libc.a libap.a >/dev/sdE3/data || die output
 echo 'arm64 build: complete'

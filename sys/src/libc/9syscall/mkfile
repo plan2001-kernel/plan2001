@@ -2,7 +2,7 @@ NPROC=1
 </$objtype/mkfile
 
 install:V:
-	SYS=`{sed '/^#define._X[123]/d; s/#define.([A-Z0-9_]*).*/\1/' sys.h}
+	SYS=`{rc ./syscalls $objtype sys.h | awk '$1 !~ /^_X[123]$/ {print $1}'}
 	for(I in $SYS) {
 		i=`{echo $I|tr A-Z a-z}
 		n=`{sed -n '/[ 	]'$I'[ 	]/s/.*	//p' sys.h}
@@ -163,6 +163,12 @@ install:V:
 		}} > $i.s
 		$AS $i.s
 		}
+	}
+	# A native rebuild must not keep an old wasm-only member or object.
+	if(! ~ $objtype wasm32){
+		rm -f spawn.$O spawn.s
+		if(ar t /$objtype/lib/libc.a >[2]/dev/null | grep -s '^spawn\.'^$O^'$')
+			ar d /$objtype/lib/libc.a spawn.$O >[2]/dev/null
 	}
 	ar vu /$objtype/lib/libc.a *.$O
 	if(~ $objtype wasm32) rm -f *.c

@@ -2,6 +2,7 @@
  * wasm32 (3c): ILP32, little-endian; arguments in 4-byte slots in
  * memory as on the 386 (vlong and double take two)
  */
+#define __wasm32__	1
 #define nil		((void*)0)
 typedef	unsigned short	ushort;
 typedef	unsigned char	uchar;

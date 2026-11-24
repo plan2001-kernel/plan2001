@@ -755,7 +755,9 @@ extern	int	create(char*, int, ulong);
 extern	int	dup(int, int);
 extern	int	errstr(char*, uint);
 extern	int	exec(char*, char*[]);
+#ifdef __wasm32__
 extern	int	spawn(char*, char*[], int*, int, int);
+#endif
 extern	int	execl(char*, ...);
 extern	int	fork(void);
 extern	int	rfork(int);

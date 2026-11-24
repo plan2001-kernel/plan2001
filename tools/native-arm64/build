@@ -22,18 +22,17 @@ def main():
     ap.add_argument('--out', default=str(ROOT / 'build/native-arm64'))
     ap.add_argument('--buildvm')
     ap.add_argument('--iso')
+    ap.add_argument('--loader-only', action='store_true', help='build only bootaa64.efi')
     a = ap.parse_args()
     out = pathlib.Path(a.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
     (out / 'build.log').unlink(missing_ok=True)
     iso = vm9.etsi_iso(a.iso)
     base = vm9.etsi_buildvm(a.buildvm)
-    members = [('build.rc', str(ROOT / 'tools/native-arm64/build.rc'))]
-    for p in ['sys/include/bootinfo.h', 'sys/src/9/arm64',
-              'sys/src/9/port', 'sys/src/boot/efi', 'sys/src/cmd/rc',
-              'sys/src/cmd/hjfs']:
-        members.append(('ov/' + p, str(ROOT / p)))
     with tempfile.TemporaryDirectory(prefix='p2arm64-') as td:
+        members = [('build.rc', str(ROOT / 'tools/native-arm64/build.rc')),
+                   ('native-rules.rc', str(ROOT / 'tools/test/native-rules.rc'))]
+        members += vm9.source_jasenet(td)
         disk = vm9.overlay_kone(base, td, 'build.qcow2')
         src = vm9.tar_levylle(td + '/in.img', members)
         dst = vm9.tyhja_levy(td + '/out.img', 256 << 20)
@@ -45,13 +44,16 @@ def main():
         try:
             vm9.kaynnista_9front(vm, 300)
             vm.aja('mkdir -p /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data', 120)
-            vm.aja('rc /tmp/p2/build.rc', 7200)
+            vm.aja('rc /tmp/p2/build.rc' + (' loaderonly' if a.loader_only else ''), 7200)
         finally:
             vm.sammuta()
         files = vm9.tar_levylta(dst, str(out))
-    for name in ['9qemu', 'bootaa64.efi']:
+    for name in (['bootaa64.efi'] if a.loader_only else ['9qemu', 'bootaa64.efi']):
         if name not in files:
             raise vm9.VirheVM('missing ' + name + '; see ' + str(out / 'build.log'))
+    if a.loader_only:
+        print('PASS: bootaa64.efi built with 9front toolchain')
+        return
     magic, entry = vm9.aout_entry(str(out / '9qemu'))
     if magic != 0x8c47 or entry != 0xffffffffc0100000:
         raise vm9.VirheVM('unexpected ARM64 a.out header: %#x, %#x' % (magic, entry))

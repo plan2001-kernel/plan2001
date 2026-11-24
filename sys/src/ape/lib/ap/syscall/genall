@@ -6,7 +6,7 @@ rfork e
 # we're in /sys/src/ape/lib/ap/syscall.
 SYSH=../../../../libc/9syscall/sys.h	# /sys/src/libc/9syscall/sys.h
 
-SYS=`{sed '/^#define._/d; s/#define.([A-Z0-9_]*).*/\1/' $SYSH}
+SYS=`{rc ./../../../../libc/9syscall/syscalls $objtype $SYSH | awk '$1 !~ /^_/ {print $1}'}
 for(I in $SYS) {
 	i=_^$I
 	n=`{sed -n '/[ 	]'$I'[ 	]/s/.*	//p' $SYSH}
@@ -26,6 +26,11 @@ for(I in $SYS) {
 	}
 	if not
 		./gencall
+}
+if(! ~ $objtype wasm32){
+	rm -f _SPAWN.$O _SPAWN.s
+	if(ar t /$objtype/lib/ape/libap.a >[2]/dev/null | grep -s '^_SPAWN\.'^$O^'$')
+		ar d /$objtype/lib/ape/libap.a _SPAWN.$O >[2]/dev/null
 }
 ar vu /$objtype/lib/ape/libap.a *.$O
 if(~ $objtype wasm32) rm -f *.c

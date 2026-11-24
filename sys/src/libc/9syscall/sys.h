@@ -50,4 +50,6 @@
 #define	PWRITE		51
 #define	TSEMACQUIRE	52
 #define _NSEC		53
+#ifdef __wasm32__
 #define	SPAWN		54
+#endif

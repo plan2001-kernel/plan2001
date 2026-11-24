@@ -177,3 +177,43 @@ archjump(void *entry, void *bootinfo)
 {
 	jump64(entry, bootinfo);
 }
+
+/* AMD64 has a single, fixed platform contract: nothing to configure */
+char*
+archinit(void)
+{
+	return nil;
+}
+
+/* the firmware's DTB, if any, is forwarded as before */
+int
+archfdtallowed(void)
+{
+	return 1;
+}
+
+void
+archrelease(void)
+{
+}
+
+/* Preserve the existing AMD64 ELF contract and a.out path. */
+char*
+archimage(BootImage *im)
+{
+	BootSegment *s;
+	int i;
+
+	for(i = 0; i < im->nseg; i++){
+		s = &im->seg[i];
+		if(im->format == ImageElf &&
+		   (s->pa < 0x1c000 || s->va != s->pa + 0xffffffff80000000ULL))
+			return "ELF segment is not an AMD64 KZERO image";
+		s->allocsz = (s->memsz + 4095) & ~4095ULL;
+	}
+	if(im->format == ImageElf)
+		im->entrypa = im->entry - 0xffffffff80000000ULL;
+	else
+		im->entrypa = archentry(im->entry);
+	return nil;
+}

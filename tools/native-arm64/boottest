@@ -27,7 +27,7 @@ class ArmVM(vm9.Kone):
         variables = os.path.join(self.tyohak, 'vars.fd')
         shutil.copyfile(self.ovmf.muuttujat, variables)
         return ['qemu-system-aarch64', '-M', 'virt,gic-version=3,highmem=off',
-                '-accel', 'tcg', '-cpu', 'cortex-a72', '-m', '1024', '-smp', '1',
+                '-accel', 'tcg', '-cpu', 'cortex-a72', '-m', '1024', '-smp', self.cpu,
                 '-drive', 'if=pflash,format=raw,readonly=on,file=' + self.ovmf.koodi,
                 '-drive', 'if=pflash,format=raw,file=' + variables,
                 '-drive', 'if=none,format=raw,readonly=on,id=boot,file=' + self.levyt[0][0],
@@ -63,6 +63,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--build', type=pathlib.Path, default=ROOT / 'build/native-arm64')
     ap.add_argument('--image', type=pathlib.Path)
+    ap.add_argument('--cpus', type=int, choices=range(1, 17), default=1)
     a = ap.parse_args()
     image = (a.image or a.build / 'arm64.img').resolve()
     code = os.environ.get('AAVMF_CODE', '/usr/share/AAVMF/AAVMF_CODE.fd')
@@ -75,13 +76,16 @@ def main():
     with tempfile.TemporaryDirectory(prefix='p2armtest-') as td:
         scratch = vm9.tyhja_levy(td + '/scratch.img', 32 << 20)
         vm = ArmVM([(str(image), 'raw', True, 'hd'), (scratch, 'raw', False, 'hd')],
-                   vm9.Ovmf(code, variables), str(log))
+                   vm9.Ovmf(code, variables), str(log), cpu=str(a.cpus))
         vm.kaynnista()
         try:
             vm.odota(r'\[P2 L01\] Plan2001 loader', 120)
             print('PASS: ARM64 UEFI loaded Plan2001 EFI loader', flush=True)
             vm.odota(r'BootInfo v1: ARM64 UEFI live root', 180)
             vm.odota(r'init: starting /bin/rc', 120)
+            stats, _ = vm.aja("cat '#c/sysstat'", 60)
+            if len(stats.strip().splitlines()) != a.cpus:
+                raise vm9.VirheVM('guest CPU count does not match --cpus')
             print('PASS: shared BootInfo v1 -> ARM64 9front -> init -> rc', flush=True)
             for command, expected in [
                 ("echo arm64-user-program; cat /env/cputype", 'arm64'),

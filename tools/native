@@ -24,23 +24,6 @@ here=$(cd "$(dirname "$0")" && pwd); root=$(dirname "$here")
 tree=${TREE:-$root/build/tree}
 [ -n "${TREE:-}" ] || "$here/tree" "$tree" >/dev/null
 tree=$(cd "$tree" && pwd)
-# 9front's recipes use Plan 9 sed's bare (...) grouping; GNU sed needs
-# \(...\).  Only the recipes the wasm32 build reaches are changed here.
-if sed --version 2>/dev/null | grep -q GNU; then
-	python3 - "$tree/sys/src/libc/9syscall/mkfile" "$tree/sys/src/ape/lib/ap/syscall/genall" <<'PY'
-import sys
-# Both native libc and APE enumerate the same syscall identifiers.
-for p, sysh in zip(sys.argv[1:], ['sys.h', '$SYSH']):
-    s = open(p).read()
-    lines = s.splitlines(keepends=True)
-    matches = [i for i, line in enumerate(lines) if line.lstrip().startswith('SYS=`{')]
-    if len(matches) != 1:
-        raise SystemExit('native: expected one syscall enumeration in %s: %r' % (p, matches))
-    indent = '\t' if p.endswith('mkfile') else ''
-    lines[matches[0]] = indent + "SYS=`{sed -n 's/^#define[ \t][ \t]*//p' " + sysh + " | sed 's/[ \t].*//' | grep -v '^_X[123]$'}" + '\n'
-    open(p, 'w').write(''.join(lines))
-PY
-fi
 "$here/hostcc/build" 3c 3l >/dev/null
 bin=$root/build/host/bin
 mkdir -p "$bin" "$tree/wasm32/lib" "$tree/wasm32/bin"

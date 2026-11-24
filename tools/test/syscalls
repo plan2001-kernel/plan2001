@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Check the real syscall selector, generated kernel tables and public headers.
+
+    tools/test/syscalls [--archives native-build-directory]
+
+Requires a C compiler and plan9port (PLAN9, default /usr/lib/plan9).
+Archive checks consume libc.a/libap.a exported by a native build.
+"""
+import argparse
+import os
+import pathlib
+import re
+import subprocess
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+P9 = pathlib.Path(os.environ.get('PLAN9', '/usr/lib/plan9'))
+ENV = dict(os.environ, PLAN9=str(P9), PATH=str(P9 / 'bin') + ':' + os.environ['PATH'])
+
+
+def quote(s):
+    return "'" + str(s).replace("'", "''") + "'"
+
+
+def rc(script, args=(), **kwargs):
+    return subprocess.run([str(P9 / 'bin/rc'), '-c', '. ' + quote(script) + ' ' +
+                           ' '.join(quote(a) for a in args)], env=ENV,
+                          text=True, capture_output=True, **kwargs)
+
+
+def definitions(text):
+    return {m[0]: int(m[1]) for m in re.findall(r'^#define\s+(\w+)\s+(\d+)', text, re.M)}
+
+
+def members(path):
+    data = path.read_bytes()
+    assert data[:8] == b'!<arch>\n', path
+    names, pos = [], 8
+    while pos < len(data):
+        hdr = data[pos:pos+60]
+        assert hdr[58:60] == b'`\n', path
+        names.append(hdr[:16].decode().strip().rstrip('/'))
+        size = int(hdr[48:58])
+        pos += 60 + size + (size & 1)
+    return names
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--archives', type=pathlib.Path)
+    args = ap.parse_args()
+    release = pathlib.Path(subprocess.check_output([str(ROOT / 'tools/release')], text=True).strip())
+    golden = definitions((release / 'sys/src/libc/9syscall/sys.h').read_text())
+    header = ROOT / 'sys/src/libc/9syscall/sys.h'
+    selector = ROOT / 'sys/src/libc/9syscall/syscalls'
+    with tempfile.TemporaryDirectory(prefix='syscalls-') as td:
+        td = pathlib.Path(td)
+        generator = td / 'mksystab'
+        generator.write_text((ROOT / 'sys/src/9/port/mksystab').read_text().replace(
+            '/sys/src/libc/9syscall', str(header.parent)))
+        for arch in ['amd64', 'arm64', 'arm', '386', 'wasm32']:
+            expected = dict(golden)
+            if arch == 'wasm32':
+                expected['SPAWN'] = 54
+            selected = rc(selector, [arch, header, 'defines'], check=True).stdout
+            assert definitions(selected) == expected, (arch, selected)
+            # mksystab is normally invoked by mk with objtype exported.
+            saved = ENV.get('objtype')
+            ENV['objtype'] = arch
+            generated = rc(generator, check=True).stdout
+            if saved is None:
+                ENV.pop('objtype')
+            else:
+                ENV['objtype'] = saved
+            assert ('sysspawn' in generated) == (arch == 'wasm32'), arch
+            source = td / 'table.c'
+            source.write_text('typedef unsigned long uintptr; typedef int va_list;\n' + generated)
+            flags = ['-D__wasm32__=1'] if arch == 'wasm32' else []
+            subprocess.run(['cc', '-std=c11', '-Werror', '-c', *flags, str(source),
+                            '-o', str(td / 'table.o')], check=True)
+            public = subprocess.check_output(['cc', '-E', '-P', '-x', 'c', *flags,
+                                               str(ROOT / 'sys/include/libc.h')], text=True)
+            assert bool(re.search(r'\bspawn\(', public)) == (arch == 'wasm32'), arch
+            print('PASS: ' + arch + ' syscall numbers, generated table and libc interface')
+        assert rc(selector, ['unknown', header]).returncode != 0
+    if args.archives:
+        native = members(args.archives / 'libc.a')
+        ape = members(args.archives / 'libap.a')
+        assert not any(re.fullmatch(r'spawn\.[67]', n) for n in native)
+        assert not any(re.fullmatch(r'_SPAWN\.[67]', n) for n in ape)
+        assert any(re.fullmatch(r'exec\.[67]', n) for n in native)
+        assert any(re.fullmatch(r'_EXEC\.[67]', n) for n in ape)
+        print('PASS: native libc/APE archive interfaces contain exec and exclude spawn')
+
+
+if __name__ == '__main__':
+    main()

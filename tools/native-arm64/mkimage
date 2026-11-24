@@ -15,6 +15,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--build', type=pathlib.Path, default=ROOT / 'build/native-arm64')
     ap.add_argument('--image', type=pathlib.Path)
+    ap.add_argument('--cpus', type=int, choices=range(1, 17), default=1)
     a = ap.parse_args()
     image = a.image or a.build / 'arm64.img'
     image.parent.mkdir(parents=True, exist_ok=True)
@@ -27,7 +28,7 @@ def main():
         subprocess.run(['mcopy', '-i', str(image), str(a.build / src), dst], check=True)
     with tempfile.TemporaryDirectory() as td:
         ini = pathlib.Path(td) / 'plan9.ini'
-        ini.write_text('bootfile=/9qemu\nconsole=0\n*ncpu=1\n')
+        ini.write_text('bootfile=/9qemu\nefiplatform=qemu-virt\nconsole=0\n*ncpu=%d\n' % a.cpus)
         subprocess.run(['mcopy', '-i', str(image), str(ini), '::/plan9.ini'], check=True)
     print(image)
 

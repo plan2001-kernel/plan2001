@@ -1,5 +1,5 @@
 TARG=bootx64.efi bootaa64.efi
-HFILES=fns.h mem.h
+HFILES=fns.h mem.h image.h arm64layout.h
 IMAGEBASE=0x8000
 CFLAGS=-FTVw
 PEFLAGS=$CFLAGS '-DIMAGEBASE='$IMAGEBASE
@@ -27,7 +27,7 @@ bootx64.efi:	x64.6 efi.6 fs.6 sub.6 archx64.6
 %.7:	%.c
 	7c $CFLAGS $stem.c
 # bootaa64.efi: the same common loader, its ARM64 side in archaa64.c
-bootaa64.efi:	aa64.7 efi.7 fs.7 sub.7 archaa64.7 cacheaa64.7
+bootaa64.efi:	aa64.7 efi.7 fs.7 sub.7 archaa64.7 arm64layout.7 cacheaa64.7
 	7l -l -s -R1 -T0x8200 -o bootaa64.out $prereq
 	aux/aout2efi -Z$IMAGEBASE -o $target bootaa64.out
 %.7:	$HFILES

@@ -1,0 +1,100 @@
+--- a/sys/src/9/port/mksystab
++++ b/sys/src/9/port/mksystab
+@@ -1,50 +1,29 @@
+ #!/bin/rc
+-
+-file=/sys/src/libc/9syscall/sys.h
+-
+-cat <<'!'
+-#include "/sys/src/libc/9syscall/sys.h"
+-
+-typedef uintptr Syscall(va_list);
+-
+-!
+-
+-sed 's/#define[ 	]*([A-Z0-9_][A-Z0-9_]*).*/SYS\1/; s/SYSSYSR1/SYSR1/' $file |
+-	tr A-Z a-z |
+-	sed 's/.*/Syscall &;/'
+-
+-cat <<'!'
+-Syscall	sysdeath;
+-
+-Syscall *systab[]={
+-!
+-sam -d $file >[2] /dev/null <<'!'
+-,s/#define.([A-Z0-9_]+).*/	[\1]	SYS\1,/g
+-,x/SYS[A-Z0-9_]+,/ | tr A-Z a-z
+-,x/syssysr1/c/sysr1
+-,x/sys_x[0-9]*/c/sysdeath
+-,x v/\[......+\]/ s/\]/]	
+-,p
+-!
+-
+-cat <<'!'
+-};
+-
+-char *sysctab[]={
+-!
+-
+-sam -d $file >[2] /dev/null <<'!'
+-,s/#define.([A-Z0-9_]+).*/	[\1]	"\1",/g
+-,x/"[A-Z0-9_]+",/ y/"[A-Z]/ | tr A-Z a-z
+-,x/_"/c/"
+-,x/Sysr1/c/Running
+-,x/Rendezvous/c/Rendez
+-,x v/\[......+\]/ s/\]/]	
+-,p
+-!
+-
+-cat <<'!'
+-};
+-
+-int nsyscall = (sizeof systab/sizeof systab[0]);
+-!
++# One architecture-aware number selection, shared with libc and APE.
++rc /sys/src/libc/9syscall/syscalls $objtype /sys/src/libc/9syscall/sys.h defines |
++awk '
++/^#define/ {
++ name[n++]=$2
++ h="sys" tolower($2)
++ if($2=="SYSR1") h="sysr1"
++ if($2 ~ /^_X[0-9]+$/) h="sysdeath"
++ handler[n-1]=h
++}
++END {
++ if(n==0) exit 1
++ print "#include \"/sys/src/libc/9syscall/sys.h\""
++ print "typedef uintptr Syscall(va_list);"
++ print "Syscall sysdeath;"
++ for(i=0;i<n;i++) if(!declared[handler[i]]++) print "Syscall " handler[i] ";"
++ print "Syscall *systab[]={"
++ for(i=0;i<n;i++) printf "\t[%s]\t%s,\n", name[i], handler[i]
++ print "};\nchar *sysctab[]={"
++ for(i=0;i<n;i++) {
++  s=substr(name[i],1,1) tolower(substr(name[i],2))
++  sub(/_$/, "", s)
++  if(s=="Sysr1") s="Running"
++  if(s=="Rendezvous") s="Rendez"
++  printf "\t[%s]\t\"%s\",\n", name[i], s
++ }
++ print "};\nint nsyscall = sizeof systab/sizeof systab[0];"
++}'
+--- a/sys/src/9/port/portmkfile
++++ b/sys/src/9/port/portmkfile
+@@ -1,4 +1,6 @@
+-PORTFILES=`{../port/mkfilelist ../port}
++# BootInfo configuration is opt-in. Boards with their own bootargs (or
++# a rule importing another board's) must not also match port/bootargs.c.
++PORTFILES=`{rc ../port/mkportlist}
+ ^($PORTFILES)\.$O:R:	../port/\1.c
+ 	$CC $CFLAGS -I. ../port/$stem1.c
+ 
+@@ -42,7 +44,7 @@
+ 
+ %.$O:	/$objtype/include/u.h ../port/lib.h mem.h dat.h fns.h io.h ../port/pci.h ../port/error.h ../port/portdat.h ../port/portfns.h
+ 
+-../port/systab.h:D:	/sys/src/libc/9syscall/sys.h ../port/mksystab
++../port/systab.h:D:	/sys/src/libc/9syscall/sys.h /sys/src/libc/9syscall/syscalls ../port/mksystab
+ 	rc ../port/mksystab > ../port/systab.h
+ 
+ $CONF.$O:	$CONF.c $OBJ $LIB
