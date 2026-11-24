@@ -141,6 +141,11 @@ def raspi3b(hak, tyo, aikaraja, tulos):
         if b"P2OK 42" not in vm.kaikki:
             raise vm9.VirheVM("käännetty arm64-ohjelma ei tulostanut")
         tulos["raspi3b: arm64-userland (rc, 7c, 7l, oma ohjelma)"] = "PASS"
+        # sivuja myös 512 MiB:n yläpuolelta: KZERO-ikkuna on kartoitettava
+        # kokonaan (bcm64/mem.c KMAPINIT, ../arm64/mmu.c kmapram)
+        vm.aja("ramfs -m /n/p2mem && dd -if /dev/zero -of /n/p2mem/x -bs 1048576 -count 400 "
+               ">[2]/dev/null && ls -l /n/p2mem/x && rm /n/p2mem/x && unmount /n/p2mem", 600)
+        tulos["raspi3b: 400 MiB ramfs (muisti 512 MiB:n yli)"] = "PASS"
         print(out)
     finally:
         vm.sammuta()

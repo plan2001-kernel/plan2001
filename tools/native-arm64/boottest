@@ -2,6 +2,14 @@
 """Assert UEFI -> shared BootInfo -> 9front ARM64 init -> rc on QEMU virt.
 
     tools/native-arm64/boottest [--build build/native-arm64] [--image PATH]
+    tools/native-arm64/boottest --rpi4-refusal [--build ...] [--image PATH]
+
+--rpi4-refusal: the same loader binary on a disposable copy of the image
+whose plan9.ini selects efiplatform=rpi4, with AAVMF's device tree
+(acpi=off): the loader must refuse QEMU's tree as not a BCM2711 one, and a
+plan9.ini without efiscratch, with readable diagnostics, before loading any
+kernel.  The rpi4 platform code is thus run in the real relocated EFI
+image, not only in the host tests (tools/test/arm64-loader).
 
 Requires AAVMF, qemu-system-aarch64, and a FAT image from mkimage. All
 firmware variables and writable test disks are disposable. Captures serial
@@ -23,10 +31,12 @@ import vm9
 
 
 class ArmVM(vm9.Kone):
+    machine = 'virt,gic-version=3,highmem=off'
+
     def komento(self):
         variables = os.path.join(self.tyohak, 'vars.fd')
         shutil.copyfile(self.ovmf.muuttujat, variables)
-        return ['qemu-system-aarch64', '-M', 'virt,gic-version=3,highmem=off',
+        return ['qemu-system-aarch64', '-M', self.machine,
                 '-accel', 'tcg', '-cpu', 'cortex-a72', '-m', '1024', '-smp', self.cpu,
                 '-drive', 'if=pflash,format=raw,readonly=on,file=' + self.ovmf.koodi,
                 '-drive', 'if=pflash,format=raw,file=' + variables,
@@ -37,7 +47,7 @@ class ArmVM(vm9.Kone):
                 '-netdev', 'hubport,id=n0,hubid=0',
                 '-device', 'virtio-net-pci,disable-legacy=on,netdev=n0',
                 '-display', 'none', '-serial', 'stdio', '-monitor', os.environ.get('ARM64_MONITOR', 'none'), '-no-reboot'] + (['-d', 'int', '-D', os.environ['ARM64_TRACE']]
-                                  if 'ARM64_TRACE' in os.environ else [])
+                                  if 'ARM64_TRACE' in os.environ else []) + self.ylim
 
     def aja(self, command, aikaraja=120, sallittu_virhe=False):
         # Kernel messages can contain earlier console command markers. Parse
@@ -59,11 +69,137 @@ class ArmVM(vm9.Kone):
         return output, status
 
 
+def fdt_read(data):
+    """FDT -> (reservations, root node); a node is [name, [(prop, bytes)], [children]]."""
+    import struct
+    _, total, ost, ostr, ores, ver, _, _, strl, stl = struct.unpack('>10I', data[:40])
+    resv = []
+    p = ores
+    while True:
+        a, z = struct.unpack('>QQ', data[p:p + 16])
+        p += 16
+        if a == 0 and z == 0:
+            break
+        resv.append((a, z))
+    st, strs = data[ost:ost + stl], data[ostr:ostr + strl]
+    stack, root, p = [], None, 0
+    while p < len(st):
+        t = struct.unpack('>I', st[p:p + 4])[0]
+        p += 4
+        if t == 1:
+            e = st.index(b'\0', p)
+            node = [st[p:e].decode(), [], []]
+            p = (e + 4) & ~3
+            if stack:
+                stack[-1][2].append(node)
+            else:
+                root = node
+            stack.append(node)
+        elif t == 2:
+            stack.pop()
+        elif t == 3:
+            n, no = struct.unpack('>II', st[p:p + 8])
+            p += 8
+            stack[-1][1].append((strs[no:strs.index(b'\0', no)].decode(), st[p:p + n]))
+            p += (n + 3) & ~3
+        elif t == 9:
+            break
+    return resv, root
+
+
+def fdt_write(resv, root):
+    import struct
+    st, strs, offs = bytearray(), bytearray(), {}
+
+    def node(n):
+        st.extend(struct.pack('>I', 1))
+        raw = n[0].encode() + b'\0'
+        st.extend(raw + b'\0' * (-len(raw) % 4))
+        for k, v in n[1]:
+            if k not in offs:
+                offs[k] = len(strs)
+                strs.extend(k.encode() + b'\0')
+            st.extend(struct.pack('>III', 3, len(v), offs[k]) + v + b'\0' * (-len(v) % 4))
+        for c in n[2]:
+            node(c)
+        st.extend(struct.pack('>I', 2))
+    node(root)
+    st.extend(struct.pack('>I', 9))
+    rv = b''.join(struct.pack('>QQ', a, z) for a, z in resv) + bytes(16)
+    ost = 40 + len(rv)
+    ostr = ost + len(st)
+    return struct.pack('>10I', 0xd00dfeed, ostr + len(strs), ost, ostr, 40, 17, 16, 0, len(strs), len(st)) + rv + bytes(st) + bytes(strs)
+
+
+def bcm2711_described_virt(td):
+    """QEMU virt's own tree (AAVMF needs it) with the BCM2711 data the rpi4 loader checks."""
+    import struct
+    import subprocess
+    path = td + '/virt.dtb'
+    subprocess.check_call(['qemu-system-aarch64', '-M', 'virt,gic-version=3,highmem=off,acpi=off',
+                           '-cpu', 'cortex-a72', '-m', '1024', '-machine', 'dumpdtb=' + path],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    resv, root = fdt_read(open(path, 'rb').read())
+    props = dict(root[1])
+    root[1] = [(k, v + b'brcm,bcm2711\0' if k == 'compatible' else v) for k, v in root[1]]
+    if 'compatible' not in props:
+        root[1].append(('compatible', b'brcm,bcm2711\0'))
+    root[2].append(['emmc2bus', [('dma-ranges', bytes(20))], []])
+    root[2].append(['scb', [], [['pcie@7d500000', [('ranges', bytes(28)), ('dma-ranges', bytes(28))], []]]])
+    # a fixed reservation (inside QEMU's RAM, away from the loader) and a dynamic CMA pool
+    root[2].append(['reserved-memory', [('#address-cells', struct.pack('>I', 2)), ('#size-cells', struct.pack('>I', 1)),
+                                        ('ranges', b'')],
+                    [['p2fixed@7f000000', [('reg', struct.pack('>QI', 0x7f000000, 0x10000))], []],
+                     ['linux,cma', [('compatible', b'shared-dma-pool\0'), ('size', struct.pack('>I', 0x4000000)),
+                                    ('reusable', b''), ('alloc-ranges', struct.pack('>QI', 0, 0x30000000))], []]]])
+    out = td + '/virt-bcm2711.dtb'
+    open(out, 'wb').write(fdt_write(resv, root))
+    return out
+
+
+def rpi4_refusal(image, code, variables, log):
+    """efiplatform=rpi4 on QEMU virt: the loader's refusals, readable."""
+    import subprocess
+    pi4 = 'efiplatform=rpi4\nefibootmap=0,0x40000000\nefiscratch=0x1000000,0x80000\n'
+    cases = [
+        (pi4, r'firmware FDT does not describe the required BCM2711 board', False),
+        ('efiplatform=rpi4\nefibootmap=0,0x40000000\n', r'rpi4 requires efibootmap and efiscratch', False),
+        # a tree the rpi4 checks accept: validation, reservations and the copy into
+        # BootInfo pass; QEMU's 9qemu is then refused by the Pi4 image contract
+        (pi4, r'unsupported rpi4 headed a\.out layout', True),
+    ]
+    env = dict(os.environ, MTOOLS_SKIP_CHECK='1')
+    with tempfile.TemporaryDirectory(prefix='p2armrpi4-') as td:
+        for ini, expected, described in cases:
+            copy = td + '/rpi4.img'
+            shutil.copyfile(image, copy)
+            old = subprocess.check_output(['mtype', '-i', copy, '::/plan9.ini'], env=env).decode()
+            lines = [l for l in old.splitlines() if not l.startswith(('efiplatform=', 'efibootmap=', 'efiscratch='))]
+            open(td + '/plan9.ini', 'w').write('\n'.join(lines) + '\n' + ini)
+            subprocess.check_call(['mcopy', '-o', '-i', copy, td + '/plan9.ini', '::/plan9.ini'], env=env)
+            scratch = vm9.tyhja_levy(td + '/scratch.img', 32 << 20)
+            vm = ArmVM([(copy, 'raw', True, 'hd'), (scratch, 'raw', False, 'hd')],
+                       vm9.Ovmf(code, variables), str(log))
+            vm.machine = 'virt,gic-version=3,highmem=off,acpi=off'
+            if described:
+                vm.ylim = ['-dtb', bcm2711_described_virt(td)]
+            vm.kaynnista()
+            try:
+                vm.odota(r'\[P2 L01\] Plan2001 loader', 120)
+                i, m = vm.odota_jokin([expected, r'\[P2 L17\]', r'BootInfo v1'], 180)
+                if i != 0:
+                    raise vm9.VirheVM('rpi4 loader on QEMU virt went past its refusal: ' + m.group(0).decode())
+                print('PASS: rpi4 loader refusal on QEMU virt: ' + expected, flush=True)
+            finally:
+                vm.tapa()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--build', type=pathlib.Path, default=ROOT / 'build/native-arm64')
     ap.add_argument('--image', type=pathlib.Path)
     ap.add_argument('--cpus', type=int, choices=range(1, 17), default=1)
+    ap.add_argument('--rpi4-refusal', action='store_true', help='efiplatform=rpi4 refusals in the real loader')
     a = ap.parse_args()
     image = (a.image or a.build / 'arm64.img').resolve()
     code = os.environ.get('AAVMF_CODE', '/usr/share/AAVMF/AAVMF_CODE.fd')
@@ -73,6 +209,9 @@ def main():
             sys.exit('missing ' + str(p))
     log = a.build / 'boot.log'
     log.unlink(missing_ok=True)
+    if a.rpi4_refusal:
+        rpi4_refusal(str(image), code, variables, log)
+        return
     with tempfile.TemporaryDirectory(prefix='p2armtest-') as td:
         scratch = vm9.tyhja_levy(td + '/scratch.img', 32 << 20)
         vm = ArmVM([(str(image), 'raw', True, 'hd'), (scratch, 'raw', False, 'hd')],

@@ -4,8 +4,14 @@
 #include "dat.h"
 #include "fns.h"
 
-/* QEMU virt: the initial direct map covers RAM below 2 GiB. */
+/*
+ * The part of the initial direct map that kmapram() leaves alone.  A
+ * board's mem.h may give it (bcm64); QEMU virt's initial direct map
+ * covers RAM below 2 GiB, the whole KZERO window.
+ */
+#ifndef INITMAP
 #define INITMAP	((uintptr)-KZERO)
+#endif
 
 void
 mmu1init(void)

@@ -24,7 +24,15 @@ static int nscratch;
 int
 archfdtallowed(void)
 {
-	return 0;
+	/* Keep the bounded firmware candidate available until plan9.ini has
+	 * explicitly selected a platform. rpi4 validates and copies it later. */
+	return 1;
+}
+
+int
+archfdtdefer(void)
+{
+	return 1;
 }
 
 /* the one value of key in plan9.ini; duplicates are rejected */
@@ -115,8 +123,11 @@ char*
 archinit(void)
 {
 	char platform[32], map[80], scratch[80], *why;
-	uvlong lo, len, sl, sn;
-	int explicit;
+	uvlong rlo[ArmMaxReserved], rlen[ArmMaxReserved];
+	ArmDynamic dynamic[ArmMaxDynamic];
+	uvlong lo, len, sl, sn, bytes, stride;
+	void *mm;
+	int explicit, nr, nd, i;
 
 	archrelease();
 	if((why = value("efiplatform=", platform, sizeof platform)) != nil)
@@ -137,7 +148,34 @@ archinit(void)
 			return "invalid efiscratch (base,length required)";
 		explicit |= 2;
 	}
-	return armplatform(linkfix(&layout), platform, explicit, lo, len, sl, sn);
+	if((why = armplatform(linkfix(&layout), platform, explicit, lo, len, sl, sn)) != nil)
+		return why;
+	if(layout.platform == ArmPi4){
+		/* the firmware's tree must lie in described memory before it is read whole */
+		if(fdtsrc == nil || fdtsize == 0)
+			return "firmware did not provide an FDT (EDK2: System Table Selection must include Devicetree)";
+		if(bootmemorymap(&mm, &bytes, &stride) != 0 || armmapvalid(mm, bytes, stride) != nil)
+			return "cannot snapshot a valid UEFI memory map for the firmware FDT";
+		if(!armpresent(mm, bytes, stride, (uvlong)(uintptr)fdtsrc, fdtsize))
+			return "firmware FDT is not in memory the UEFI map describes";
+		if((why = armfdtvalidate(linkfix(fdtsrc), fdtsize)) != nil)
+			return why;
+		layout.fdtlo = (uvlong)(uintptr)fdtsrc;
+		layout.fdtlen = fdtsize;
+		if((why = armfdtreservations(linkfix(fdtsrc), fdtsize, rlo, rlen,
+		    ArmMaxReserved, &nr, dynamic, ArmMaxDynamic, &nd)) != nil)
+			return why;
+		layout.nreserved = nr;
+		for(i=0; i<nr; i++){
+			layout.reservedlo[i] = rlo[i];
+			layout.reservedlen[i] = rlen[i];
+		}
+		/* dynamic pools (no reg) are requests to an OS, not resident memory:
+		 * validated above, nothing to protect or place */
+		if((why = bootfdtcopy()) != nil)
+			return why;
+	}
+	return nil;
 }
 
 /*

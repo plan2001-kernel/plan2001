@@ -27,21 +27,20 @@ mount /srv/9660 /n/dist /dev/sdE1/data || die 'ISO ei liity'
 test -d /n/dist/sys/src/9/bcm64 || die 'ISO:lla ei ole /sys/src/9/bcm64'
 test -r /n/dist/sys/src/boot/bcm/start4cd.elf || die 'ISO:lla ei ole Pi4-laiteohjelmistoa'
 
-# Lähdepuu = julkaisu + tämän puun tiedostot (sama kuin tools/tree:
-# patchatut tiedostot ovat overlayssa valmiiksi patchattuina).
+# Lähdepuu = tools/tree:n rakentama pinnattu julkaisu, patchit ja overlay.
 # Kirjoitettavat kopiot: oliot ja arm64-kirjastot syntyvät niihin.
 rm -rf $w
 mkdir -p $w/src $w/include $w/arm64 $w/acme $w/rc
 # kuten julkaisussa (d775): mkdir perii /tmp:n rajatut oikeudet, ja
-# ytimen bootfs (disk/mkfs ilman tilaa) ottaa ne lähteestä
+# ytimen bootfs (disk/mkfs ilman tilaa) ottaa ne lähteestä.  $p2 on
+# tools/rpi4/buildissa luotu d775:nä, joten sen alta kopioitu puu, siinä
+# käännetyt ohjelmat ja bootfs saavat julkaisun oikeudet.
 chmod 775 $w/src $w/include $w/arm64 $w/acme $w/rc
-dircp /n/dist/sys/src $w/src || die 'sys/src kopio'
-dircp /n/dist/sys/include $w/include || die 'sys/include kopio'
+dircp $p2/src $w/src || die 'assembled sys/src copy'
+dircp $p2/include $w/include || die 'assembled sys/include copy'
 dircp /n/dist/arm64 $w/arm64 || die 'arm64 kopio'
 dircp /n/dist/acme $w/acme || die 'acme kopio'
 dircp /n/dist/rc $w/rc || die 'rc kopio'
-test -d $p2/ov/sys/src && dircp $p2/ov/sys/src $w/src
-test -d $p2/ov/sys/include && dircp $p2/ov/sys/include $w/include
 test -d $p2/ov/rc && dircp $p2/ov/rc $w/rc
 
 # isännän (amd64) työkalut julkaisusta, kohteen tiedostot kopioista
@@ -59,22 +58,33 @@ for(f in init bin/rc bin/bind bin/mount bin/paqfs bin/auth/factotum bin/ip/ipcon
 	test -x /arm64/$f || die '/arm64/'^$f^' puuttuu'
 
 echo '--- ydin: /sys/src/9/bcm64 (pi3, pi4)'
-# Ydin julkaisun järjestelmäkutsutaululla, kuten tools/native-amd64:
-# tämän puun sys.h:n SPAWN on vain wasm32-ytimessä (sysspawn), ja
-# port/mksystab tekisi siitä natiiviytimelle linkittymättömän viittauksen.
-bind /n/dist/sys/src/libc/9syscall/sys.h /sys/src/libc/9syscall/sys.h
-rm -f /sys/src/9/port/systab.h
+# The architecture-aware syscall selector keeps native kernels free of
+# the WASM32-only spawn entry while retaining the shared syscall numbers.
 cd /sys/src/9/bcm64 || die bcm64
-for(c in pi4 pi3){
+# pi4efi:n oliot on käännetty -DUEFI:llä: puhdas pöytä joka kerta
+for(c in pi4 pi3 pi4efi){
+	mk clean >[2=1] || die 'mk clean '^$c
 	mk 'CONF='^$c >[2=1] || die 'ytimen käännös '^$c
 	mk 'CONF='^$c install >[2=1] || die 'ytimen asennus '^$c
 }
+mk clean >[2=1]
+rc $p2/native-rules.rc || die 'native bootargs rule dry runs'
+
+# jaettu ARM64 EFI-loader sellaisenaan (Codex #17 omistaa sen)
+echo '--- jaettu EFI-loader: /sys/src/boot/efi bootaa64.efi'
+cd /sys/src/boot/efi || die efi
+efi=()
+if(mk bootaa64.efi >[2=1])
+	efi=/sys/src/boot/efi/bootaa64.efi
+if not
+	echo 'build.rc: bootaa64.efi ei käänny'
 
 rm -rf $p2/out
 mkdir -p $p2/out
-cp /arm64/9pi4 /arm64/s9pi4 /arm64/9pi3 $p2/out || die 'ytimien kopio'
+cp /arm64/9pi4 /arm64/s9pi4 /arm64/9pi3 /arm64/9pi4efi /arm64/s9pi4efi $efi $p2/out || die 'ytimien kopio'
 cd $p2/out
 nm s9pi4 | grep -e ' T _start$' -e ' T main$' >entry.txt
+nm s9pi4efi | grep -e ' T _start$' -e ' D bootinfopa$' -e ' B bootinfopa$' -e ' T uefibootinit$' -e ' [BD] end$' >entryefi.txt
 file /arm64/bin/rc /arm64/init >file.txt
 cp /sys/src/9/bcm64/pi4 conf.pi4
 du -s /arm64/bin >du.txt
@@ -89,8 +99,7 @@ if(! ~ $1 noimg){
 	bind $w/rc /n/src9/rc
 	# jakelun /sys/src ilman olioita: julkaisu + overlay
 	mkdir -p $w/distsrc
-	dircp /n/dist/sys/src $w/distsrc || die 'jakelun lähteet'
-	test -d $p2/ov/sys/src && dircp $p2/ov/sys/src $w/distsrc
+	dircp $p2/src $w/distsrc || die 'assembled distribution sources'
 	bind $w/distsrc /n/src9/sys/src
 	bind $w/include /n/src9/sys/include
 	mkdir -p $w/dist
