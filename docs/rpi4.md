@@ -137,10 +137,32 @@ EDK2 settings the kernel needs, in its setup menu (Esc at boot; kept in
 
 - Device Manager → Raspberry Pi Configuration → ACPI / Device Tree →
   System Table Selection: **ACPI+Devicetree** (or Devicetree). The
-  default, ACPI only, gives the loader no device tree; `9pi4efi` then
-  stops with `no device tree in BootInfo`.
+  default, ACPI only, gives the loader no device tree; the loader then
+  stops with `firmware did not provide an FDT (EDK2: System Table
+  Selection must include Devicetree)` before loading the kernel.
 - Advanced Configuration → Limit RAM to 3 GB: either. With the limit,
   the kernel has 3 GB.
+
+Checkpoints on the serial console for stages (c) and (d), in order
+(owner-run, physical Pi 4; the card from `uefi-esp --base`):
+
+1. EDK2's own messages, then `[P2 L01] Plan2001 loader`, the
+   `plan9.ini` lines above and `[P2 L13] kernel opened`.
+2. `[P2 L16]` kernel sizes, `[P2 L17] kernel memory claimed executable`,
+   `[P2 L18] entry state checked`. A loader refusal instead names the
+   failed check (device tree, memory map, image layout or `plan9.ini`)
+   and returns to the loader prompt; nothing has been written to RAM.
+3. `pi4efi: BootInfo v1 at 0x...`, then `Plan 9`, the memory banks and
+   `cpu0` to `cpu3` (PSCI `CPU_ON`; only `cpu0` if the firmware's tree
+   has no `/psci`). A `pi4efi:` line followed by `halted` names the
+   kernel's refusal (docs above).
+4. `bootargs is (...)` with the SD card's `fs` partition as default
+   (Enter), user `glenda`, the rc prompt. Then `cat '#c/sysstat'` (one line per CPU), `cat
+   '#S/sdctl'`, `ls '#l'` (GENET ether0), `ls '#u/usb'` and `fshalt -r`
+   (PSCI `SYSTEM_RESET`).
+
+Rollback is as above: the Pi 4 boots whatever is on the card, and the
+EEPROM is not changed.
 
 ### The UEFI kernel `9pi4efi`
 
@@ -207,6 +229,15 @@ other's entry.
   (`smc` with TF-A). Without `/psci`, the kernel runs on one CPU. `exit` turns
   secondary CPUs off with `CPU_OFF` and resets with `SYSTEM_RESET`.
   Loading another kernel through `#c/reboot` is refused under UEFI.
+
+`tools/test/arm64-loader --kernel 9pi4efi` runs the loader's platform
+code on the host with the pinned release's and pftf v1.53's BCM2711
+device trees (Pi 4 B, 400, CM4), refuses QEMU virt's tree as the wrong
+board, and passes the built kernel's header through the loader's whole
+preflight. `tools/native-arm64/boottest --rpi4-refusal` runs the real
+`BOOTAA64.EFI` under AAVMF with `efiplatform=rpi4`: QEMU's own tree and a
+`plan9.ini` without `efiscratch` are refused, and a tree carrying the
+BCM2711 data passes validation and the copy into BootInfo.
 
 `tools/rpi4/bootinfotest` loads `9pi4efi` and a BootInfo blob made on
 the host into QEMU's `raspi4b` and enters it as the loader would (EL2,

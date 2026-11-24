@@ -200,6 +200,9 @@ Artifacts and serial captures stay under `build/native-arm64`. `mkimage`
 creates a new 128 MiB FAT image containing `EFI/BOOT/BOOTAA64.EFI`,
 `9qemu` and `plan9.ini` (`efiplatform=qemu-virt`); it refuses to overwrite an existing path. Use
 `--build` and `--image` to select another artifact directory or image.
+`boottest --rpi4-refusal` boots the same loader with `efiplatform=rpi4`
+and checks its refusals and its device-tree validation in the real
+relocated EFI image (docs/rpi4.md).
 For SMP, pass the same `--cpus N` (1–16) to `mkimage` and `boottest`;
 the test checks the guest CPU count before exercising storage and networking.
 `build` accepts `--out`, `--iso` and `--buildvm`; `--loader-only` rebuilds
