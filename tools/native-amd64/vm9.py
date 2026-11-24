@@ -285,7 +285,7 @@ JAETUT = [
 ]
 
 # AMD64 ja yhteiset ytimen lähteet samasta 9front-overlaysta.
-OVERLAY = ["sys/src/9/pc64", "sys/src/9/pc", "sys/src/9/port", "sys/src/9/ip", "sys/src/boot/efi", "sys/src/cmd/rc"]
+OVERLAY = ["sys/src/9/pc64", "sys/src/9/pc", "sys/src/9/port", "sys/src/9/ip", "sys/src/boot/efi", "sys/src/cmd/rc", "sys/src/libc/9syscall", "sys/src/ape/lib/ap/syscall"]
 
 
 def overlay_jasenet(jaettu):
@@ -296,6 +296,7 @@ def overlay_jasenet(jaettu):
         if not os.path.isdir(lahde):
             raise VirheVM("overlay puuttuu: %s" % lahde)
         jasenet.append(("ov/" + hak, lahde))
+    jasenet.append(("ov/sys/include/libc.h", os.path.join(JUURI, "sys/include/libc.h")))
     for p in JAETUT:
         lahde = os.path.join(jaettu, p)
         if not os.path.isfile(lahde):
@@ -427,3 +428,14 @@ def aout_entry(polku):
     if magic & 0x8000:
         entry = struct.unpack(">Q", h[32:40])[0]
     return magic, entry
+
+
+def source_jasenet(tyohak, jaettu=JUURI):
+    """Build from the same verified patch/overlay assembly as tools/tree."""
+    tree = os.path.join(tyohak, "source")
+    subprocess.check_call([os.path.join(JUURI, "tools/tree"), tree])
+    if os.path.realpath(jaettu) != os.path.realpath(JUURI):
+        for path in JAETUT:
+            shutil.copyfile(os.path.join(jaettu, path), os.path.join(tree, path))
+    return [("src", os.path.join(tree, "sys/src")),
+            ("include", os.path.join(tree, "sys/include"))]

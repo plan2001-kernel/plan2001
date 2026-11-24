@@ -1,4 +1,5 @@
 #include <bootinfo.h>
+#include "image.h"
 
 enum {
 	MAXPATH = 128,
@@ -9,6 +10,15 @@ extern char hex[];
 void usleep(int t);
 /* the ISA side of the loader: archx64.c for bootx64.efi, archaa64.c for bootaa64.efi */
 void archconf(BootInfo *bi);
+char *archinit(void);
+char *archimage(BootImage*);
+void archrelease(void);
+int archfdtallowed(void);
+int bootmemorymap(void**, uvlong*, uvlong*);
+uvlong bootblobsize(void);
+int bootblobmove(uvlong, uvlong);
+int bootreserve(uvlong, uvlong);
+void confrelocate(int);
 uvlong archentry(uvlong entry);
 ulong archdataround(void);
 int archblobok(uvlong pa, uvlong len);
@@ -49,6 +59,7 @@ int strlen(char *s);
 char *strchr(char *s, int c);
 char *strrchr(char *s, int c);
 void print(char *s);
+void *linkfix(void*);
 
 char *configure(void *f, char *path);
 char *bootkern(void *f);

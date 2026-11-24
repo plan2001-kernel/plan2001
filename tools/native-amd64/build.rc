@@ -24,27 +24,37 @@ test -d /n/dist/sys/src/9/pc64 || die 'ISO:lla ei ole /sys/src/9/pc64'
 
 # kääntäjät, kirjastot ja otsakkeet julkaisusta; BootInfo-otsake overlaysta
 bind -b /n/dist/amd64/bin /bin
-bind /n/dist/amd64 /amd64
-bind /n/dist/sys/include /sys/include
-bind -b $p2/ov/sys/include /sys/include
-
-# 9frontin lähdepuu + overlay kirjoitettavaan hakemistoon
-rm -rf $p2/src
-mkdir -p $p2/src/9 $p2/src/boot $p2/src/cmd/rc
-dircp /n/dist/sys/src/9 $p2/src/9 || die 'sys/src/9 kopio'
-dircp /n/dist/sys/src/boot $p2/src/boot || die 'sys/src/boot kopio'
-dircp $p2/ov/sys/src/9 $p2/src/9 || die 'overlay sys/src/9'
-dircp $p2/ov/sys/src/boot $p2/src/boot || die 'overlay sys/src/boot'
-dircp /n/dist/sys/src/cmd/rc $p2/src/cmd/rc || die 'rc lähteet'
-dircp $p2/ov/sys/src/cmd $p2/src/cmd || die 'rc overlay'
-bind /n/dist/sys/src /sys/src
-bind $p2/src/9 /sys/src/9
-bind $p2/src/boot /sys/src/boot
-bind -c $p2/src/cmd/rc /sys/src/cmd/rc
+bind /n/dist/rc /rc
+bind /n/dist/lib /lib
+# Writable target libraries, with compiler programs from the pinned ISO.
+mkdir -p $p2/amd64/include $p2/amd64/lib/ape $p2/amd64/bin
+# Bootfs inherits directory permissions from the target tree.
+chmod 775 $p2/amd64 $p2/amd64/bin $p2/amd64/lib $p2/amd64/include
+cp /n/dist/amd64/mkfile $p2/amd64/mkfile
+dircp /n/dist/amd64/include $p2/amd64/include || die headers
+dircp /n/dist/amd64/lib $p2/amd64/lib || die libraries
+bind $p2/amd64 /amd64
+bind /n/dist/amd64/bin /amd64/bin
+bind $p2/include /sys/include
+bind $p2/src /sys/src
+objtype=amd64
+cd /sys/src/libc
+mk install >[2=1] || die libc
+cd /sys/src/ape
+mk lib.install >[2=1] || die APE
 
 echo '--- ydin: /sys/src/9/pc64'
 cd /sys/src/9/pc64 || die pc64
+# The build VM may have private parent permissions; the boot user must
+# be able to traverse the paq root, regardless of workspace permissions.
+mkdir -p pc64.bootfs
+chmod 775 pc64.bootfs
 mk 'CONF=pc64' >[2=1] || die 'ytimen käännös'
+mkdir -p /n/p2boot
+paqfs -q -m /n/p2boot pc64.bootfs.paq || die bootfs
+ls -ld /n/p2boot /n/p2boot/amd64 /n/p2boot/amd64/bin /n/p2boot/rc /n/p2boot/rc/bin
+ls -l /n/p2boot/rc/bin/bootrc /n/p2boot/amd64/bin/rc
+
 
 # Jaetut pc-tiedostot kuuluvat myös 386-porttiin. Tarkista ne sen
 # omalla mkfilellä ja 8c:llä, muuttamatta pc:n käynnistysreittiä.
@@ -75,6 +85,9 @@ cp /sys/src/9/pc64/9pc64 /sys/src/boot/efi/bootx64.efi $p2/out || die kopio
 cp /sys/src/cmd/rc/6.out $p2/out/rc || die 'rc kopio'
 if(! ~ $#aa64 0)
 	cp /sys/src/boot/efi/bootaa64.efi $p2/out
+nm /amd64/lib/libc.a /amd64/lib/ape/libap.a | grep -e ' [Tt] (spawn|_SPAWN)$' && die 'native spawn interface leaked'
+cp /amd64/lib/libc.a $p2/out/libc.a || die libc-output
+cp /amd64/lib/ape/libap.a $p2/out/libap.a || die ape-output
 cd $p2/out
 nm /sys/src/9/pc64/9pc64 | grep -e ' _efi64$' -e ' T main$' >entry.txt
 ls -l

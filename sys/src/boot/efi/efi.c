@@ -27,6 +27,44 @@ void (*stop)(void);
  */
 extern void *rebase(void *addr);
 
+/*
+ * 7l addresses initialised data within 4 KiB of setSB through R28, which
+ * aa64.s rebases, but data further away by its link-time address.  The
+ * firmware moves the image without relocations, so eg a string literal
+ * far into the data segment arrives at its link-time address.  Translate
+ * only addresses inside the loader's own link-time image (IMAGEBASE in
+ * the mkfile, SizeOfImage from the loaded PE header), and only when the
+ * loaded image does not overlap it; anything else is returned unchanged.
+ * On AMD64 the image is not moved (rebase() is the identity).
+ */
+enum {
+	LinkBase = 0x8000,
+};
+
+void*
+linkfix(void *p)
+{
+	uchar *h, *pe;
+	uvlong a, base, size;
+	ulong off;
+
+	a = (uvlong)(uintptr)p;
+	base = (uvlong)(uintptr)rebase((void*)LinkBase);
+	if(base == LinkBase || a < LinkBase)
+		return p;
+	h = (uchar*)(uintptr)base;
+	off = h[0x3c] | h[0x3d]<<8 | h[0x3e]<<16 | (ulong)h[0x3f]<<24;
+	if(off > 0x200 - (24+60))	/* aout2efi: headers in the first 0x200 bytes */
+		return p;
+	pe = h + off;
+	if(pe[0] != 'P' || pe[1] != 'E')
+		return p;
+	size = pe[24+56] | pe[24+57]<<8 | pe[24+58]<<16 | (ulong)pe[24+59]<<24;
+	if(a - LinkBase >= size || (base < LinkBase+size && LinkBase < base+size))
+		return p;
+	return rebase(p);
+}
+
 void
 putc(int c)
 {
@@ -108,6 +146,7 @@ static BootInfo *bi;
 static void bootinfohdr(void);
 static uchar *blob;
 static ulong blobsize, mmapcap;
+static uvlong bloballocated;
 static uchar *fdtsrc;		/* the firmware's device tree, if any (fdtfind()) */
 static ulong fdtsize;
 char *confaddr;
@@ -169,6 +208,67 @@ bootmapinit(void)
 		(UINTN)MapBufSize, &p) != 0 || p == nil)
 		return -1;
 	mapbuf = p;
+	return 0;
+}
+
+/* Snapshot used for preflight; it is refreshed again by bootexit(). */
+int
+bootmemorymap(void **map, uvlong *bytes, uvlong *stride)
+{
+	UINTN size, key, ent;
+	UINT32 version;
+
+	if(mapbuf == nil)
+		return -1;
+	size = MapBufSize;
+	ent = sizeof(EFI_MEMORY_DESCRIPTOR);
+	version = 1;
+	if(eficall(ST->BootServices->GetMemoryMap, &size, mapbuf, &key, &ent, &version) != 0)
+		return -1;
+	*map = mapbuf;
+	*bytes = size;
+	*stride = ent;
+	return 0;
+}
+
+uvlong
+bootblobsize(void)
+{
+	return blobsize;
+}
+
+/* keep [pa, pa+len) from the firmware's allocator as loader data */
+int
+bootreserve(uvlong pa, uvlong len)
+{
+	return efiallocx(pa, len, EfiLoaderData);
+}
+
+/*
+ * Rehome the provisional config/log blob only after the image layout is
+ * known. Config and log pointers, including sub.c's end pointer, move too.
+ */
+int
+bootblobmove(uvlong pa, uvlong len)
+{
+	uvlong old, oldlen;
+	int n;
+
+	if(len < blobsize || len > ~(uvlong)0 - 4095)
+		return -1;
+	if(bootreserve(pa, len) != 0)
+		return -1;
+	n = conflen();
+	old = (uvlong)blob;
+	oldlen = bloballocated;
+	memmove((void*)(uintptr)pa, blob, blobsize);
+	blob = (uchar*)(uintptr)pa;
+	bloballocated = len;
+	bi = (BootInfo*)blob;
+	confaddr = (char*)blob + bi->configoff;
+	logbuf = (char*)blob + bi->logoff;
+	confrelocate(n);
+	efifree(old, oldlen);
 	return 0;
 }
 
@@ -713,7 +813,8 @@ efimain(EFI_HANDLE ih, EFI_SYSTEM_TABLE *st)
 	 * running, which is why nothing about the handoff is at a fixed
 	 * address any more (Plan2001 Boot ABI v1, sys/include/bootinfo.h).
 	 */
-	fdtfind();
+	if(archfdtallowed())
+		fdtfind();
 	mmapcap = MapBufSize / sizeof(EFI_MEMORY_DESCRIPTOR);
 	blobsize = PGROUND(((sizeof(BootInfo) + 7) & ~7) + ConfCap + LogCap + ((fdtsize + 7) & ~7) + mmapcap*sizeof(BootMem));
 	if((la = bloballoc(blobsize)) == 0){
@@ -721,6 +822,7 @@ efimain(EFI_HANDLE ih, EFI_SYSTEM_TABLE *st)
 		for(;;)
 			;
 	}
+	bloballocated = blobsize;
 	blob = (uchar*)la;
 	memset(blob, 0, blobsize);
 	bi = (BootInfo*)blob;

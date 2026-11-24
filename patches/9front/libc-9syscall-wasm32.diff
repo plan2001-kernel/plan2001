@@ -1,6 +1,12 @@
---- a/sys/src/libc/9syscall/mkfile	2026-10-04 15:35:10.141260394 +0000
-+++ b/sys/src/libc/9syscall/mkfile	2026-10-04 15:35:10.153636625 +0000
-@@ -7,6 +7,21 @@
+--- a/sys/src/libc/9syscall/mkfile
++++ b/sys/src/libc/9syscall/mkfile
+@@ -2,11 +2,26 @@
+ </$objtype/mkfile
+ 
+ install:V:
+-	SYS=`{sed '/^#define._X[123]/d; s/#define.([A-Z0-9_]*).*/\1/' sys.h}
++	SYS=`{rc ./syscalls $objtype sys.h | awk '$1 !~ /^_X[123]$/ {print $1}'}
+ 	for(I in $SYS) {
  		i=`{echo $I|tr A-Z a-z}
  		n=`{sed -n '/[ 	]'$I'[ 	]/s/.*	//p' sys.h}
  		if(~ $i (exits nsec)) i=_$i
@@ -22,15 +28,20 @@
  		{switch($objtype){
  		case 68000 68020
  			echo TEXT $i'(SB)', 1, '$0'
-@@ -147,8 +162,10 @@
+@@ -147,8 +162,16 @@
  			echo RET
  		}} > $i.s
  		$AS $i.s
 +		}
++	}
++	# A native rebuild must not keep an old wasm-only member or object.
++	if(! ~ $objtype wasm32){
++		rm -f spawn.$O spawn.s
++		if(ar t /$objtype/lib/libc.a >[2]/dev/null | grep -s '^spawn\.'^$O^'$')
++			ar d /$objtype/lib/libc.a spawn.$O >[2]/dev/null
  	}
  	ar vu /$objtype/lib/libc.a *.$O
 +	if(~ $objtype wasm32) rm -f *.c
  	rm -f *.$O *.s
  
  nuke clean:V:
- 	rm -f *.[$OS]

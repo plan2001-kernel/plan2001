@@ -49,13 +49,15 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="p2build-") as tyo:
         kone = vm9.overlay_kone(pohja, tyo, "buildvm.qcow2")
-        sisaan = vm9.tar_levylle(os.path.join(tyo, "in.img"), jasenet(os.path.abspath(a.shared)))
+        sisaan = vm9.tar_levylle(os.path.join(tyo, "in.img"),
+                                  [("build.rc", os.path.join(vm9.TAMA, "build.rc"))]
+                                  + vm9.source_jasenet(tyo, os.path.abspath(a.shared)))
         ulos = vm9.tyhja_levy(os.path.join(tyo, "out.img"))
         vm = vm9.Kone([(kone, "qcow2", False, "hd"),
                        (iso, "raw", True, "cd"),
                        (sisaan, "raw", False, "hd"),
                        (ulos, "raw", False, "hd")],
-                      vm9.Ovmf.etsi(), loki, muisti="2048", cpu="4")
+                      vm9.Ovmf.etsi(), loki, muisti="2048", cpu="2")
         vm.kaynnista()
         try:
             vm9.kaynnista_9front(vm, 300)

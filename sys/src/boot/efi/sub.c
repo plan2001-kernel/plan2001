@@ -13,6 +13,7 @@ tracehex(char *label, uvlong value)
 	char buf[96], *p;
 	int n;
 
+	label = linkfix(label);
 	p = buf;
 	n = strlen(label);
 	memmove(p, label, n);
@@ -35,6 +36,7 @@ int logused;
 void
 print(char *s)
 {
+	s = linkfix(s);
 	while(*s != 0){
 		if(logbuf != nil && logused < logcap)
 			logbuf[logused++] = *s;
@@ -195,6 +197,13 @@ timeout(int ms)
 #define	CONFEND	(CONF+CONFLEN)
 
 static char *confend;
+
+/* bootblobmove() moved CONF: n is conflen() before the move */
+void
+confrelocate(int n)
+{
+	confend = CONF + n - 1;
+}
 
 /* bytes of plan9.ini text in CONF, with its terminating NUL */
 int
@@ -406,10 +415,10 @@ beswall(uvlong l)
 
 
 /*
- * Minimal ELF64 AMD64 kernel loader.  Only ET_EXEC, little-endian, x86-64
- * program-header images are accepted; ET_DYN/relocatable images are
+ * Restricted ELF64 native kernel loader.  Only ET_EXEC, little-endian, AMD64 or
+ * AArch64 program-header images are accepted; ET_DYN/relocatable images are
  * rejected rather than guessed at.  PT_LOAD data is written to p_paddr and
- * BSS is zeroed by the loader.  The old a.out path below is unchanged.
+ * BSS is zeroed by the loader after platform and memory preflight.
  */
 #ifndef KZERO
 #define KZERO 0xffffffff80000000ull	/* AMD64 kernel half; a.out path unchanged */
@@ -481,10 +490,11 @@ bootelf(void *f, uchar *magic)
 {
 	Elf64Ehdr eh;
 	Elf64Phdr ph[ElfMaxPh];
-	uvlong cur, entry, end;
+	BootImage im;
+	uvlong cur, entry;
 	uvlong lpa[ElfMaxPh], lsz[ElfMaxPh];
 	uchar *d;
-	int i, j, n, nload;
+	int i, j, k, n, nload, found;
 	char *errmsg, *why;
 
 	errmsg = "bad ELF kernel";
@@ -503,7 +513,7 @@ bootelf(void *f, uchar *magic)
 	if(eh.phentsize != sizeof(Elf64Phdr) || eh.phnum == 0 ||
 	   eh.phnum > ElfMaxPh)
 		return "unsupported ELF program headers";
-	if(eh.phoff < sizeof eh)
+	if(eh.phoff < sizeof eh || eh.phoff > ~(uvlong)0 - eh.phnum*sizeof ph[0])
 		return "bad ELF program-header offset";
 	if(skipn(f, eh.phoff - sizeof eh) != 0)
 		return "short ELF program headers";
@@ -515,33 +525,63 @@ bootelf(void *f, uchar *magic)
 	if((why = archcheck()) != nil)
 		return why;
 
-	nload = 0;
+	/* Preflight the complete image before claiming or writing any segment. */
+	memset(&im, 0, sizeof im);
+	im.format = ImageElf;
+	im.entry = eh.entry;
+	found = 0;
 	for(i = 0; i < eh.phnum; i++){
 		if(ph[i].type != ElfPTLoad)
 			continue;
-		if(ph[i].filesz > ph[i].memsz || ph[i].paddr == 0 ||
-		   ph[i].paddr + ph[i].memsz < ph[i].paddr)
+		if(ph[i].memsz == 0 || ph[i].filesz > ph[i].memsz || ph[i].paddr == 0 ||
+		   ph[i].paddr > ~(uvlong)0 - ph[i].memsz ||
+		   ph[i].vaddr > ~(uvlong)0 - ph[i].memsz ||
+		   ph[i].filesz > 0x7fffffff || ph[i].memsz > 0x7fffffff)
 			return "bad ELF load segment size/address";
-		if(ph[i].vaddr != ph[i].paddr + KZERO)
-			return "ELF segment is not a KZERO image";
-		if(ph[i].align != 0 && (ph[i].align & (ph[i].align-1)) != 0)
+		if(ph[i].align != 0 && ((ph[i].align & (ph[i].align-1)) != 0 ||
+		   (ph[i].offset & (ph[i].align-1)) != (ph[i].vaddr & (ph[i].align-1))))
 			return "bad ELF segment alignment";
-		if(ph[i].paddr < 0x1c000)
-			return "ELF segment overlaps boot tables/Mach";
-		if(ph[i].offset < cur)
-			return "out-of-order ELF segment";
+		if(ph[i].offset < cur || ph[i].offset > ~(uvlong)0 - ph[i].filesz)
+			return "out-of-order/overflowing ELF segment";
 		for(j = 0; j < i; j++)
 			if(ph[j].type == ElfPTLoad &&
 			   ph[i].paddr < ph[j].paddr + ph[j].memsz &&
 			   ph[j].paddr < ph[i].paddr + ph[i].memsz)
 				return "overlapping ELF segments";
-		if(efialloc(ph[i].paddr, ph[i].memsz) != 0){
+		k = im.nseg++;
+		im.seg[k].pa = ph[i].paddr;
+		im.seg[k].va = ph[i].vaddr;
+		im.seg[k].filesz = ph[i].filesz;
+		im.seg[k].memsz = ph[i].memsz;
+		im.seg[k].flags = ph[i].flags;
+		if((ph[i].flags & ElfPFX) != 0 &&
+		   eh.entry >= ph[i].vaddr && eh.entry < ph[i].vaddr + ph[i].memsz)
+			found = 1;
+		cur = ph[i].offset + ph[i].filesz;
+	}
+	if(im.nseg == 0)
+		return "ELF kernel has no loadable segments";
+	if(!found || !archentryok(eh.entry))
+		return "ELF entry not in executable segment/kernel map";
+	/* the ISA's platform contract and the firmware's memory map (archaa64.c) */
+	if((why = archimage(&im)) != nil){
+		archrelease();
+		return why;
+	}
+	entry = im.entrypa;
+
+	cur = eh.phoff + eh.phnum * sizeof ph[0];
+	nload = 0;
+	k = 0;
+	for(i = 0; i < eh.phnum; i++){
+		if(ph[i].type != ElfPTLoad)
+			continue;
+		if(efialloc(ph[i].paddr, im.seg[k].allocsz) != 0){
 			errmsg = "cannot claim ELF segment memory";
 			goto bad;
 		}
 		lpa[nload] = ph[i].paddr;
-		lsz[nload] = ph[i].memsz;
-		nload++;
+		lsz[nload++] = im.seg[k++].allocsz;
 		if(skipn(f, ph[i].offset - cur) != 0){
 			errmsg = "short ELF file before segment";
 			goto bad;
@@ -554,14 +594,7 @@ bootelf(void *f, uchar *magic)
 		if(ph[i].memsz > ph[i].filesz)
 			memset(d + ph[i].filesz, 0, ph[i].memsz - ph[i].filesz);
 		cur = ph[i].offset + ph[i].filesz;
-		end = ph[i].paddr + ph[i].memsz;
-		if(end < ph[i].paddr){
-			errmsg = "bad ELF segment end";
-			goto bad;
-		}
 	}
-	if(nload == 0)
-		return "ELF kernel has no loadable segments";
 	/*
 	 * The image was written through the firmware's caches.  Make it
 	 * visible to the kernel entry, which runs with the MMU and caches
@@ -571,21 +604,7 @@ bootelf(void *f, uchar *magic)
 	for(i = 0; i < nload; i++)
 		archcacheclean(lpa[i], lsz[i]);
 	archcachesync();
-	if(!archentryok(eh.entry)){
-		errmsg = "ELF entry outside kernel half";
-		goto bad;
-	}
-	entry = eh.entry - KZERO;
-	for(i = 0; i < eh.phnum; i++)
-		if(ph[i].type == ElfPTLoad &&
-		   (ph[i].flags & ElfPFX) != 0 &&
-		   eh.entry >= ph[i].vaddr &&
-		   eh.entry < ph[i].vaddr + ph[i].memsz)
-			goto found;
-	errmsg = "ELF entry not in executable segment";
-	goto bad;
 
-found:
 	close(f);
 	print("[P2 L22] ELF kernel file closed\n");
 	print("[P2 L23] stop boot device\n");
@@ -610,6 +629,7 @@ found:
 bad:
 	for(i = 0; i < nload; i++)
 		efifree(lpa[i], lsz[i]);
+	archrelease();
 	return errmsg;
 }
 
@@ -617,7 +637,8 @@ char*
 bootkern(void *f)
 {
 	uchar *e, *d, *t;
-	uvlong entry;
+	uvlong entry, textend, datapa, imglen;
+	BootImage im;
 	ulong n, ktext, elen, dround;
 	char *errmsg, *why;
 	Exec ex;
@@ -632,6 +653,8 @@ bootkern(void *f)
 	e = nil;
 	elen = 0;
 	errmsg = "i/o error";
+	if((why = archinit()) != nil)
+		return why;
 
 	{
 		uchar magic[4];
@@ -669,13 +692,42 @@ bootkern(void *f)
 	 */
 	ktext = beswal(ex.text);
 	dround = archdataround();	/* where the ISA's linker starts data after text */
-	elen = PGROUND(ROUNDUP((uintptr)e + ktext, dround) + beswal(ex.data)) + PGROUND(beswal(ex.bss)) - (uintptr)e;
+	/* the image's extent without wrapping, then the platform's preflight */
+	if(ktext == 0 || (uvlong)e > ~(uvlong)0 - ktext - (dround-1))
+		return "overflowing kernel text";
+	textend = (uvlong)e + ktext;
+	datapa = (textend + dround-1) & ~((uvlong)dround-1);
+	if(datapa > ~(uvlong)0 - beswal(ex.data) - 4095)
+		return "overflowing kernel data";
+	imglen = PGROUND(datapa + beswal(ex.data));
+	if(imglen > ~(uvlong)0 - PGROUND((uvlong)beswal(ex.bss)))
+		return "overflowing kernel bss";
+	imglen += PGROUND((uvlong)beswal(ex.bss));
+	if(imglen < (uvlong)e || imglen - (uvlong)e > 0x7fffffff)
+		return "unsupported kernel image size";
+	elen = imglen - (uvlong)e;
+	memset(&im, 0, sizeof im);
+	im.format = ImageAout;
+	im.magic = beswal(ex.magic);
+	im.nseg = 1;
+	im.entry = entry;
+	im.seg[0].pa = (uvlong)e;
+	im.seg[0].va = entry;
+	im.seg[0].filesz = ktext;
+	im.seg[0].memsz = elen;
+	im.seg[0].flags = ImageExec;
+	if((why = archimage(&im)) != nil){
+		archrelease();
+		return why;
+	}
+
 	tracehex("[P2 L16] kernel text bytes=0x", ktext);
 	tracehex("[P2 L16] kernel data bytes=0x", beswal(ex.data));
 	tracehex("[P2 L16] kernel bss bytes=0x", beswal(ex.bss));
 	tracehex("[P2 L16] kernel allocation bytes=0x", elen);
 	if(efialloc((uvlong)e, elen) != 0){
 		elen = 0;
+		archrelease();
 		return "cannot claim the kernel's memory range";
 	}
 	print("[P2 L17] kernel memory claimed executable\n");
@@ -739,6 +791,7 @@ bootkern(void *f)
 	archjump(e, bootinfofinish());
 
 Error:
+	archrelease();
 	if(elen != 0)
 		efifree((uvlong)e, elen);
 	return errmsg;
