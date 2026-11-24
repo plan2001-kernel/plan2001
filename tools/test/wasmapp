@@ -140,8 +140,11 @@ def main():
 	srv = subprocess.Popen([os.path.join(root, 'tools/serve'), '-d', os.environ.get('SITE') or os.path.join(out, 'site'),
 		'-g', os.environ.get('GATEWAY') or '17080', str(HTTP)],
 		stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+	# --password-store=basic: kertakäyttöprofiili ei tarvitse avainnippua; lukittu
+	# GNOME Keyring (Secret.Service.Unlock) pysäyttää muuten Chromiumin OSCryptin
+	# ja sen myötä kaikki verkkopyynnöt, myös paikallisen sivun
 	chrome = subprocess.Popen(['chromium', '--headless=new', '--no-sandbox', '--disable-gpu',
-		f'--user-data-dir={tmp}', '--remote-debugging-port=0', '--window-size=600,600', 'about:blank'],
+		'--password-store=basic', f'--user-data-dir={tmp}', '--remote-debugging-port=0', '--window-size=600,600', 'about:blank'],
 		stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 	# the browser's own DevTools port (0: one free, in its DevToolsActivePort), not a fixed one
 	# another harness's browser could be listening on
