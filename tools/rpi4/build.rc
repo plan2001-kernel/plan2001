@@ -32,7 +32,9 @@ test -r /n/dist/sys/src/boot/bcm/start4cd.elf || die 'ISO:lla ei ole Pi4-laiteoh
 rm -rf $w
 mkdir -p $w/src $w/include $w/arm64 $w/acme $w/rc
 # kuten julkaisussa (d775): mkdir perii /tmp:n rajatut oikeudet, ja
-# ytimen bootfs (disk/mkfs ilman tilaa) ottaa ne lähteestä
+# ytimen bootfs (disk/mkfs ilman tilaa) ottaa ne lähteestä.  $p2 on
+# tools/rpi4/buildissa luotu d775:nä, joten sen alta kopioitu puu, siinä
+# käännetyt ohjelmat ja bootfs saavat julkaisun oikeudet.
 chmod 775 $w/src $w/include $w/arm64 $w/acme $w/rc
 dircp $p2/src $w/src || die 'assembled sys/src copy'
 dircp $p2/include $w/include || die 'assembled sys/include copy'

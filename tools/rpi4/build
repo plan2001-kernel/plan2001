@@ -148,7 +148,11 @@ def main():
         vm.kaynnista()
         try:
             vm9.kaynnista_9front(vm, 300)
-            vm.aja("rm -rf /tmp/p2 && mkdir -p /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data", 300)
+            # d775 kuten julkaisussa: Plan 9 rajaa uuden tiedoston oikeudet
+            # vanhemman mukaan, ja ytimen bootfs (disk/mkfs) ottaa ne lähteestä.
+            # /tmp:n rajattu tila tekisi bootfs:n juuresta d750:n, jota
+            # käynnistysprosessi ei saa lukea (/bin/bootrc "does not exist").
+            vm.aja("rm -rf /tmp/p2 && mkdir -p /tmp/p2 && chmod 775 /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data", 300)
             vm.aja("rc /tmp/p2/build.rc" + (" noimg" if a.no_image else ""), 4 * 3600)
         finally:
             vm.sammuta()
