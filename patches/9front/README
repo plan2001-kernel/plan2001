@@ -100,3 +100,18 @@ syscall-tab.diff
 		sys.h's raw #define lines: mktab.awk took sys.h's #ifdef and
 		#endif around wasm32's SPAWN as calls, and syscall(1) did not
 		compile.  spawn is in wasm32's table only.  2026-11-24.
+
+sdvirtio-scsi-lun.diff
+		pc/sdvirtio.c, port/sdvirtio10.c: virtio-scsi addressed unit
+		n as target n, logical unit 0, and took max_target (the
+		highest target id) as the number of targets, so a disk at
+		another LUN (target 0 LUN 1 on Oracle Cloud) or at the highest
+		target was not found, and a controller with max_target 0 not
+		used.  On enable the driver asks each target for its logical
+		units (REPORT LUNS to LUN 0); LUN 0 of target t stays unit t,
+		the other LUNs take the free unit numbers in target and LUN
+		order, and every request carries its unit's own target and
+		LUN.  A LUN is a unit only when INQUIRY finds a device there:
+		targets report LUN 0 without one (QEMU's 'QEMU TARGET',
+		peripheral qualifier 1, type 1Fh).  Targets without REPORT LUNS get LUN 0 as before; virtio
+		block devices are unchanged.  2026-11-24.
