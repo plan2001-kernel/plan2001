@@ -1,0 +1,121 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>browser drawterm harness</title>
+<script>
+// Vain testikäyttöön tarkoitettu sivu index.html:n vieressä.  Se ohjaa oikeaa
+// sivua saman alkuperän iframessa ja lähettää tuloksen POST-pyyntönä
+// testin ?result=-osoitteeseen, koska avoin WebSocket estää Chromiumin
+// `--dump-dom`-tilaa koskaan päättymästä.  Tuotantosivu ei lue URL-argumentteja;
+// kysely valitsee tässä vain testin tulosvastaanottimen.
+const result = new URLSearchParams(location.search).get('result');
+</script>
+<iframe id="f" src="index.html?ws=ws://evil.example/ws&amp;cpu=evil.example&amp;a=-x&amp;start=1#pass=leaked"
+	style="width:800px;height:600px;border:0"></iframe>
+<pre id="r">PENDING</pre>
+<script>
+const log = [];
+function ok(name, cond) { log.push((cond ? 'ok: ' : 'FAIL: ') + name); }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+(async () => {
+try {
+	const f = document.getElementById('f');
+	let w = f.contentWindow;
+	for (let i = 0; i < 400; i++) {
+		w = f.contentWindow;
+		if (w && w.location && w.location.href.includes('index.html') &&
+		    w.document.readyState === 'complete')
+			break;
+		await sleep(25);
+	}
+	await sleep(100);
+	w = f.contentWindow;
+	const d = w.document;
+	const debug = '?ws=ws://evil.example/ws&cpu=evil.example&a=-x&start=1#pass=leaked';
+	let cfg = null;
+	for (let i = 0; i < 200 && !cfg; i++) {
+		await sleep(25);
+		cfg = w.drawterm && w.drawterm.config;
+	}
+	ok('page fetches gateway configuration', !!cfg);
+	ok('configuration destinations are shown read-only',
+	   d.getElementById('cpu').textContent.length > 0 &&
+	   d.getElementById('auth').textContent.length > 0 &&
+	   d.getElementById('cpu').tagName !== 'INPUT');
+	d.getElementById('user').value = 'glenda';
+	d.getElementById('pass').value = 'test-password';
+	d.querySelector('#login form').requestSubmit();
+	let flushes = 0;
+	for (let i = 0; i < 400; i++) {
+		await sleep(25);
+		if (w.drawterm && w.drawterm.flushes > 0) {
+			flushes = w.drawterm.flushes;
+			break;
+		}
+	}
+	ok('drawterm.wasm starts and flushes the canvas', flushes > 0);
+	ok('page is cross-origin isolated', w.crossOriginIsolated);
+	const argv = w.drawterm.args.join(' ');
+	ok('URL arguments and password are ignored',
+	   argv.includes('17019') && argv.includes('567') &&
+	   !argv.includes('evil') && !argv.includes('leaked') &&
+	   !argv.includes('test-password'));
+	const c = d.getElementById('screen');
+	ok('canvas has a size', c.width > 0 && c.height > 0);
+	w.Module.browserDrawterm.present(
+		new w.ImageData(new w.Uint8ClampedArray([255, 0, 0, 255]), 1, 1), 0, 0);
+	const p = c.getContext('2d').getImageData(0, 0, 1, 1).data;
+	ok('flush rectangle updates the Canvas pixels',
+	   p[0] === 255 && p[1] === 0 && p[2] === 0 && p[3] === 255);
+	const beforeresize = w.drawterm.resizes;
+	f.style.width = '720px';
+	f.style.height = '520px';
+	w.dispatchEvent(new w.Event('resize'));
+	let resized = false;
+	for (let i = 0; i < 100; i++) {
+		await sleep(25);
+		const li = w.drawterm.lastInput;
+		if (li && li[0] === 3) { resized = true; break; }
+	}
+	ok('viewport resize reaches drawterm', resized);
+	for (let i = 0; i < 100; i++) {
+		await sleep(25);
+		if (w.drawterm.resizes > beforeresize)
+			break;
+	}
+	ok('resize reaches the Canvas and drawterm',
+	   w.drawterm.resizes > beforeresize);
+	const before = w.drawterm.inputs;
+	const r = c.getBoundingClientRect();
+	const ev = (t, x, y, b) => c.dispatchEvent(new w.PointerEvent(t, {
+		bubbles: true, clientX: r.left + x, clientY: r.top + y,
+		pointerId: 1, pointerType: 'mouse', buttons: b }));
+	ev('pointermove', 20, 20, 0);
+	ev('pointerdown', 20, 20, 1);
+	ev('pointerup', 20, 20, 1);
+	c.dispatchEvent(new w.KeyboardEvent('keydown', {key: 'a', bubbles: true}));
+	c.dispatchEvent(new w.KeyboardEvent('keyup', {key: 'a', bubbles: true}));
+	for (let i = 0; i < 100; i++) {
+		await sleep(25);
+		if (w.drawterm.inputs >= before + 5)
+			break;
+	}
+	ok('mouse and keyboard reach drawterm', w.drawterm.inputs >= before + 5);
+	for (let i = 0; i < 400; i++) {
+		await sleep(25);
+		if (w.drawterm.connections >= 1)
+			break;
+	}
+	ok('page opens the allowlisted WebSocket', w.drawterm.connections >= 1);
+	if (!w.drawterm.connections)
+		log.push('connections=0 args=' + w.drawterm.args.join(' ') +
+			 ' logs=' + JSON.stringify(w.drawterm.logs.slice(-8)));
+} catch (e) {
+	ok('exception: ' + e, false);
+}
+const body = log.join('\n') + '\nHARNESS-DONE';
+document.getElementById('r').textContent = body;
+if (result)
+	fetch(result, {method: 'POST', body}).catch(() => {});
+})();
+</script>
