@@ -29,7 +29,8 @@ Plan2001's UEFI boot, which remains the native boot policy (README).
     tools/rpi4/stock            # 9front-11952.pi3.img, SHA256-checked
     tools/rpi4/bootinfotest     # 9pi4efi's BootInfo entry in QEMU raspi4b
 
-`tools/rpi4/build` runs in the 9front-11952 build VM of
+`tools/rpi4/build` assembles the pinned release with `tools/tree` before
+transferring the complete patched source and headers to the 9front-11952 build VM of
 `tools/native-amd64` (`PLAN2001_BUILDVM`, default
 `~/.cache/plan2001/base.qcow2`) with no network, from the pinned ISO
 (SHA256-checked) with this tree's files over it (`tools/tree` must
@@ -126,7 +127,10 @@ card.
 makes the whole card for stage (c): a copy of `plan2001-rpi4.img` whose
 Plan 9 partition (the hjfs root) is kept and whose FAT partition is
 formatted again with the firmware above, `EFI/BOOT/BOOTAA64.EFI`,
-`9pi4efi` and `plan9.ini` (`bootfile=/9pi4efi`, `console=1`).
+`9pi4efi` and `plan9.ini` (`bootfile=/9pi4efi`, `console=1`,
+`efiplatform=rpi4`, `efibootmap=0,0x40000000`,
+`efiscratch=0x1000000,0x80000`). The latter settings are checked by the
+loader and must match the kernel's early map and pre-text scratch.
 
 EDK2 settings the kernel needs, in its setup menu (Esc at boot; kept in
 `RPI_EFI.fd` on the card):
@@ -151,14 +155,26 @@ other's entry.
   `+0x3400`, page tables and `Mach` structures below the text at
   `+0x80000`. `KZERO` still maps physical 0, so `PADDR`, `KADDR` and DMA
   bus addresses are those of the stock kernel.
-- **Loader contract.** The image is a 9front arm64 a.out (magic
+- **Loader contract.** The primary image is a native 9front arm64 a.out (magic
   `0x8c47`), entry `0xffffffffc1080000` = first text byte, loaded at
   physical entry − `0xffffffffc0000000`, data at the next 64 KiB
-  boundary, then bss. The loader must claim `[PHYSBASE, end)` (image and
-  the area below it) as `EfiLoaderCode`/`EfiLoaderData`, put the BootInfo
-  blob and its device tree copy below 1 GiB outside that range, and
-  enter at EL2 or EL1 with interrupts off and caches cleaned, X0 =
-  BootInfo. `tools/rpi4/build` prints the range for the built image.
+  boundary, then bss. The shared loader also accepts a strictly checked
+  linked AArch64 ELF64 ET_EXEC image. It claims the image and the explicit
+  pre-text scratch `[0x1000000,0x1080000)` as loader memory; together
+  these protect `[PHYSBASE,end)` from the kernel allocator. Image and
+  scratch pages must be conventional RAM before allocation. The BootInfo
+  blob is placed on a 64 KiB boundary below 1 GiB, outside image, scratch,
+  firmware FDT and FDT-reserved ranges. Entry is at EL2 or EL1 with
+  interrupts off and caches cleaned, X0 = BootInfo.
+- **Firmware description.** `rpi4` requires a bounded FDT from the UEFI
+  configuration table. The loader validates its header, block ranges,
+  reservation map, structure tokens, BCM2711 compatibility, CPU data,
+  eMMC/PCIe DMA windows and any PSCI conduit before copying it into BootInfo.
+  Fixed `/reserved-memory` ranges and reservation-map entries are excluded
+  from image, scratch and BootInfo placement; dynamic reserved-memory nodes
+  are rejected because their final addresses are unknown. Missing, malformed
+  or non-BCM2711 FDTs fail with a loader diagnostic. QEMU `virt` retains its
+  separate platform contract and does not forward an FDT to the kernel.
 - **Entry checks.** Before anything else the kernel checks X0 and the
   blob and, on a mismatch, prints the reason on the PL011 and halts: X0 a
   device tree (started by the Pi firmware), not BootInfo, version, other
@@ -170,12 +186,14 @@ other's entry.
   the device tree: `*ncpu`, and the BCM2711 DMA windows `*emmc2bus`,
   `*pciwin`, `*pcidmawin` that the stock kernel reads from the firmware
   DTB. The device tree's `/chosen/bootargs` is not used.
-- **Memory** is BootInfo's map: `EfiConventionalMemory` and boot
-  services memory; loader, runtime, reserved and VideoCore memory are
-  left alone. The four largest banks are used.
-- **CPUs and reset.** CPUs 1–3 are started one by one with PSCI
-  `CPU_ON` through the conduit of the device tree's `/psci` (`smc` with
-  TF-A); without `/psci` the kernel runs on one CPU. `exit` turns
+- **Memory** is BootInfo's map. Loader scratch pages are claimed before
+  ExitBootServices and appear as `BootMemLoaderData`; the kernel accepts
+  only loader-owned descriptors across its complete early region. Runtime,
+  reserved, MMIO and VideoCore ranges are left alone. The four largest
+  usable banks are used.
+- **CPUs and reset.** When the firmware FDT provides `/psci`, CPUs 1–3
+  are started one by one with PSCI `CPU_ON` through its declared conduit
+  (`smc` with TF-A). Without `/psci`, the kernel runs on one CPU. `exit` turns
   secondary CPUs off with `CPU_OFF` and resets with `SYSTEM_RESET`.
   Loading another kernel through `#c/reboot` is refused under UEFI.
 

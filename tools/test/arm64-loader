@@ -3,6 +3,7 @@
 No firmware or physical Pi4 is emulated by these sanitizer-backed tests.
 """
 import pathlib
+import struct
 import subprocess
 import tempfile
 
@@ -40,8 +41,12 @@ static EFI_MEMORY_DESCRIPTOR memory[8];
 static int nmemory,claims,released,moved;
 char *confaddr;
 int conflen(void){return strlen(confaddr)+1;}
+uchar *fdtsrc;
+ulong fdtsize;
+char *bootfdtcopy(void){return nil;}
 int bootmemorymap(void **m,uvlong *n,uvlong *s){*m=memory;*n=nmemory*sizeof(memory[0]);*s=sizeof(memory[0]);return 0;}
 uvlong bootblobsize(void){return 0x12000;}
+uvlong bootblobbase(void){return 0x28000000;}
 int bootblobmove(uvlong a,uvlong n){check(a && n>=bootblobsize(),"blob relocation");moved++;return 0;}
 int bootreserve(uvlong a,uvlong n){(void)a;(void)n;return 0;}
 void efifree(uvlong a,uvlong n){(void)a;(void)n;released++;}
@@ -61,6 +66,43 @@ void *bootinfofinish(void){abort();}
 typedef struct {uchar b[8192];int pos,n;} File;
 int readn(void *vf,void *p,int n){File*f=vf;if(n<0 || n>f->n-f->pos)return 0;memcpy(p,f->b+f->pos,n);f->pos+=n;return n;}
 '''
+def make_fdt(reserved=False, dynamic=False):
+    names = ['compatible', 'method', 'reg', 'dma-ranges', 'ranges', 'size', 'alloc-ranges',
+             '#address-cells', '#size-cells']
+    strings, offsets = b'', {}
+    for name in names:
+        offsets[name] = len(strings)
+        strings += name.encode() + b'\0'
+    st = bytearray()
+    def word(n): st.extend(struct.pack('>I', n))
+    def begin(name):
+        word(1); raw=name.encode()+b'\0'; st.extend(raw); st.extend(b'\0' * (-len(raw) % 4))
+    def end(): word(2)
+    def prop(name, value):
+        word(3); word(len(value)); word(offsets[name]); st.extend(value); st.extend(b'\0' * (-len(value) % 4))
+    begin(''); prop('compatible', b'brcm,bcm2711\0')
+    begin('psci'); prop('method', b'smc\0'); end()
+    begin('cpus'); begin('cpu@0'); prop('reg', bytes(8)); end(); end()
+    begin('emmc2bus'); prop('dma-ranges', bytes(20)); end()
+    begin('scb'); begin('pcie@7d500000'); prop('ranges', bytes(28)); prop('dma-ranges', bytes(28)); end(); end()
+    if reserved or dynamic:
+        begin('reserved-memory'); prop('#address-cells', struct.pack('>I', 2));
+        prop('#size-cells', struct.pack('>I', 2)); prop('ranges', b'')
+        if reserved:
+            begin('bootguard@2000000'); prop('reg', struct.pack('>QQ', 0x2000000, 0x10000)); end()
+        if dynamic:
+            begin('linux,cma'); prop('compatible', b'shared-dma-pool\0')
+            prop('size', struct.pack('>Q', 0x400000))
+            prop('alloc-ranges', struct.pack('>QQ', 0x10000000, 0x10000000)); end()
+        end()
+    end(); word(9)
+    reserve=bytes(16); offstruct=40+len(reserve); offstrings=offstruct+len(st)
+    header=struct.pack('>10I',0xd00dfeed,offstrings+len(strings),offstruct,offstrings,40,17,16,0,len(strings),len(st))
+    return header+reserve+st+strings
+
+fdt_c = ('static uchar validfdt[]={' + ','.join(str(b) for b in make_fdt()) + '};\n' +
+         'static uchar reservedfdt[]={' + ','.join(str(b) for b in make_fdt(True)) + '};\n' +
+         'static uchar dynamicfdt[]={' + ','.join(str(b) for b in make_fdt(dynamic=True)) + '};\n')
 tests = r'''
 static void mem(int i,uint type,uvlong a,uvlong n){memory[i]=(EFI_MEMORY_DESCRIPTOR){0};memory[i].Type=type;memory[i].PhysicalStart=a;memory[i].NumberOfPages=n/4096;}
 static void qmem(void){nmemory=2;mem(0,EfiReservedMemoryType,0x40000000,0x10000);mem(1,EfiConventionalMemory,0x40010000,0x3fff0000);}
@@ -69,7 +111,7 @@ static BootImage image(ArmLayout*l,uvlong pa){BootImage x={0};x.format=ImageElf;
 static void policy(void){
  ArmLayout q,p,t;BootImage im,x;uvlong a;char*why;int i;
  check(armplatform(&q,"qemu-virt",0,0,0,0,0)==nil,"QEMU contract");
- check(armplatform(&p,"rpi4",3,0,0x40000000,0,0)==nil,"Pi4 explicit contract");
+ check(armplatform(&p,"rpi4",3,0,0x40000000,0x1000000,0x80000)==nil,"Pi4 explicit contract");
  check(armplatform(&t,"unknown",0,0,0,0,0)!=nil,"unknown platform");
  check(armplatform(&t,"",0,0,0,0,0)!=nil,"missing platform");
  check(armplatform(&t,"rpi4",0,0,0,0,0)!=nil,"Pi4 missing layout");
@@ -79,6 +121,16 @@ static void policy(void){
  check(armplatform(&t,"rpi4",3,0,0x40000000,0x40000000,0x10000)!=nil,"scratch outside map");
  check(armplatform(&t,"rpi4",3,0,0x40000000,0x10000,0)!=nil,"ambiguous zero scratch");
  check(armplatform(&t,"qemu-virt",1,0,0,0,0)!=nil,"QEMU mapping cannot be guessed/overridden");
+ check(armfdtvalidate(validfdt,sizeof validfdt)==nil,"valid BCM2711 FDT");
+ validfdt[0]=0;check(armfdtvalidate(validfdt,sizeof validfdt)!=nil,"invalid FDT rejected");validfdt[0]=0xd0;
+ {uvlong rb[ArmMaxReserved],rl[ArmMaxReserved];int nr=0;char *fw;
+  fw=armfdtreservations(reservedfdt,sizeof reservedfdt,rb,rl,ArmMaxReserved,&nr,NULL,0,&i);
+  if(fw) fprintf(stderr,"FDT fixed parser: %s\n",fw);
+  check(fw==nil && nr==1 && rb[0]==0x2000000 && rl[0]==0x10000,"FDT reservation map and /reserved-memory parsed");
+  p.nreserved=nr;p.reservedlo[0]=rb[0];p.reservedlen[0]=rl[0];x=image(&p,0x2000000);
+  check(armimage(&p,&x)!=nil,"FDT-reserved kernel load rejected");p.nreserved=0; }
+ {uvlong rb[ArmMaxReserved],rl[ArmMaxReserved];ArmDynamic d[ArmMaxDynamic];int nr=0,nd=0;
+  check(armfdtreservations(dynamicfdt,sizeof dynamicfdt,rb,rl,ArmMaxReserved,&nr,d,ArmMaxDynamic,&nd)==nil && nr==0 && nd==1 && d[0].size==0x400000 && d[0].nranges==1 && d[0].rangelo[0]==0x10000000,"dynamic FDT pool bounds parsed"); }
  qmem();im=image(&q,0x40100000);im.format=ImageAout;im.magic=R_MAGIC;
  check(armimage(&q,&im)==nil,"QEMU a.out");
  check(armmemory(&q,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]))==nil,"QEMU firmware map");
@@ -91,7 +143,10 @@ static void policy(void){
  check(armmemory(&p,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]))==nil,"Pi4 TF-A/EDK2 reservations");
  check(armblob(&p,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),0x12000,&a),"Pi4 blob placement");
  check((a&65535)==0 && a>=0x200000 && a+0x20000<=0x30000000,"Pi4 blob avoids TF-A/EDK2");
- x=im;x.format=ImageAout;x.magic=R_MAGIC;check(armimage(&p,&x)!=nil,"Pi4 rejects QEMU-style a.out");
+ x=image(&p,0x1080000);x.format=ImageAout;x.magic=S_MAGIC;x.entry=0xffffffffc1080000ULL;
+ check(armimage(&p,&x)!=nil,"Pi4 rejects wrong-architecture a.out");
+ x.magic=0x8c47;check(armimage(&p,&x)==nil,"Pi4 accepts fixed native headed a.out");
+ x.entry+=4;check(armimage(&p,&x)!=nil,"Pi4 rejects a.out entry/layout drift");
  x=im;x.format=0;check(armimage(&p,&x)!=nil,"raw H6 is not a load contract");
  x=im;x.seg[0].filesz=x.seg[0].memsz+1;check(armimage(&p,&x)!=nil,"file exceeds memory");
  x=im;x.seg[0].pa=~0ULL-4095;check(armimage(&p,&x)!=nil,"physical overflow");
@@ -115,7 +170,7 @@ static void policy(void){
  pmem();check(armmapvalid(memory,sizeof(memory[0]),1)!=nil,"short descriptor stride");
  check(armmapvalid(memory,sizeof(memory[0])+1,sizeof(memory[0]))!=nil,"partial descriptor");
  check(!armblob(&p,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),~0ULL,&a),"blob size overflow");
- qmem();memory[1].Type=EfiBootServicesData;check(armrange(memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),q.scratchlo,q.scratchlen,1),"boot-services scratch only after EBS");
+ qmem();memory[1].Type=EfiBootServicesData;check(!armrange(memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),q.scratchlo,q.scratchlen,1),"boot-services scratch is not reserved");
  memory[1].Type=EfiRuntimeServicesData;check(!armrange(memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),q.scratchlo,q.scratchlen,1),"resident scratch rejected");
  (void)why;
 }
@@ -123,8 +178,9 @@ static void config(void){
  char *bad[]={"", "efiplatform=other\n", "efiplatform=qemu-virt\nefiplatform=rpi4\n", "efiplatform=rpi4\nefibootmap=-1,0x10000\nefiscratch=0,0\n", "efiplatform=rpi4\nefibootmap=0,0x10000000000000000\nefiscratch=0,0\n", "efiplatform=rpi4\nefibootmap=0,0x40000000 junk\nefiscratch=0,0\n"};
  unsigned i;
  for(i=0;i<sizeof bad/sizeof bad[0];i++){confaddr=bad[i];check(archinit()!=nil,"strict config rejection");}
- confaddr="efiplatform=rpi4\nefibootmap=0,0x40000000\nefiscratch=0,0\n";check(archinit()==nil,"Pi4 explicit config");
- check(!archfdtallowed(),"arbitrary firmware DTB is not forwarded");
+ confaddr="efiplatform=rpi4\nefibootmap=0,0x40000000\nefiscratch=0x1000000,0x80000\n";
+ fdtsrc=validfdt;fdtsize=sizeof validfdt;check(archinit()==nil,"Pi4 explicit config with board FDT");
+ check(archfdtallowed(),"ARM64 retains FDT for explicit platform validation");
 }
 static void parsers(void){
  File good={0},f;Elf64Ehdr*h=(void*)good.b;Elf64Phdr*p=(void*)(good.b+sizeof *h);char *why;
@@ -132,7 +188,8 @@ static void parsers(void){
  h->ident[0]=0x7f;h->ident[1]='E';h->ident[2]='L';h->ident[3]='F';h->ident[4]=2;h->ident[5]=1;
  h->type=2;h->machine=183;h->version=1;h->ehsize=sizeof *h;h->phoff=sizeof *h;h->phentsize=sizeof *p;h->phnum=1;h->entry=0xffffffffc2000004ULL;
  p->type=1;p->flags=1;p->offset=4096;p->paddr=0x2000000;p->vaddr=0xffffffffc2000000ULL;p->filesz=1024;p->memsz=65536;p->align=4096;
- confaddr="efiplatform=rpi4\nefibootmap=0,0x40000000\nefiscratch=0,0\n";
+ confaddr="efiplatform=rpi4\nefibootmap=0,0x40000000\nefiscratch=0x1000000,0x80000\n";
+ fdtsrc=validfdt;fdtsize=sizeof validfdt;
  pmem();claims=moved=0;f=good;why=bootkern(&f);
  check(why && strstr(why,"cannot claim ELF") && claims==1 && moved==1,"Pi4 ELF reaches allocation only after valid preflight");
  #define BAD(change,msg) do { f=good;h=(void*)f.b;p=(void*)(f.b+sizeof *h);change;claims=0;why=bootkern(&f);check(why && claims==0,msg); } while(0)
@@ -149,7 +206,17 @@ static void parsers(void){
  BAD(f.b[0]=0x11,"raw image rejected");
  pmem();memory[1].Type=EfiRuntimeServicesData;claims=0;f=good;why=bootkern(&f);check(why && claims==0,"ELF cannot overwrite resident EDK2/TF-A");
 }
-int main(void){policy();config();parsers();printf("PASS: ARM64 loader %u platform, memory, config and image checks (ASan/UBSan)\n",checks);return 0;}
+static void actualfdt(char *path){
+ FILE *f=fopen(path,"rb");long n;void *b;uvlong rb[ArmMaxReserved],rl[ArmMaxReserved];ArmDynamic d[ArmMaxDynamic];int nr=0,nd=0;char *why;
+ check(f!=NULL,"open pinned BCM2711 FDT");fseek(f,0,SEEK_END);n=ftell(f);rewind(f);b=malloc(n);
+ check(n>0 && fread(b,1,n,f)==(size_t)n,"read pinned BCM2711 FDT");fclose(f);
+ why=armfdtvalidate(b,n);if(why)fprintf(stderr,"pinned FDT validation: %s\n",why);
+ check(why==nil,"pinned BCM2711 FDT validation");
+ why=armfdtreservations(b,n,rb,rl,ArmMaxReserved,&nr,d,ArmMaxDynamic,&nd);
+ if(why)fprintf(stderr,"pinned FDT reservations: %s\n",why);
+ check(why==nil && nr>0 && nd>0,"pinned fixed and dynamic FDT reservations");free(b);
+}
+int main(int argc,char **argv){policy();config();parsers();if(argc>1)actualfdt(argv[1]);printf("PASS: ARM64 loader %u platform, memory, config and image checks (ASan/UBSan)\n",checks);return 0;}
 '''
 # The actual common executable parsers are compiled, not a test reimplementation.
 sub = (EFI / 'sub.c').read_text()
@@ -159,7 +226,12 @@ parsers = sub[sub.index('static char*\nbootelf('):]
 with tempfile.TemporaryDirectory(prefix='arm64-loader-') as td:
     c = pathlib.Path(td) / 'test.c'
     exe = pathlib.Path(td) / 'test'
-    c.write_text(preamble + body('arm64layout.c') + body('archaa64.c') + endian + defs + parsers + tests)
+    c.write_text(preamble + fdt_c + body('arm64layout.c') + body('archaa64.c') + endian + defs + parsers + tests)
     subprocess.run(['cc', '-std=c11', '-DPLAN2001_EFI_GCC', '-Wall', '-Wextra', '-Werror', '-Wno-sign-compare',
                     '-fsanitize=address,undefined', '-I', str(ROOT), '-I', str(EFI), str(c), '-o', str(exe)], check=True)
-    subprocess.run([str(exe)], check=True)
+    release = subprocess.check_output([str(ROOT / 'tools/release')], text=True).strip()
+    dtb = pathlib.Path(release) / 'sys/src/boot/bcm/bcm2711-rpi-4-b.dtb'
+    if dtb.exists():
+        subprocess.run([str(exe), str(dtb)], check=True)
+    else:
+        subprocess.run([str(exe)], check=True)

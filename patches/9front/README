@@ -100,3 +100,7 @@ bcm64-mkfile-bootargs.diff
 native-syscall-contract.diff
 		port/mksystab uses the same architecture selector as libc/APE.
 		Shared bootargs is opt-in; board-local sources keep ownership.
+
+syscall-command-selector.diff
+		cmd/syscall's generated dispatch table uses the architecture-aware
+		syscall selector, keeping the WASM32-only SPAWN out of native builds.

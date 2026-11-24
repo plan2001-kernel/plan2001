@@ -43,11 +43,13 @@ LATAUS_EFI = KZERO + PHYSBASE + 0x80000
 ALKUKARTTA = 1 << 30	# l.s:n KZERO-ikkuna, BootInfon on oltava sen alla
 
 
-def jasenet():
-    """build.rc ja tämän puun 9front-tiedostot (git), ei wasm32-hakemistoa."""
-    tiedostot = subprocess.check_output(["git", "-C", vm9.JUURI, "ls-files", "sys", "rc"],
+def jasenet(tyo):
+    """The verified pinned release assembled with its patches and overlay."""
+    tiedostot = subprocess.check_output(["git", "-C", vm9.JUURI, "ls-files", "rc"],
                                         text=True).split()
-    return [("build.rc", os.path.join(TAMA, "build.rc"))] + \
+    return [("build.rc", os.path.join(TAMA, "build.rc")),
+            ("native-rules.rc", os.path.join(vm9.JUURI, "tools/test/native-rules.rc"))] + \
+           vm9.source_jasenet(tyo) + \
            [("ov/" + t, os.path.join(vm9.JUURI, t)) for t in tiedostot]
 
 
@@ -133,7 +135,7 @@ def main():
     # työkerros levylle, ei tmpfs-/tmp:hen: käännös kasvattaa sitä gigatavuja
     with tempfile.TemporaryDirectory(prefix="p2rpi4-", dir=a.out) as tyo:
         kone = vm9.overlay_kone(pohja, tyo, "buildvm.qcow2")
-        sisaan = vm9.tar_levylle(os.path.join(tyo, "in.img"), jasenet())
+        sisaan = vm9.tar_levylle(os.path.join(tyo, "in.img"), jasenet(tyo))
         ulos = vm9.tyhja_levy(os.path.join(tyo, "out.img"), 256 << 20)
         # levykuva syntyy suoraan isännän tiedostoon (harva tiedosto)
         vm9.tyhja_levy(kuva + ".part", KUVA_MT << 20)

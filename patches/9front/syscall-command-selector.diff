@@ -1,0 +1,9 @@
+--- a/sys/src/cmd/syscall/mkfile
++++ b/sys/src/cmd/syscall/mkfile
+@@ -12,4 +12,4 @@
+ SYSCALL=/sys/src/libc/9syscall/sys.h
+ 
+-tab.h:	$SYSCALL mktab.awk
+-	./mktab.awk $SYSCALL >$target
++tab.h:	$SYSCALL /sys/src/libc/9syscall/syscalls mktab.awk
++	rc /sys/src/libc/9syscall/syscalls $objtype $SYSCALL defines | ./mktab.awk >$target

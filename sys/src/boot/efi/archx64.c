@@ -192,6 +192,12 @@ archfdtallowed(void)
 	return 1;
 }
 
+int
+archfdtdefer(void)
+{
+	return 0;
+}
+
 void
 archrelease(void)
 {

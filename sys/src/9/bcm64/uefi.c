@@ -46,6 +46,9 @@ static u64int cpureg[MAXMACH];		/* MPIDR-affiniteetti, /cpus/cpu@N reg */
 static int ncpureg;
 static int bcm2711;
 static char derived[512];		/* laitepuusta johdetut *-muuttujat */
+enum { MaxFdtReserved = 128 };
+static struct { uvlong base, len; } fdtreserved[MaxFdtReserved];
+static int nfdtreserved, fdtaddrsize=2, fdtsizesize=1, fdterror;
 
 /*
  * Varhainen tulostus suoraan PL011:een (EDK2:n konsoli GPIO14/15:ssä,
@@ -141,6 +144,26 @@ be64(uchar *p)
 	return (uvlong)be32(p)<<32 | be32(p+4);
 }
 
+static int
+fdtaddreserved(uvlong base, uvlong len)
+{
+	if(len==0 || base>~(uvlong)0-len || nfdtreserved==MaxFdtReserved)
+		return -1;
+	fdtreserved[nfdtreserved].base=base;
+	fdtreserved[nfdtreserved].len=len;
+	nfdtreserved++;
+	return 0;
+}
+
+static uvlong
+fdtcells(uchar *p, int n)
+{
+	uvlong v=0;
+	int i;
+	for(i=0;i<n;i++) v=(v<<32)|be32(p+4*i);
+	return v;
+}
+
 /* onko s NUL-erotelluissa merkkijonoissa v[0:n] */
 static int
 strlistin(char *v, int n, char *s)
@@ -179,6 +202,31 @@ static void
 fdtprop(char *path, char *key, uchar *v, int n)
 {
 	uvlong addr, size;
+	int i, tuple;
+
+	if(strcmp(path,"/reserved-memory")==0 && strcmp(key,"#address-cells")==0){
+		if(n!=4 || (fdtaddrsize=be32(v))<1 || fdtaddrsize>2) fdterror=1;
+		return;
+	}
+	if(strcmp(path,"/reserved-memory")==0 && strcmp(key,"#size-cells")==0){
+		if(n!=4 || (fdtsizesize=be32(v))<1 || fdtsizesize>2) fdterror=1;
+		return;
+	}
+	if(strncmp(path,"/reserved-memory/",17)==0 && strcmp(key,"reg")==0){
+		tuple=4*(fdtaddrsize+fdtsizesize);
+		if(n<=0 || n%tuple!=0){ fdterror=1; return; }
+		for(i=0;i<n;i+=tuple){
+			addr=fdtcells(v+i,fdtaddrsize);
+			size=fdtcells(v+i+4*fdtaddrsize,fdtsizesize);
+			if(size!=0 && fdtaddreserved(addr,size)<0) fdterror=1;
+		}
+		return;
+	}
+	if(strncmp(path,"/reserved-memory/",17)==0 && strcmp(key,"size")==0){
+		/* Dynamic reserved addresses cannot be validated against this ABI. */
+		fdterror=1;
+		return;
+	}
 
 	if(strcmp(path, "") == 0 && strcmp(key, "compatible") == 0){
 		bcm2711 = strlistin((char*)v, n, "brcm,bcm2711");
@@ -240,11 +288,14 @@ fdtwalk(uchar *fdt, ulong len)
 	len = be32(fdt+4);
 	off = be32(fdt+8);
 	stoff = be32(fdt+12);
-	stlen = be32(fdt+32);
-	if(off >= len || stoff > len || stlen > len - stoff)
+	stlen = be32(fdt+36);
+	if(off < 40 || off > len || stlen > len - off
+	|| stoff < 40 || stoff > len || be32(fdt+32) > len - stoff
+	|| (off & 3) || (stoff & 3)
+	|| (off < stoff + be32(fdt+32) && stoff < off + stlen))
 		return -1;
 	p = fdt + off;
-	e = fdt + len;
+	e = p + stlen;
 	stab = fdt + stoff;
 	depth = 0;
 	path[0] = 0;
@@ -292,6 +343,27 @@ fdtwalk(uchar *fdt, ulong len)
 		default:
 			return -1;
 		}
+	}
+	return -1;
+}
+
+static int
+fdtresvmap(uchar *fdt, ulong len)
+{
+	uchar *p, *e;
+	ulong off, st;
+	uvlong addr, size;
+
+	if(len<40 || be32(fdt)!=0xd00dfeed || be32(fdt+4)>len)
+		return -1;
+	len=be32(fdt+4); off=be32(fdt+16); st=be32(fdt+8);
+	if(off<40 || (off&7) || off>len || st>len || off>st)
+		return -1;
+	p=fdt+off; e=fdt+st;
+	while(p+16<=e){
+		addr=be64(p); size=be64(p+8); p+=16;
+		if(addr==0 && size==0) return 0;
+		if(fdtaddreserved(addr,size)<0) return -1;
 	}
 	return -1;
 }
@@ -358,8 +430,12 @@ uefibootinit(void)
 	fdt = bootfdt(&fdtlen);
 	if(fdt == nil)
 		uefidie("no device tree in BootInfo: EDK2 System Table Selection must include Devicetree", ~0ULL);
-	if(fdtwalk(fdt, fdtlen) < 0)
+	nfdtreserved=0; fdterror=0; fdtaddrsize=2; fdtsizesize=1;
+	if(fdtresvmap(fdt,fdtlen)<0 || fdtwalk(fdt, fdtlen) < 0)
 		uefidie("device tree in BootInfo is not well formed", ~0ULL);
+	if(!bcm2711 || ncpureg == 0 || emmc2bus[0] == 0
+	|| pciwin[0] == 0 || pcidmawin[0] == 0)
+		uefidie("device tree lacks required BCM2711 board data", ~0ULL);
 	if(!bcm2711)
 		uefidie("device tree is not a BCM2711 (Raspberry Pi 4) one", ~0ULL);
 
@@ -403,15 +479,38 @@ uefibootinit(void)
  * muisti (BootCode/Data) on ytimen.  Loaderin alueet (ydin, blob, levykuva)
  * ja firmware (TF-A, EDK2:n ajonaikaiset, VideoCore) jäävät pois.
  */
-enum { Nbank = 64 };
+enum { Nbank = 256 };
+
+static int
+bankadd(void *vbank, int *pn, uvlong b, uvlong l)
+{
+	struct { uvlong base, limit; } *bank, *t;
+	int i, j, n;
+
+	bank=vbank; n=*pn;
+	if(b>=l) return 0;
+	for(i=0;i<n;){
+		if(l<bank[i].base || b>bank[i].limit){ i++; continue; }
+		if(bank[i].base<b) b=bank[i].base;
+		if(bank[i].limit>l) l=bank[i].limit;
+		memmove(&bank[i],&bank[i+1],(n-i-1)*sizeof bank[0]);
+		n--;
+	}
+	for(i=0;i<n && bank[i].base<b;i++);
+	if(n==Nbank) return -1;
+	memmove(&bank[i+1],&bank[i],(n-i)*sizeof bank[0]);
+	t=(void*)&bank[i]; t->base=b; t->limit=l;
+	*pn=n+1;
+	return 0;
+}
 
 void
 uefimeminit(void)
 {
 	static struct { uvlong base, limit; } bank[Nbank], t;
 	BootMem *bm;
-	uvlong b, l, top;
-	int i, j, n;
+	uvlong b, l, top, cur, next, rend;
+	int i, j, n, skip;
 
 	n = 0;
 	top = (uvlong)PHYSDRAM + soc.dramsize;
@@ -428,26 +527,25 @@ uefimeminit(void)
 			l = top;
 		if(b >= l)
 			continue;
-		/* järjestyksessä, vierekkäiset yhdistettyinä */
-		for(j = n; j > 0 && bank[j-1].base > b; j--)
-			;
-		if(j > 0 && bank[j-1].limit == b){
-			bank[j-1].limit = l;
-		} else if(j < n && bank[j].base == l){
-			bank[j].base = b;
-		} else if(n < Nbank){
-			memmove(&bank[j+1], &bank[j], (n-j)*sizeof bank[0]);
-			bank[j].base = b;
-			bank[j].limit = l;
-			n++;
-		}
-		for(j = 1; j < n; j++)
-			if(bank[j-1].limit == bank[j].base){
-				bank[j-1].limit = bank[j].limit;
-				memmove(&bank[j], &bank[j+1], (n-j-1)*sizeof bank[0]);
-				n--;
-				j--;
+		/* FDT reservations override firmware's reclaimable/conventional
+		 * classification. Split banks so no allocated page crosses them. */
+		cur=b;
+		while(cur<l){
+			next=l; skip=0;
+			for(j=0;j<nfdtreserved;j++){
+				rend=fdtreserved[j].base+fdtreserved[j].len;
+				if(rend<=cur || fdtreserved[j].base>=l) continue;
+				if(fdtreserved[j].base<=cur){
+					if(rend>cur) cur=rend<l?rend:l;
+					skip=1; break;
+				}
+				if(fdtreserved[j].base<next) next=fdtreserved[j].base;
 			}
+			if(skip) continue;
+			if(bankadd(bank,&n,cur,next)<0)
+				uefidie("too many usable memory ranges after FDT reservations", cur);
+			cur=next;
+		}
 	}
 	/* suurimmat nelem(conf.mem) alkuun, sitten osoitejärjestykseen */
 	for(i = 0; i < n; i++)

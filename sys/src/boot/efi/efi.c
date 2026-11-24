@@ -147,8 +147,8 @@ static void bootinfohdr(void);
 static uchar *blob;
 static ulong blobsize, mmapcap;
 static uvlong bloballocated;
-static uchar *fdtsrc;		/* the firmware's device tree, if any (fdtfind()) */
-static ulong fdtsize;
+uchar *fdtsrc;		/* the firmware's device tree, if any (fdtfind()) */
+ulong fdtsize;
 char *confaddr;
 
 /*
@@ -235,6 +235,12 @@ uvlong
 bootblobsize(void)
 {
 	return blobsize;
+}
+
+uvlong
+bootblobbase(void)
+{
+	return (uvlong)(uintptr)blob;
 }
 
 /* keep [pa, pa+len) from the firmware's allocator as loader data */
@@ -770,13 +776,27 @@ bootinfohdr(void)
 	bi->configoff = (sizeof(*bi) + 7) & ~7;
 	bi->logoff = bi->configoff + ConfCap;
 	bi->fdtoff = bi->logoff + LogCap;
-	bi->fdtlen = fdtsize;
+	/* ARM64 defers copying until plan9.ini selects a platform and the board
+	 * FDT can be validated. Other targets retain their established handoff. */
+	bi->fdtlen = archfdtdefer()? 0: fdtsize;
 	/*
 	 * 9frontin käynnistys ei käytä GE/O:n prosessimanifestia:
 	 * manifestoff ja manifestlen jäävät nolliksi (puuttuu).
 	 */
 	bi->mmapoff = bi->fdtoff + ((fdtsize + 7) & ~7);
 	bi->mmapentsize = sizeof(BootMem);
+}
+
+char*
+bootfdtcopy(void)
+{
+	if(fdtsrc == nil || fdtsize == 0)
+		return "firmware did not provide an FDT";
+	if(bi == nil || blob == nil || bi->fdtoff > blobsize || fdtsize > blobsize-bi->fdtoff)
+		return "FDT does not fit the BootInfo allocation";
+	memmove(blob + bi->fdtoff, fdtsrc, fdtsize);
+	bi->fdtlen = fdtsize;
+	return nil;
 }
 
 /*
@@ -830,13 +850,12 @@ efimain(EFI_HANDLE ih, EFI_SYSTEM_TABLE *st)
 	confaddr = (char*)blob + bi->configoff;
 	logbuf = (char*)blob + bi->logoff;
 	logcap = LogCap;
-	if(fdtsize != 0)
+	if(fdtsize != 0 && !archfdtdefer())
 		memmove(blob + bi->fdtoff, fdtsrc, fdtsize);
-
 	print("[P2 L01] Plan2001 loader 2026-09-25 boot-abi-1\n");
 	tracehex("[P2 L02] BootInfo blob at 0x", la);
 	tracehex("[P2 L02] BootInfo blob bytes=0x", blobsize);
-	if(fdtsize != 0)
+	if(bi->fdtlen != 0)
 		tracehex("[P2 L02] FDT copied into the blob, bytes=0x", fdtsize);
 
 	print("[P2 L03] memory-map buffer: AllocatePool 96 KiB\n");

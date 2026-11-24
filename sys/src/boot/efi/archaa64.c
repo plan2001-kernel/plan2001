@@ -18,13 +18,43 @@ static ArmLayout layout = { .align = 4096 };
 static uvlong scratchpa[ImageMaxSeg], scratchlen[ImageMaxSeg];
 static int nscratch;
 
+static int
+rangeoverlap(uvlong a, uvlong n, uvlong b, uvlong m)
+{
+	return n!=0 && m!=0 && a<b+m && b<a+n;
+}
+
+static int
+dynamicblocked(ArmLayout *l, BootImage *im, uvlong pa, uvlong len,
+	uvlong blobpa, uvlong bloblen)
+{
+	int i;
+
+	if(rangeoverlap(pa,len,l->scratchlo,l->scratchlen)
+	|| rangeoverlap(pa,len,l->fdtlo,l->fdtlen)
+	|| rangeoverlap(pa,len,blobpa,bloblen)) return 1;
+	for(i=0;i<im->nseg;i++)
+		if(rangeoverlap(pa,len,im->seg[i].pa,im->seg[i].allocsz)) return 1;
+	for(i=0;i<l->nreserved;i++)
+		if(rangeoverlap(pa,len,l->reservedlo[i],l->reservedlen[i])) return 1;
+	return 0;
+}
+
 /* The platform is explicit configuration, not an inference from a DTB.
  * Firmware DTBs are not forwarded on ARM64 until a board-validated FDT
  * contract exists. BootInfo's optional FDT fields remain zero. */
 int
 archfdtallowed(void)
 {
-	return 0;
+	/* Keep the bounded firmware candidate available until plan9.ini has
+	 * explicitly selected a platform. rpi4 validates and copies it later. */
+	return 1;
+}
+
+int
+archfdtdefer(void)
+{
+	return 1;
 }
 
 /* the one value of key in plan9.ini; duplicates are rejected */
@@ -115,8 +145,10 @@ char*
 archinit(void)
 {
 	char platform[32], map[80], scratch[80], *why;
+	uvlong rlo[ArmMaxReserved], rlen[ArmMaxReserved];
+	ArmDynamic dynamic[ArmMaxDynamic];
 	uvlong lo, len, sl, sn;
-	int explicit;
+	int explicit, nr, nd, i;
 
 	archrelease();
 	if((why = value("efiplatform=", platform, sizeof platform)) != nil)
@@ -137,7 +169,27 @@ archinit(void)
 			return "invalid efiscratch (base,length required)";
 		explicit |= 2;
 	}
-	return armplatform(linkfix(&layout), platform, explicit, lo, len, sl, sn);
+	if((why = armplatform(linkfix(&layout), platform, explicit, lo, len, sl, sn)) != nil)
+		return why;
+	if(layout.platform == ArmPi4){
+		if((why = armfdtvalidate(linkfix(fdtsrc), fdtsize)) != nil)
+			return why;
+		layout.fdtlo = (uvlong)(uintptr)fdtsrc;
+		layout.fdtlen = fdtsize;
+		if((why = armfdtreservations(linkfix(fdtsrc), fdtsize, rlo, rlen,
+		    ArmMaxReserved, &nr, dynamic, ArmMaxDynamic, &nd)) != nil)
+			return why;
+		layout.nreserved = nr;
+		for(i=0; i<nr; i++){
+			layout.reservedlo[i] = rlo[i];
+			layout.reservedlen[i] = rlen[i];
+		}
+		layout.ndynamic=nd;
+		for(i=0;i<nd;i++) layout.dynamic[i]=dynamic[i];
+		if((why = bootfdtcopy()) != nil)
+			return why;
+	}
+	return nil;
 }
 
 /*
@@ -151,9 +203,10 @@ archimage(BootImage *im)
 	void *map;
 	EFI_MEMORY_DESCRIPTOR *m;
 	uvlong bytes, stride, pa, n, i, lo, hi, top;
+	uvlong blobpa, bloblen, align, rangebase, rangelen, candidate, end;
 	uvlong *savedpa = linkfix(scratchpa), *savedlen = linkfix(scratchlen);
 	char *why;
-
+	int j, k, placed;
 	if((why = armimage(linkfix(&layout), im)) != nil)
 		return why;
 	if(bootmemorymap(&map, &bytes, &stride) != 0)
@@ -189,6 +242,49 @@ archimage(BootImage *im)
 		}
 		savedpa[nscratch] = lo;
 		savedlen[nscratch++] = hi - lo;
+	}
+	blobpa=bootblobbase(); bloblen=bootblobsize();
+	for(j=0;j<layout.ndynamic;j++){
+		ArmDynamic *d=&layout.dynamic[j];
+		align=d->align?d->align:4096;
+		if(align<4096 || (align&(align-1)) || d->size==0
+		|| d->size>~(uvlong)0-4095)
+			return "invalid dynamic FDT reservation alignment/size";
+		n=(d->size+4095)&~(uvlong)4095;
+		if(bootmemorymap(&map,&bytes,&stride)!=0)
+			return "cannot refresh UEFI map for dynamic FDT reservation";
+		placed=0;
+		for(k=0;k<(d->nranges?d->nranges:1) && !placed;k++){
+			rangebase=d->nranges?d->rangelo[k]:layout.maplo;
+			rangelen=d->nranges?d->rangelen[k]:layout.maplen;
+			if(rangelen==0 || rangebase>~(uvlong)0-rangelen) continue;
+			end=rangebase+rangelen;
+			for(i=0;i<bytes;i+=stride){
+				m=(EFI_MEMORY_DESCRIPTOR*)((uchar*)map+i);
+				if(m->Type!=EfiConventionalMemory || (m->Attribute&(1ULL<<63))) continue;
+				lo=m->PhysicalStart; hi=lo+m->NumberOfPages*4096;
+				if(lo<rangebase) lo=rangebase;
+				if(hi>end) hi=end;
+				if(hi<lo || hi-lo<n) continue;
+				candidate=(hi-n)&~(align-1);
+				while(candidate>=lo && candidate<=hi-n){
+					if(!dynamicblocked(linkfix(&layout),im,candidate,n,blobpa,bloblen)
+					&& bootreserve(candidate,n)==0){
+						if(layout.nreserved==ArmMaxReserved){
+							efifree(candidate,n);
+							return "too many FDT/firmware reserved ranges";
+						}
+						layout.reservedlo[layout.nreserved]=candidate;
+						layout.reservedlen[layout.nreserved++]=n;
+						placed=1; break;
+					}
+					if(candidate<lo+align) break;
+					candidate-=align;
+				}
+				if(placed) break;
+			}
+		}
+		if(!placed) return "cannot place dynamic FDT reserved-memory pool";
 	}
 	return nil;
 }

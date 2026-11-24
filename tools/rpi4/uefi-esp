@@ -42,6 +42,28 @@ SHA256 = "ca9973e2a7a546b3df871cfb7382e656829114b6dfa424f40dc67cc90a217d88"
 
 KOKO_MT = 64          # koko kuva
 OSIO_ALKU = 2048      # sektori (1 MiB)
+KZERO = 0xFFFFFFFFC0000000
+PHYSBASE = 0x01000000
+EFI_ENTRY = KZERO + PHYSBASE + 0x80000
+DIRECT_LIMIT = 0x40000000
+
+
+def tarkista_efi_ydin(path):
+    """Accept the fixed native 9front Pi4 a.out image, not a raw -H6 blob."""
+    with open(path, "rb") as f:
+        h = f.read(40)
+    if len(h) != 40:
+        raise Virhe("%s: lyhyt a.out-otsake" % path)
+    magic, text, data, bss = struct.unpack(">4I", h[:16])
+    entry, = struct.unpack(">Q", h[32:40])
+    if magic != 0x8C47 or entry != EFI_ENTRY or text == 0:
+        raise Virhe("%s: ei 9pi4efi:n headed ARM64 a.out -asettelu" % path)
+    textpa = entry - KZERO
+    datapa = (textpa + text + 0xFFFF) & ~0xFFFF
+    end = (datapa + data + bss + 0xFFFF) & ~0xFFFF
+    if end > DIRECT_LIMIT or end < PHYSBASE + 0x80000:
+        raise Virhe("%s: ydin ei mahdu 9pi4efi:n 1 GiB:n alkukarttaan" % path)
+    return PHYSBASE, end
 
 
 class Virhe(Exception):
@@ -139,6 +161,7 @@ def koko_kuva(a):
     for p, n in ((a.base, "--base"), (a.loader, "--loader"), (a.kernel, "--kernel")):
         if not p or not os.path.isfile(p):
             raise Virhe("%s puuttuu: %s" % (n, p))
+    tarkista_efi_ydin(a.kernel)
     if os.path.realpath(a.out).startswith("/dev/") or os.path.exists(a.out):
         raise Virhe("%s: tulos on laite tai on jo olemassa" % a.out)
     lahde = hae_zip(a.zip)
@@ -160,7 +183,9 @@ def koko_kuva(a):
         os.unlink(os.path.join(tyo, "fw", "Readme.md"))
         ini = os.path.join(tyo, "plan9.ini")
         with open(ini, "w") as f:
-            f.write("bootfile=/%s\nconsole=1\n" % os.path.basename(a.kernel))
+            f.write("bootfile=/%s\nconsole=1\nefiplatform=rpi4\n"
+                    "efibootmap=0,0x40000000\n"
+                    "efiscratch=0x1000000,0x80000\n" % os.path.basename(a.kernel))
         mtools("mformat", "-i", kohde, "-F", "-T", str(koko), "-H", str(alku), "-v", "PLAN2001", "::")
         fw = os.path.join(tyo, "fw")
         mtools("mcopy", "-i", kohde, "-s", "-Q", *[os.path.join(fw, n) for n in sorted(os.listdir(fw))], "::")
