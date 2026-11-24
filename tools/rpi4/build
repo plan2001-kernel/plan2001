@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""
+Plan2001 Raspberry Pi 4: 9front-11952:n bcm64-ytimet (9pi4, 9pi3), koko
+arm64-userland ja 9frontin oma Pi3/Pi4-SD-levykuva 9frontin omalla
+työkaluketjulla (mk, 7c, 7a, 7l) 9front-11952-koneessa QEMU:ssa.  Linux-
+isäntä vain valmistelee levyt ja lukee tulokset; isännän GCC:tä ei käytetä.
+
+    tools/rpi4/build [--out HAK] [--no-image]
+
+Lähteet: pinnattu 9front-11952-ISO (SHA256 tarkistetaan) ja tämän puun
+tiedostot sen päällä (tools/tree tarkistaa, että patchit ja overlay
+täsmäävät).  Pi4-laiteohjelmisto (start4cd.elf, fixup4cd.dat,
+bcm2711-rpi-4-b.dtb) on julkaisun /sys/src/boot/bcm, ei verkosta haettu.
+Käännöskone: PLAN2001_BUILDVM (oletus ~/.cache/plan2001/base.qcow2),
+kertakäyttöisen qcow2-kerroksen päällä ilman verkkoa.
+
+Tulokset hakemistoon --out (oletus ~/.cache/plan2001/rpi4): 9pi4, s9pi4,
+9pi3, plan2001-rpi4.img (MBR: FAT32-käynnistysosio + 9front hjfs),
+build.log.  Mitään ei kirjoiteta oikealle levylle: kuvan siirto SD-
+kortille on omistajan oma, erillinen toimenpide (docs/rpi4.md).
+"""
+
+import argparse
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+TAMA = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(TAMA), "native-amd64"))
+import vm9  # noqa: E402
+
+# 9frontin dist-mkfile: mb=1885 (+1 MiB dd:n loppulohko)
+KUVA_MT = 2048
+# bcm64/mkfile: loadaddr; ydin on raaka (-H6) ja alkaa _startista
+LATAUS = 0xFFFFFFFFC0080000
+
+
+def jasenet():
+    """build.rc ja tämän puun 9front-tiedostot (git), ei wasm32-hakemistoa."""
+    tiedostot = subprocess.check_output(["git", "-C", vm9.JUURI, "ls-files", "sys", "rc"],
+                                        text=True).split()
+    return [("build.rc", os.path.join(TAMA, "build.rc"))] + \
+           [("ov/" + t, os.path.join(vm9.JUURI, t)) for t in tiedostot]
+
+
+def tarkista_puu():
+    """tools/tree: patchit ja overlay täsmäävät pinnattuun julkaisuun."""
+    subprocess.check_call([os.path.join(vm9.JUURI, "tools", "tree")], stdout=subprocess.DEVNULL)
+
+
+def tarkista_ydin(polku):
+    """9pi4: raaka arm64-kuva, ensimmäinen käsky ei ole nollaa."""
+    data = open(polku, "rb").read(4096)
+    if len(data) < 4096 or data[:4] == b"\0\0\0\0":
+        raise vm9.VirheVM("%s ei näytä raa'alta arm64-ytimeltä" % polku)
+    (kasky,) = struct.unpack("<I", data[:4])
+    # MOV R0, R26 (l.s): ORR X26, XZR, X0 = 0xaa0003fa
+    if kasky != 0xAA0003FA:
+        raise vm9.VirheVM("%s: ensimmäinen käsky %#x ei ole l.s:n MOV R0, R26" % (polku, kasky))
+
+
+def tarkista_kuva(polku):
+    """MBR: p1 FAT32 (9front fdisk: 0x0b, LBA: 0x0c) aktiivinen, p2 Plan 9 (0x39)."""
+    with open(polku, "rb") as f:
+        mbr = f.read(512)
+    if mbr[510:512] != b"\x55\xaa":
+        raise vm9.VirheVM("%s: ei MBR-allekirjoitusta" % polku)
+    osiot = []
+    for i in range(4):
+        e = mbr[446 + 16 * i:446 + 16 * (i + 1)]
+        tila, tyyppi = e[0], e[4]
+        alku, koko = struct.unpack("<II", e[8:16])
+        if tyyppi:
+            osiot.append((tila, tyyppi, alku, koko))
+    if len(osiot) < 2 or osiot[0][1] not in (0x0B, 0x0C) or osiot[0][0] != 0x80 or osiot[1][1] != 0x39:
+        raise vm9.VirheVM("%s: odottamaton osiotaulu %r" % (polku, osiot))
+    return osiot
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", default=os.environ.get("PLAN2001_RPI4_OUT",
+                                                    os.path.join(vm9.valimuisti(), "rpi4")))
+    ap.add_argument("--iso")
+    ap.add_argument("--buildvm")
+    ap.add_argument("--no-image", action="store_true", help="vain ytimet ja userland, ei levykuvaa")
+    a = ap.parse_args()
+
+    tarkista_puu()
+    iso = vm9.etsi_iso(a.iso)
+    pohja = vm9.etsi_buildvm(a.buildvm)
+    os.makedirs(a.out, exist_ok=True)
+    loki = os.path.join(a.out, "build.log")
+    kuva = os.path.join(a.out, "plan2001-rpi4.img")
+    for p in (loki, kuva):
+        if os.path.exists(p):
+            os.unlink(p)
+
+    # työkerros levylle, ei tmpfs-/tmp:hen: käännös kasvattaa sitä gigatavuja
+    with tempfile.TemporaryDirectory(prefix="p2rpi4-", dir=a.out) as tyo:
+        kone = vm9.overlay_kone(pohja, tyo, "buildvm.qcow2")
+        sisaan = vm9.tar_levylle(os.path.join(tyo, "in.img"), jasenet())
+        ulos = vm9.tyhja_levy(os.path.join(tyo, "out.img"), 256 << 20)
+        # levykuva syntyy suoraan isännän tiedostoon (harva tiedosto)
+        vm9.tyhja_levy(kuva + ".part", KUVA_MT << 20)
+        vm = vm9.Kone([(kone, "qcow2", False, "hd"),
+                       (iso, "raw", True, "cd"),
+                       (sisaan, "raw", False, "hd"),
+                       (ulos, "raw", False, "hd"),
+                       (kuva + ".part", "raw", False, "hd")],
+                      vm9.Ovmf.etsi(), loki, muisti="4096", cpu="4")
+        vm.kaynnista()
+        try:
+            vm9.kaynnista_9front(vm, 300)
+            vm.aja("rm -rf /tmp/p2 && mkdir -p /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data", 300)
+            vm.aja("rc /tmp/p2/build.rc" + (" noimg" if a.no_image else ""), 4 * 3600)
+        finally:
+            vm.sammuta()
+        tiedostot = vm9.tar_levylta(ulos, a.out)
+
+    for t in ("9pi4", "s9pi4", "9pi3", "entry.txt"):
+        if t not in tiedostot:
+            raise vm9.VirheVM("%s puuttuu tuloksista (%s)" % (t, loki))
+    tarkista_ydin(os.path.join(a.out, "9pi4"))
+    magic, entry = vm9.aout_entry(os.path.join(a.out, "s9pi4"))
+    if entry != LATAUS:
+        raise vm9.VirheVM("s9pi4:n sisääntulo %#x ei ole bcm64/mkfile:n loadaddr %#x" % (entry, LATAUS))
+    print("9pi4: raaka arm64-kuva, s9pi4 a.out magic %#x, entry %#x" % (magic, entry))
+
+    if a.no_image:
+        os.unlink(kuva + ".part")
+    else:
+        osiot = tarkista_kuva(kuva + ".part")
+        os.rename(kuva + ".part", kuva)
+        for tila, tyyppi, alku, koko in osiot:
+            print("osio: tyyppi %#04x%s alku %d koko %d MiB" %
+                  (tyyppi, " aktiivinen" if tila == 0x80 else "", alku, koko >> 11))
+        tiedostot.append(os.path.basename(kuva))
+    for t in sorted(tiedostot):
+        print("%-18s %10d  %s" % (t, os.path.getsize(os.path.join(a.out, t)), os.path.join(a.out, t)))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (vm9.VirheVM, subprocess.CalledProcessError) as e:
+        print("build: %s" % e, file=sys.stderr)
+        sys.exit(1)

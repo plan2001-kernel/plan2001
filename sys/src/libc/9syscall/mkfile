@@ -165,8 +165,8 @@ install:V:
 		}
 	}
 	ar vu /$objtype/lib/libc.a *.$O
-	rm -f *.$O *.s
 	if(~ $objtype wasm32) rm -f *.c
+	rm -f *.$O *.s
 
 nuke clean:V:
 	rm -f *.[$OS]

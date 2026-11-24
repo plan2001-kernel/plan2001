@@ -1,0 +1,108 @@
+#!/bin/rc
+# Raspberry Pi 4 (bcm64) -käännös 9front-11952-koneessa (tools/rpi4/build).
+# 9frontin oma työkaluketju: mk, 7c, 7a, 7l (objtype=arm64).
+#
+# Levyt (AHCI, katso ../native-amd64/vm9.py):
+#	sdE1	pinnattu 9front-11952.amd64.iso: lähteet, otsakkeet,
+#		työkalut, laiteohjelmisto (/sys/src/boot/bcm) ja jakelun
+#		muut tiedostot; ei koneen omaa /sys/src:tä
+#	sdE2	sisään: tämä skripti ja tämän puun overlay (ov/...) tar-
+#		muodossa, purettu hakemistoon /tmp/p2 ennen tätä
+#	sdE3	ulos: ytimet ja tarkistustiedot tar-muodossa
+#	sdE4	ulos: 9frontin oma pi3.img-levykuva (pi3 + pi4) raakana
+#
+# Käyttö: rc build.rc [noimg]
+rfork ne
+p2=/tmp/p2
+w=/tmp/rpi4
+NPROC=4
+
+fn die {
+	echo 'build.rc: '^$"* >[1=2]
+	exit $"*
+}
+
+9660srv >[2]/dev/null
+mount /srv/9660 /n/dist /dev/sdE1/data || die 'ISO ei liity'
+test -d /n/dist/sys/src/9/bcm64 || die 'ISO:lla ei ole /sys/src/9/bcm64'
+test -r /n/dist/sys/src/boot/bcm/start4cd.elf || die 'ISO:lla ei ole Pi4-laiteohjelmistoa'
+
+# Lähdepuu = julkaisu + tämän puun tiedostot (sama kuin tools/tree:
+# patchatut tiedostot ovat overlayssa valmiiksi patchattuina).
+# Kirjoitettavat kopiot: oliot ja arm64-kirjastot syntyvät niihin.
+rm -rf $w
+mkdir -p $w/src $w/include $w/arm64 $w/acme $w/rc
+# kuten julkaisussa (d775): mkdir perii /tmp:n rajatut oikeudet, ja
+# ytimen bootfs (disk/mkfs ilman tilaa) ottaa ne lähteestä
+chmod 775 $w/src $w/include $w/arm64 $w/acme $w/rc
+dircp /n/dist/sys/src $w/src || die 'sys/src kopio'
+dircp /n/dist/sys/include $w/include || die 'sys/include kopio'
+dircp /n/dist/arm64 $w/arm64 || die 'arm64 kopio'
+dircp /n/dist/acme $w/acme || die 'acme kopio'
+dircp /n/dist/rc $w/rc || die 'rc kopio'
+test -d $p2/ov/sys/src && dircp $p2/ov/sys/src $w/src
+test -d $p2/ov/sys/include && dircp $p2/ov/sys/include $w/include
+test -d $p2/ov/rc && dircp $p2/ov/rc $w/rc
+
+# isännän (amd64) työkalut julkaisusta, kohteen tiedostot kopioista
+bind -b /n/dist/amd64/bin /bin
+bind /n/dist/amd64 /amd64
+bind -c $w/include /sys/include
+bind -c $w/src /sys/src
+bind -c $w/arm64 /arm64
+bind -c $w/acme /acme
+
+echo '--- arm64-userland: objtype=arm64 mk install (/sys/src)'
+cd /sys/src || die src
+objtype=arm64 mk install >[2=1] || die 'arm64-userlandin käännös'
+for(f in init bin/rc bin/bind bin/mount bin/paqfs bin/auth/factotum bin/ip/ipconfig bin/ls bin/7c bin/7l)
+	test -x /arm64/$f || die '/arm64/'^$f^' puuttuu'
+
+echo '--- ydin: /sys/src/9/bcm64 (pi3, pi4)'
+# Ydin julkaisun järjestelmäkutsutaululla, kuten tools/native-amd64:
+# tämän puun sys.h:n SPAWN on vain wasm32-ytimessä (sysspawn), ja
+# port/mksystab tekisi siitä natiiviytimelle linkittymättömän viittauksen.
+bind /n/dist/sys/src/libc/9syscall/sys.h /sys/src/libc/9syscall/sys.h
+rm -f /sys/src/9/port/systab.h
+cd /sys/src/9/bcm64 || die bcm64
+for(c in pi4 pi3){
+	mk 'CONF='^$c >[2=1] || die 'ytimen käännös '^$c
+	mk 'CONF='^$c install >[2=1] || die 'ytimen asennus '^$c
+}
+
+rm -rf $p2/out
+mkdir -p $p2/out
+cp /arm64/9pi4 /arm64/s9pi4 /arm64/9pi3 $p2/out || die 'ytimien kopio'
+cd $p2/out
+nm s9pi4 | grep -e ' T _start$' -e ' T main$' >entry.txt
+file /arm64/bin/rc /arm64/init >file.txt
+cp /sys/src/9/bcm64/pi4 conf.pi4
+du -s /arm64/bin >du.txt
+
+if(! ~ $1 noimg){
+	echo '--- levykuva: /sys/lib/dist/mkfile %.pi3.img (pi3 + pi4)'
+	# /n/src9 = jakelun juuri, jonka arm64-binäärit, acme, rc ja
+	# lähteet tulevat tästä käännöksestä (vrt. 9frontin julkaisuprosessi)
+	bind /n/dist /n/src9
+	bind $w/arm64 /n/src9/arm64
+	bind $w/acme /n/src9/acme
+	bind $w/rc /n/src9/rc
+	# jakelun /sys/src ilman olioita: julkaisu + overlay
+	mkdir -p $w/distsrc
+	dircp /n/dist/sys/src $w/distsrc || die 'jakelun lähteet'
+	test -d $p2/ov/sys/src && dircp $p2/ov/sys/src $w/distsrc
+	bind $w/distsrc /n/src9/sys/src
+	bind $w/include /n/src9/sys/include
+	mkdir -p $w/dist
+	dircp /n/dist/sys/lib/dist $w/dist || die 'dist-mkfile'
+	cd $w/dist
+	objtype=arm64 mk plan2001.pi3.img >[2=1] || die 'levykuvan teko'
+	ls -l plan2001.pi3.img
+	dd -if plan2001.pi3.img -of /dev/sdE4/data -bs 1048576 >[2=1] || die 'levykuvan kirjoitus'
+	ls -l plan2001.pi3.img >>$p2/out/du.txt
+}
+
+cd $p2/out
+ls -l
+tar c * >/dev/sdE3/data || die 'tulosten kirjoitus'
+echo 'build.rc: valmis'

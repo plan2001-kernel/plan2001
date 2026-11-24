@@ -1,0 +1,23 @@
+#!/bin/bash
+# 9front-11952:n oma Pi3/Pi4-levykuva (9front-11952.pi3.img) vertailuksi:
+# vaihe (a) julkaisun omilla binääreillä, ohi tämän puun käännöksen.
+# Sama julkaisu kuin tools/release.conf; SHA256 julkaisuilmoituksesta
+# (http://9front.org/releases/2026/08/02/0/).  Purettu kuva välimuistiin,
+# ei koskaan laitteelle.
+#   tools/rpi4/stock	tulostaa kuvan polun
+set -e
+NAME=9front-11952
+IMG=$NAME.pi3.img
+URL=http://9front.org/iso/$IMG.gz
+IMG_GZ_SHA256=7bf714dfb6d5a07a3bc64cebf113a1419f15bf9e208214bddcc64d5c6410c84f
+out=${PLAN2001_CACHE:-$HOME/.cache/plan2001}/rpi4-stock
+mkdir -p "$out"
+gz=$out/$IMG.gz
+if [ ! -e "$gz" ]; then
+	echo "stock: haetaan $URL" >&2
+	curl -fL -o "$gz.part" "$URL"
+	mv "$gz.part" "$gz"
+fi
+echo "$IMG_GZ_SHA256  $gz" | sha256sum -c --quiet - || { echo "stock: $gz ei ole $NAME:n (SHA256)" >&2; exit 1; }
+[ -e "$out/$IMG" ] || { gunzip -c "$gz" >"$out/$IMG.part" && mv "$out/$IMG.part" "$out/$IMG"; }
+echo "$out/$IMG"
