@@ -1,33 +1,58 @@
 #!/usr/bin/env python3
 """
-Plan2001 AMD64 -levykuvan käynnistystesti QEMU:ssa: OVMF (UEFI) ->
-Plan2001 EFI-loader -> BootInfo v1 -> 9front pc64 -ydin -> init -> rc,
-ilman verkkoa (-nic none), kuvan omalta ESP:ltä ja cwfs:ltä.
+Plan2001 AMD64 -levykuvan käynnistys- ja regressiotesti QEMU:ssa: OVMF
+(UEFI) -> Plan2001 EFI-loader -> BootInfo v1 -> 9front pc64 -ydin -> init
+-> rc, kuvan omalta ESP:ltä ja cwfs:ltä.
 
-    tools/native-amd64/boottest [--image KUVA] [--keep]
+    tools/native-amd64/boottest [--image KUVA] [--offline] [--keep]
 
-Kuvasta tehdään harva kopio; kopion ESP:n plan9.ini:hin lisätään vain
-console=0 (sarjakonsoli), ellei siinä jo ole console-riviä.  Testi
-käynnistää kopion kahdesti: ensimmäisellä kerralla tarkistetaan loaderin
-ja ytimen merkit, BootInfo-asetukset, laitteet (#l, #I, #S), IPv4/IPv6-
-silmukka, ARP-taulu ja käyttäjäohjelmien käännös ja ajo (6c, 6l) sekä
-kirjoitetaan tiedosto juureen; toisella kerralla tiedoston on oltava
-tallella (asennettu järjestelmä käynnistyy omalta levyltään).
-Konsolin loki: KUVA.boottest.log.  Vaatii mtoolsin (mtype, mcopy).
+Kuvasta tehdään harva kertakäyttökopio (lähdekuva ei muutu); kopion ESP:n
+plan9.ini:hin lisätään vain console=0, ellei siinä jo ole console-riviä.
+Kopio käynnistetään kolmesti:
+
+  1. offline: ei verkkoa (NIC vain tyhjässä QEMU-hubissa).  Sarjakonsolista
+     havaitaan loaderin merkit, BootInfo, ydin, laitteet (#l, sdE0), init
+     ja rc.  Sarjaportti on tässä vain käynnistyksen ja vianetsinnän kanava.
+  2. verkko: eristetty CPU/auth-vieras (cpuvieras.py): QEMU:n user-verkko
+     restrict=on ja vain loopback-porttiohjaukset, kertakäyttötunnukset.
+     Kaikki käynnistyksen jälkeiset komennot ajetaan natiivilla 9ptermillä
+     (rcpu): ensin siirtotien omat tarkistukset (lainaukset, uudelleen-
+     ohjaukset, pitkä syöte ja tuloste, stdin/EOF, stderr, status,
+     aikaraja, siirtovirheen luokittelu), sitten BootInfo/asetukset,
+     tallennus- ja laitelista, IPv4/IPv6/ARP erillisellä testikortilla
+     (ohjausyhteys ei muutu), 6c/6l-käännös ja ajo sekä kirjoitus juureen.
+     Kirjoitetaan pysyvyysmerkki ja käynnistyskiinnike /cfg/$sysname/termrc.
+  3. offline: ei verkkoa eikä sarjasyötettä: kiinnike tulostaa
+     käynnistyksessä merkin ja laitteet sarjakonsoliin, ja testi vertaa
+     merkkiä vaiheessa 2 kirjoitettuun satunnaisarvoon.
+
+--offline ajaa vain vaiheen 1 (erillinen offline-savutesti).  Tulokset
+luokitellaan: FAIL (vieraan tulos väärä), SIIRTO (9pterm/sarja ei
+tavoittanut vierasta), AIKA (etäkomento ylitti aikarajan); uusintayrityksiä
+ei ole.  Konsolin loki: KUVA.boottest.log.  Vaatii mtoolsin ja 9ptermin
+(tools/clients/drawterm/build.sh 9pterm tai --9pterm/NINEPTERM).
 """
 
 import argparse
+import hashlib
 import os
+import random
+import re
+import secrets
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import vm9  # noqa: E402
+import cpuvieras  # noqa: E402
+from cpuvieras import Aikaraja, Siirtovirhe  # noqa: E402
 
 ESP_OFFSET = 2048 * 512   # mkimage: ESP alkaa 1 MiB:stä
+TESTI_MAC = "52:54:00:50:32:02"   # eristetty testikortti tyhjässä hubissa
 
 
 def esp_ini(kuva, tyo):
@@ -46,96 +71,293 @@ class Tarkistus:
     def __init__(self):
         self.tulokset = []
 
-    def ok(self, nimi, ehto, tieto=""):
-        self.tulokset.append((nimi, bool(ehto), tieto))
-        print("%-4s %s%s" % ("OK" if ehto else "FAIL", nimi, (": " + tieto) if tieto else ""))
+    def kirjaa(self, luokka, nimi, tieto=""):
+        self.tulokset.append((nimi, luokka, tieto))
+        print("%-6s %s%s" % (luokka, nimi, (": " + tieto) if tieto else ""))
         sys.stdout.flush()
 
+    def ok(self, nimi, ehto, tieto=""):
+        self.kirjaa("OK" if ehto else "FAIL", nimi, tieto)
+
     def kaikki_ok(self):
-        return all(t[1] for t in self.tulokset)
+        return all(t[1] == "OK" for t in self.tulokset)
 
 
-def kaynnistys(kuva, loki, tk, kerta):
+def lyhyt(s, n=300):
+    return " ".join(s.split())[:n]
+
+
+def kaynnistysmerkit(vm, tk, vaihe):
+    """Loaderin ja ytimen merkit sarjakonsolista (vain tuloste)."""
+    vm.odota(r"\[P2 L01\] Plan2001 loader", 120)
+    tk.ok("%s: Plan2001 EFI-loader käynnistyi" % vaihe, True)
+    vm.odota(r"\[P2 L24\] boot", 120)
+    tk.ok("%s: loader ohitti ExitBootServicesin valmistelut ([P2 L24])" % vaihe, True)
+    vm.odota(r"Plan 9", 120)
+    tk.ok("%s: 9front pc64 -ydin tulostaa konsoliin" % vaihe, True)
+
+
+def ytimen_loki(vm, vaihe, tk):
+    """Ytimen omat käynnistysrivit: BootInfo, #l ja juurilevy."""
+    loki = vm.kaikki.decode("latin-1")
+    tk.ok("%s: ydin käytti BootInfoa (bootinfo: epoch)" % vaihe, "bootinfo: epoch" in loki)
+    tk.ok("%s: #l0 virtio-net löytyi" % vaihe, re.search(r"#l0: virtio", loki) is not None)
+    tk.ok("%s: juurilevy sdE0 löytyi" % vaihe, re.search(r"sdE0: LLBA", loki) is not None)
+
+
+def offline_kone(kuva, loki):
     # NIC tyhjään QEMU-hubiin: #l:n ajuri toimii, mutta verkkoyhteyttä ei ole
-    vm = vm9.Kone([(kuva, "raw", False, "hd")], vm9.Ovmf.etsi(), loki, muisti="2048", cpu="2",
-                  ylim=["-netdev", "hubport,id=n0,hubid=0", "-device", "virtio-net-pci,netdev=n0"])
+    return vm9.Kone([(kuva, "raw", False, "hd")], vm9.Ovmf.etsi(), loki, muisti="2048", cpu="2",
+                    ylim=["-netdev", "hubport,id=n0,hubid=0",
+                          "-device", "virtio-net-pci,netdev=n0,mac=" + TESTI_MAC])
+
+
+def vaihe_offline(kuva, loki, tk, merkki=None):
+    """Offline-käynnistys; merkki: vaiheen 2 pysyvyysmerkki, jota odotetaan."""
+    vaihe = "offline" if merkki is None else "offline-2"
+    vm = offline_kone(kuva, loki)
     vm.kaynnista()
     try:
-        vm.odota(r"\[P2 L01\] Plan2001 loader", 120)
-        tk.ok("%d: Plan2001 EFI-loader käynnistyi" % kerta, True)
-        vm.odota(r"\[P2 L24\] boot", 120)
-        tk.ok("%d: loader ohitti ExitBootServicesin valmistelut ([P2 L24])" % kerta, True)
-        vm.odota(r"Plan 9", 120)
-        tk.ok("%d: 9front pc64 -ydin tulostaa konsoliin" % kerta, True)
+        kaynnistysmerkit(vm, tk, vaihe)
+        if merkki is not None:
+            # termrc-kiinnike tulostaa ennen kehotetta; ei sarjasyötettä
+            m = vm.odota(r"P2PERSIST-([0-9a-f]*)\r?\n", 300)
+            arvo = m.group(1).decode()
+            tk.ok("offline-2: vaiheessa 2 kirjoitettu tiedosto säilyi (käynnistyskiinnike)",
+                  arvo == merkki, "luettu %s, odotettu %s" % (arvo or "-", merkki))
+            m = vm.odota(r"P2LAITTEET ([^\r\n]*)\r?\n", 60)
+            laitteet = m.group(1).decode("latin-1")
+            tk.ok("offline-2: #l ja #S (ether0, sdE0) ilman verkkoa",
+                  "ether0" in laitteet and "sdE0" in laitteet, laitteet)
         kehote = vm9.kaynnista_9front(vm, 300)
-        tk.ok("%d: init ja rc (%s)" % (kerta, kehote), True)
-        if kerta == 1:
-            ensimmainen(vm, tk)
-        else:
-            out, st = vm.aja("cat /usr/glenda/p2persist", 30, True)
-            tk.ok("2: ensimmäisellä käynnistyksellä kirjoitettu tiedosto säilyi", st == "" and "p2-persist" in out, out.strip())
+        tk.ok("%s: init ja rc (%s)" % (vaihe, kehote), True)
+        ytimen_loki(vm, vaihe, tk)
     finally:
         vm.sammuta(120)
 
 
-def ensimmainen(vm, tk):
-    a = vm.aja
-    out, _ = a("cat /dev/user; echo; cat /dev/sysname; echo; cat /env/service", 30)
-    tk.ok("1: käyttäjä glenda", out.split()[0] == "glenda", " ".join(out.split()))
-    out, _ = a("grep -e '^bootinfo: ' -e '^Plan 9' /dev/kmesg", 30, True)
-    tk.ok("1: ydin käytti BootInfoa (bootinfo.c bootinfoclock)", "bootinfo: epoch" in out, out.strip().replace("\n", " | "))
-    out, _ = a("ls '#ec' | sed 's,.*/,,' | grep -e '^\\*'; cat '#ec/*bootscreen'", 30, True)
-    tk.ok("1: *acpi ja *bootscreen BootInfosta, ei *e820:ta",
-          "*acpi" in out and "*bootscreen" in out and "*e820" not in out, " ".join(out.split()))
-    out, _ = a("ls '#S'; cat /dev/sdE0/ctl | sed 3q", 30, True)
-    tk.ok("1: #S: juurilevy sdE0", "sdE0" in out, " ".join(out.split())[:200])
-    out, st = a("ls '#l' && cat '#l/ether0/addr'", 30, True)
-    tk.ok("1: #l: ether0 (virtio-net, ei verkkoyhteyttä)", st == "" and "ether0" in out, " ".join(out.split()))
-    out, st = a("ip/ipconfig loopback /dev/null 127.1 && "
-                "for(i in /net/ipifc/[0-9]*) if(grep -s '^device /dev/null ' $i/status) echo add ::1 /128 >$i/ctl; "
-                "ip/ipconfig ether /net/ether0 10.99.0.2 255.255.255.0 && ip/ipconfig -6 ether /net/ether0 && "
-                "cat /net/ipselftab", 60, True)
-    tk.ok("1: #I: IPv4- ja IPv6-osoitteet (ipconfig)", st == "" and "127.0.0.1" in out and "10.99.0.2" in out
-          and "::1" in out and "fe80::" in out, " ".join(out.split())[:300])
-    out, st = a("ip/ping -n 2 127.0.0.1 >[2=1] | tail -1", 60, True)
-    tk.ok("1: IPv4-silmukka (ip/ping 127.0.0.1)", "rtt" in out and "lost" not in out, " ".join(out.split()))
-    out, st = a("ip/ping -6 -n 2 ::1 >[2=1] | tail -1", 60, True)
-    tk.ok("1: IPv6-silmukka (ip/ping -6 ::1)", "rtt" in out and "lost" not in out, " ".join(out.split()))
-    out, st = a("ip/ping -n 3 -i 500 10.99.0.1 >/dev/null >[2=1] & sleep 1; cat /net/arp; wait", 60, True)
-    tk.ok("1: ARP-pyyntö ether0:lle (/net/arp: 10.99.0.1)", "10.99.0.1" in out, " ".join(out.split())[:200])
-    out, st = a("cd /tmp && {echo '#include <u.h>'; echo '#include <libc.h>'; echo '#include <bootinfo.h>'; "
-                "echo 'void main(void){ print(\"p2-userland-%d bootinfo-%d\\n\", 6*7, sizeof(BootInfo)); exits(nil); }'} >p2.c && "
-                "6c p2.c && 6l -o p2 p2.6 && ./p2", 120, True)
-    tk.ok("1: 6c/6l käännös ja ajo asennetussa järjestelmässä", st == "" and "p2-userland-42 bootinfo-232" in out, " ".join(out.split()))
-    out, st = a("echo p2-persist >/usr/glenda/p2persist && cat /usr/glenda/p2persist", 30, True)
-    tk.ok("1: kirjoitus juuritiedostojärjestelmään", "p2-persist" in out)
+class Etakomennot:
+    """Tarkistukset 9ptermillä; siirtovirhe ja aikaraja kirjataan erikseen."""
+
+    def __init__(self, pterm, tk):
+        self.pterm = pterm
+        self.tk = tk
+
+    def aja(self, nimi, komento, ehto, aikaraja=60, stdin=b"", tieto=None):
+        try:
+            t = self.pterm.aja(komento, aikaraja=aikaraja, stdin=stdin)
+        except Aikaraja as e:
+            self.tk.kirjaa("AIKA", nimi, lyhyt(str(e)))
+            return None
+        except Siirtovirhe as e:
+            self.tk.kirjaa("SIIRTO", nimi, lyhyt(str(e)))
+            return None
+        self.tk.ok(nimi, ehto(t), lyhyt(tieto(t) if tieto else
+                                        (t.stdout + (" | stderr: " + t.stderr if t.stderr else "")
+                                         + (" | status: " + t.status if t.status else ""))))
+        return t
+
+
+def siirtotie(e, pterm, tk, tyo):
+    """9ptermin oma käytös: kanava ei saa muuttaa komentoa eikä sen tuloksia."""
+    e.aja("9pterm: lainaukset ja uudelleenohjaukset säilyvät",
+          "echo 'a  b' \"c\" '</dev/null' >/tmp/p2q && cat /tmp/p2q </dev/null; echo '$x' `{echo y}",
+          lambda t: t.stdout == "a  b \"c\" </dev/null\n$x y\n" and t.status == "")
+    e.aja("9pterm: stdout ja stderr erikseen",
+          "echo ulos; echo virhe >[1=2]",
+          lambda t: t.stdout == "ulos\n" and t.stderr == "virhe\n" and t.status == "")
+    e.aja("9pterm: nollasta poikkeava status välittyy",
+          "echo ennen; exit p2virhe",
+          lambda t: t.koodi == 1 and "p2virhe" in t.status and t.stdout == "ennen\n")
+    # stdin on 9ptermin /dev/cons: teksti tavu tavulta, binääri put:lla
+    r = random.Random(22)
+    syote = "".join(r.choice("abcdefghij  \n") for _ in range(1 << 20)).encode()
+    md5 = hashlib.md5(syote).hexdigest()
+    e.aja("9pterm: 1 MiB tekstiä stdinissä komennolle (md5sum)", "md5sum",
+          lambda t: t.stdout.split()[:1] == [md5] and t.status == "", stdin=syote,
+          tieto=lambda t: "%s (odotettu %s)" % (t.stdout.strip(), md5))
+    binaari = bytes(r.randrange(256) for _ in range(256 << 10))
+    polku = os.path.join(tyo, "p2bin")
+    with open(polku, "wb") as f:
+        f.write(binaari)
+    md5 = hashlib.md5(binaari).hexdigest()
+    try:
+        pterm.put(polku, "/tmp/p2bin")
+        e.aja("9pterm: 256 KiB binääriä put:lla (md5sum)", "md5sum /tmp/p2bin",
+              lambda t: t.stdout.split()[:1] == [md5])
+    except (Siirtovirhe, Aikaraja) as x:
+        tk.kirjaa("SIIRTO", "9pterm: 256 KiB binääriä put:lla", lyhyt(str(x)))
+    e.aja("9pterm: stdin päättyy EOF:ään", "cat; echo P2EOF",
+          lambda t: t.stdout == "abc\nP2EOF\n", aikaraja=20, stdin=b"abc\n")
+    e.aja("9pterm: tyhjä stdin on heti EOF", "wc -c",
+          lambda t: t.stdout.strip() == "0", aikaraja=20)
+    odotettu = "".join("%d\n" % i for i in range(1, 100001))
+    e.aja("9pterm: pitkä tuloste (seq 1 100000)", "seq 1 100000",
+          lambda t: t.stdout == odotettu,
+          tieto=lambda t: "%d tavua (odotettu %d)" % (len(t.stdout), len(odotettu)))
+    pitka = "p2" * 3500
+    e.aja("9pterm: 7 kt:n komentorivi", "echo %s | wc -c" % pitka,
+          lambda t: t.stdout.strip() == str(len(pitka) + 1))
+    # etäpään rc (NTOK 8192) hylkää skriptin: ei saa näkyä onnistumisena
+    try:
+        t = pterm.aja("echo %s | wc -c" % ("x" * 9000), aikaraja=20)
+        tk.ok("9pterm: yli 8 KiB:n rc-sana ei näy onnistumisena", False, lyhyt(t.stdout + t.status))
+    except Siirtovirhe:
+        tk.ok("9pterm: yli 8 KiB:n rc-sana ei näy onnistumisena", True, "9pterm 2")
+    except Aikaraja:
+        tk.ok("9pterm: yli 8 KiB:n rc-sana ei näy onnistumisena", False, "aikaraja")
+    alku = time.time()
+    try:
+        pterm.aja("sleep 60", aikaraja=3)
+        tk.ok("9pterm: aikaraja (-T 3) katkaisee komennon", False, "komento päättyi")
+    except Aikaraja:
+        kesto = time.time() - alku
+        tk.ok("9pterm: aikaraja (-T 3) katkaisee komennon", kesto < 20, "%.1f s" % kesto)
+    except Siirtovirhe as x:
+        tk.kirjaa("SIIRTO", "9pterm: aikaraja (-T 3) katkaisee komennon", lyhyt(str(x)))
+    e.aja("9pterm: aikarajan jälkeen uusi komento toimii", "echo jatkuu",
+          lambda t: t.stdout == "jatkuu\n")
+    kuollut = cpuvieras.Pterm(pterm.ohjelma, cpuvieras.vapaa_portti(), cpuvieras.vapaa_portti(),
+                              pterm.kayttaja, pterm.salasanatiedosto)
+    try:
+        kuollut.aja("echo ei", aikaraja=5, yhteysraja=5)
+        tk.ok("9pterm: suljettu portti on siirtovirhe, ei vieraan virhe", False, "komento onnistui")
+    except Siirtovirhe:
+        tk.ok("9pterm: suljettu portti on siirtovirhe, ei vieraan virhe", True)
+    except Aikaraja:
+        tk.ok("9pterm: suljettu portti on siirtovirhe, ei vieraan virhe", False, "aikaraja")
+
+
+def asennettu(e):
+    """Alkuperäisen boottestin tarkistukset, nyt 9ptermin kautta."""
+    e.aja("verkko: käyttäjä glenda", "cat /dev/user; echo; cat /dev/sysname",
+          lambda t: t.stdout.split()[:1] == ["glenda"])
+    e.aja("verkko: ydin käytti BootInfoa (bootinfo.c bootinfoclock)",
+          "grep -e '^bootinfo: ' -e '^Plan 9' /dev/kmesg",
+          lambda t: "bootinfo: epoch" in t.stdout)
+    e.aja("verkko: *acpi ja *bootscreen BootInfosta, ei *e820:ta",
+          "ls '#ec' | sed 's,.*/,,' | grep -e '^\\*'; cat '#ec/*bootscreen'",
+          lambda t: "*acpi" in t.stdout and "*bootscreen" in t.stdout and "*e820" not in t.stdout)
+    e.aja("verkko: #S: juurilevy sdE0 ja provisiointilevy sdE1",
+          "ls '#S'; cat '#S/sdE0/ctl' | sed 3q",
+          lambda t: "sdE0" in t.stdout and "sdE1" in t.stdout and t.status == "")
+    mac_ohj = cpuvieras.OHJAUS_MAC.replace(":", "")
+    mac_testi = TESTI_MAC.replace(":", "")
+    e.aja("verkko: #l: ohjauskortti ether0 ja testikortti ether1",
+          "ls '#l0' '#l1'; cat '#l0/ether0/addr'; echo; cat '#l1/ether1/addr'",
+          lambda t: t.status == "" and mac_ohj in t.stdout and mac_testi in t.stdout)
+    # testikortti on ether1 tyhjässä hubissa: ohjausyhteys (ether0) ei muutu
+    e.aja("verkko: #I: IPv4- ja IPv6-osoitteet (ipconfig, loopback ja ether1)",
+          "bind -a '#l1' /net && ip/ipconfig loopback /dev/null 127.1 && "
+          "for(i in /net/ipifc/[0-9]*) if(grep -s '^device /dev/null ' $i/status) echo add ::1 /128 >$i/ctl; "
+          "ip/ipconfig ether /net/ether1 10.99.0.2 255.255.255.0 && ip/ipconfig -6 ether /net/ether1 && "
+          "cat /net/ipselftab",
+          lambda t: t.status == "" and all(a in t.stdout for a in ("127.0.0.1", "10.99.0.2", "::1", "fe80::")),
+          aikaraja=60)
+    e.aja("verkko: IPv4-silmukka (ip/ping 127.0.0.1)", "ip/ping -n 2 127.0.0.1 >[2=1] | tail -1",
+          lambda t: "rtt" in t.stdout and "lost" not in t.stdout)
+    e.aja("verkko: IPv6-silmukka (ip/ping -6 ::1)", "ip/ping -6 -n 2 ::1 >[2=1] | tail -1",
+          lambda t: "rtt" in t.stdout and "lost" not in t.stdout)
+    e.aja("verkko: ARP-pyyntö ether1:lle (/net/arp: 10.99.0.1)",
+          "ip/ping -n 3 -i 500 10.99.0.1 >/dev/null >[2=1] & sleep 1; cat /net/arp; wait",
+          lambda t: "10.99.0.1" in t.stdout)
+    e.aja("verkko: ohjausyhteys toimii testiverkon asetusten jälkeen", "echo P2OHJAUS",
+          lambda t: t.stdout == "P2OHJAUS\n")
+    e.aja("verkko: 6c/6l käännös ja ajo asennetussa järjestelmässä",
+          "cd /tmp && {echo '#include <u.h>'; echo '#include <libc.h>'; echo '#include <bootinfo.h>'; "
+          "echo 'void main(void){ print(\"p2-userland-%d bootinfo-%d\\n\", 6*7, sizeof(BootInfo)); exits(nil); }'} >p2.c && "
+          "6c p2.c && 6l -o p2 p2.6 && ./p2",
+          lambda t: t.status == "" and "p2-userland-42 bootinfo-232" in t.stdout, aikaraja=120)
+
+
+def vaihe_verkko(kuva, loki, tyo, tk):
+    """Palauttaa pysyvyysmerkin, jos se kirjoitettiin ja fs pysähtyi."""
+    v = cpuvieras.CpuVieras(kuva, tyo, loki, testi_nicit=[TESTI_MAC])
+    merkki = None
+    try:
+        v.vm.kaynnista()
+        kaynnistysmerkit(v.vm, tk, "verkko")
+        kehote = vm9.kaynnista_9front(v.vm, 300)
+        tk.ok("verkko: init ja rc (%s)" % kehote, True)
+        try:
+            t = v.provisioi()
+            tk.ok("verkko: CPU/auth provisioitu, 9pterm-kirjautuminen (dp9ik + TLS-PSK)",
+                  t.stdout == "glenda" and t.status == "", lyhyt(t.stdout + t.stderr))
+        except Siirtovirhe as x:
+            tk.kirjaa("SIIRTO", "verkko: CPU/auth-provisiointi", lyhyt(str(x), 1000))
+            return None
+        except vm9.VirheVM as x:
+            tk.kirjaa("FAIL", "verkko: CPU/auth-provisiointi", lyhyt(str(x), 1000))
+            return None
+        e = Etakomennot(v.pterm, tk)
+        siirtotie(e, v.pterm, tk, tyo)
+        asennettu(e)
+        arvo = secrets.token_hex(8)
+        # käynnistyskiinnike vaiheelle 3: termrc ajaa /cfg/$sysname/termrcin
+        t = e.aja("verkko: pysyvyysmerkki ja käynnistyskiinnike juuritiedostojärjestelmään",
+                  "echo %s >/usr/glenda/p2persist && s=`{cat /dev/sysname} && mkdir -p /cfg/$s && "
+                  "{echo 'echo P2PERSIST-^`{cat /usr/glenda/p2persist} >''#c/cons'''; "
+                  "echo 'echo P2LAITTEET `{ls ''#l'' ''#S''} >''#c/cons'''} >/cfg/$s/termrc && "
+                  "cat /usr/glenda/p2persist /cfg/$s/termrc" % arvo,
+                  lambda t: t.status == "" and t.stdout.startswith(arvo + "\n"))
+        if t is not None and t.status == "" and t.stdout.startswith(arvo + "\n"):
+            merkki = arvo
+    except vm9.VirheVM as x:
+        tk.kirjaa("FAIL", "verkko: käynnistys", lyhyt(str(x)[-2000:], 2000))
+    finally:
+        if v.vm.proc is not None and v.vm.proc.poll() is None:
+            pysahtyi = v.sammuta(120)
+            tk.ok("verkko: fshalt valmistui (done halting)", pysahtyi)
+            if not pysahtyi:
+                merkki = None
+        v.siivoa()
+    return merkki
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--image", default=os.path.join(vm9.oletus_ulos(), "plan2001-amd64.img"))
+    ap.add_argument("--offline", action="store_true", help="vain offline-savutesti (vaihe 1)")
+    ap.add_argument("--9pterm", dest="ninepterm", help="9pterm-ohjelma (oletus NINEPTERM tai build.sh:n polku)")
     ap.add_argument("--keep", action="store_true", help="säilytä testikopio (KUVA.boottest.img)")
     a = ap.parse_args()
+    if a.ninepterm:
+        os.environ["NINEPTERM"] = os.path.abspath(a.ninepterm)
     for t in ("mtype", "mcopy"):
         if shutil.which(t) is None:
             raise vm9.VirheVM("%s puuttuu (mtools)" % t)
     if not os.path.isfile(a.image):
         raise vm9.VirheVM("%s puuttuu: aja tools/native-amd64/mkimage" % a.image)
+    if not a.offline:
+        cpuvieras.etsi_9pterm()
     loki = os.path.splitext(a.image)[0] + ".boottest.log"
     if os.path.exists(loki):
         os.unlink(loki)
     tk = Tarkistus()
     with tempfile.TemporaryDirectory(prefix="p2boot-") as tyo:
+        os.chmod(tyo, 0o700)
         kopio = os.path.splitext(a.image)[0] + ".boottest.img" if a.keep else os.path.join(tyo, "kuva.img")
         subprocess.check_call(["cp", "--sparse=always", a.image, kopio])
         ini = esp_ini(kopio, tyo)
         print("plan9.ini (ESP):\n  " + "\n  ".join(ini.strip().splitlines()))
         try:
-            kaynnistys(kopio, loki, tk, 1)
-            kaynnistys(kopio, loki, tk, 2)
+            vaihe_offline(kopio, loki, tk)
         except vm9.VirheVM as e:
-            tk.ok("käynnistys", False, str(e)[-2000:])
+            tk.kirjaa("FAIL", "offline: käynnistys", lyhyt(str(e)[-2000:], 2000))
+        if not a.offline:
+            merkki = vaihe_verkko(kopio, loki, tyo, tk)
+            if merkki is None:
+                tk.kirjaa("FAIL", "offline-2: pysyvyys", "vaihe 2 ei kirjoittanut merkkiä tai fs ei pysähtynyt")
+            else:
+                try:
+                    vaihe_offline(kopio, loki, tk, merkki)
+                except vm9.VirheVM as e:
+                    tk.kirjaa("FAIL", "offline-2: käynnistys", lyhyt(str(e)[-2000:], 2000))
     print("loki: %s" % loki)
+    luokat = {}
+    for _, luokka, _ in tk.tulokset:
+        luokat[luokka] = luokat.get(luokka, 0) + 1
+    print("yhteenveto: " + ", ".join("%s %d" % kv for kv in sorted(luokat.items())))
     if not tk.kaikki_ok():
         sys.exit(1)
     print("boottest: kaikki tarkistukset OK")

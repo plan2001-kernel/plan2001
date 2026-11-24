@@ -404,8 +404,14 @@ rcpuexit(void)
 {
 	char *s = getenv("rstatus");
 
-	if(s == nil)
-		return;
+	/*
+	 * no status: the remote script ended before the command reported
+	 * one (e.g. the server's rc refused the script); not a success
+	 */
+	if(s == nil){
+		fprint(2, "9pterm: the session ended without the command's status\n");
+		exit(2);
+	}
 	if(*s == 0){
 		if(getlocal != nil && getfinish(nil) < 0)
 			exit(1);

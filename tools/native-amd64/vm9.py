@@ -62,7 +62,7 @@ class Kone:
     (polku, muoto, vain_luku, laji) -nelikkoja; laji on "hd" tai "cd".
     """
 
-    def __init__(self, levyt, ovmf, loki, muisti="2048", cpu="2", nayttö=False, ylim=None):
+    def __init__(self, levyt, ovmf, loki, muisti="2048", cpu="2", nayttö=False, ylim=None, qmp=False):
         self.levyt = levyt
         self.ovmf = ovmf
         self.lokipolku = loki
@@ -75,6 +75,8 @@ class Kone:
         self.kaikki = b""
         self.tyohak = tempfile.mkdtemp(prefix="vm9-")
         self.lokitiedosto = None
+        # QMP: koneen ohjaus (lopetus, tila) ilman sarjakonsolia
+        self.qmppolku = os.path.join(self.tyohak, "qmp.sock") if qmp else None
 
     def komento(self):
         muuttujat = os.path.join(self.tyohak, "vars.fd")
@@ -92,6 +94,8 @@ class Kone:
         ]
         if not self.nayttö:
             k += ["-display", "none"]
+        if self.qmppolku:
+            k += ["-qmp", "unix:%s,server=on,wait=off" % self.qmppolku]
         for i, (polku, muoto, vainluku, laji) in enumerate(self.levyt):
             ro = ",readonly=on" if vainluku else ""
             # firmware käynnistää ensimmäisen levyn, ei esim. liitettyä ISO:a
@@ -209,6 +213,49 @@ class Kone:
             except VirheVM:
                 pass
             time.sleep(2)
+        self.tapa()
+
+    def qmp(self, komento, aikaraja=10, **argumentit):
+        """Yksi QMP-komento; palauttaa vastauksen 'return'-osan."""
+        import json
+        import socket
+        if not self.qmppolku:
+            raise VirheVM("kone käynnistettiin ilman QMP:tä")
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(aikaraja)
+        try:
+            s.connect(self.qmppolku)
+            f = s.makefile("rwb")
+
+            def vastaus():
+                while True:
+                    rivi = f.readline()
+                    if not rivi:
+                        raise VirheVM("QMP-yhteys katkesi")
+                    v = json.loads(rivi)
+                    if "event" not in v:
+                        return v
+            vastaus()   # tervehdys
+            for k, a in (("qmp_capabilities", {}), (komento, argumentit)):
+                f.write(json.dumps({"execute": k, "arguments": a}).encode() + b"\n")
+                f.flush()
+                v = vastaus()
+                if "error" in v:
+                    raise VirheVM("QMP %s: %s" % (k, v["error"]))
+            return v.get("return")
+        except (OSError, ValueError) as e:
+            raise VirheVM("QMP %s: %s" % (komento, e))
+        finally:
+            s.close()
+
+    def lopeta(self, aikaraja=15):
+        """QEMU pois QMP:n quit-komennolla (varalla terminate/kill)."""
+        if self.proc is not None and self.proc.poll() is None and self.qmppolku:
+            try:
+                self.qmp("quit")
+                self.proc.wait(aikaraja)
+            except (VirheVM, subprocess.TimeoutExpired):
+                pass
         self.tapa()
 
     def tapa(self):

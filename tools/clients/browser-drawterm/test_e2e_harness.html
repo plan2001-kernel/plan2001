@@ -1,0 +1,149 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>browser drawterm e2e harness</title>
+<!--
+Vain test_e2e.py:n käyttöön.  Ohjaa oikeaa index.html-sivua saman alkuperän
+iframessa: kirjautuu, odottaa etä-Rion, kirjoittaa rc-ikkunaan komentoja,
+joiden vaikutukset test_e2e.py tarkistaa vieraasta.  Tunnukset haetaan
+testin loopback-vastaanottimesta (?result=), eivät ole tiedostossa eivätkä
+URL:ssä; tulos lähetetään POST-pyyntönä samaan osoitteeseen.
+-->
+<iframe id="f" src="index.html" style="width:800px;height:600px;border:0"></iframe>
+<pre id="r">PENDING</pre>
+<script>
+const log = [];
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const q = new URLSearchParams(location.search);
+const result = q.get('result');
+const mode = q.get('mode') || 'good';
+function ok(name, cond) { log.push((cond ? 'ok: ' : 'FAIL: ') + name); }
+async function shot(name) {
+	// kuvakaappaus vianetsintään; test_e2e.py tallentaa sen --keep-hakemistoon
+	try {
+		const c = document.getElementById('f').contentWindow.document.getElementById('screen');
+		await fetch(result.replace(/\/result$/, '/shot?' + name), {method: 'POST', body: c.toDataURL('image/png')});
+	} catch (e) {}
+}
+function finish() {
+	const body = log.join('\n') + '\nHARNESS-DONE';
+	document.getElementById('r').textContent = body;
+	if (result)
+		fetch(result, {method: 'POST', body}).catch(() => {});
+}
+(async () => {
+try {
+	const cred = await (await fetch(result.replace(/\/result$/, '/cred?mode=' + mode))).json();
+	const f = document.getElementById('f');
+	let w = f.contentWindow;
+	for (let i = 0; i < 400; i++) {
+		w = f.contentWindow;
+		if (w && w.location && w.location.href.includes('index.html') &&
+		    w.document.readyState === 'complete')
+			break;
+		await sleep(25);
+	}
+	await sleep(100);
+	w = f.contentWindow;
+	const d = w.document;
+	let cfg = null;
+	for (let i = 0; i < 200 && !cfg; i++) {
+		await sleep(25);
+		cfg = w.drawterm && w.drawterm.config;
+	}
+	ok('gateway configuration', !!cfg);
+	d.getElementById('user').value = cred.user;
+	d.getElementById('pass').value = cred.pass;
+	d.querySelector('#login form').requestSubmit();
+
+	if (mode !== 'good') {
+		// väärä salasana tai tavoittamaton palvelu: odotetaan sulkeutumista
+		await sleep(10000);
+		log.push('connections=' + w.drawterm.connections +
+			 ' logs=' + JSON.stringify(w.drawterm.logs.slice(-6)));
+		finish();
+		return;
+	}
+
+	const c = d.getElementById('screen');
+	let conn = 0, pixels = 0;
+	for (let i = 0; i < 600; i++) {
+		await sleep(100);
+		conn = Math.max(conn, w.drawterm.connections);
+		const data = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+		let n = 0;
+		for (let j = 0; j < data.length; j += 4)
+			if (data[j] || data[j+1] || data[j+2])
+				n++;
+		pixels = n;
+		if (conn >= 1 && pixels > 10000 && i > 30)
+			break;
+	}
+	ok('allowlisted WebSocket', conn >= 1);
+	ok('remote framebuffer drawn', pixels > 10000);
+	log.push('connections=' + conn + ' pixels=' + pixels + ' flushes=' + w.drawterm.flushes);
+	await sleep(3000);
+
+	const rect = () => c.getBoundingClientRect();
+	const ev = (t, x, y, b) => {
+		const r = rect();
+		c.dispatchEvent(new w.PointerEvent(t, {
+			bubbles: true, clientX: r.left + x, clientY: r.top + y,
+			pointerId: 1, pointerType: 'mouse', buttons: b }));
+	};
+	async function click(x, y, b) {
+		ev('pointermove', x, y, 0);
+		await sleep(100);
+		ev('pointerdown', x, y, b);
+		await sleep(150);
+		ev('pointerup', x, y, 0);
+		await sleep(300);
+	}
+	async function type(s) {
+		for (const ch of s) {
+			const key = ch === '\n' ? 'Enter' : ch;
+			c.dispatchEvent(new w.KeyboardEvent('keydown', {key, bubbles: true}));
+			c.dispatchEvent(new w.KeyboardEvent('keyup', {key, bubbles: true}));
+			await sleep(40);
+		}
+	}
+	// napin 1 napsautus rc-ikkunaan (test_e2e.py: window -r 20 20 520 360)
+	await shot('rio');
+	await click(200, 200, 1);
+	await type('echo browser-kbd-ok >/usr/glenda/kbd-proof\n');
+	await sleep(1500);
+	await type('dd -bs 144 -count 1 -if /dev/draw/new >/usr/glenda/screen1 >[2]/dev/null\n');
+	await sleep(1500);
+
+	const before = w.drawterm.resizes;
+	f.style.width = '760px';
+	f.style.height = '560px';
+	w.dispatchEvent(new w.Event('resize'));
+	for (let i = 0; i < 100 && w.drawterm.resizes === before; i++)
+		await sleep(50);
+	ok('resize reaches drawterm', w.drawterm.resizes > before);
+	await sleep(3000);
+	await click(200, 200, 1);
+	await type('dd -bs 144 -count 1 -if /dev/draw/new >/usr/glenda/screen2 >[2]/dev/null\n');
+	await sleep(1500);
+	await type('echo browser-unicode-ä >/usr/glenda/unicode-proof\n');
+	await sleep(1500);
+	// graafinen ohjelma omaan ikkunaansa; test_e2e.py laskee /dev/wsys-ikkunat
+	await type('window -r 540 20 740 220 clock\n');
+	await sleep(3000);
+	await click(200, 200, 1);
+	await type('ls /dev/wsys >/usr/glenda/wsys-proof\n');
+	await sleep(1500);
+	// napit 2 ja 3 rc-ikkunan ulkopuolella: Rion valikot avautuvat ja
+	// suljetaan napin vapautuksella ilman valintaa
+	await click(650, 450, 2);
+	await click(650, 450, 4);
+	await shot('end');
+	ok('input dispatched', w.drawterm.inputs > 100);
+	log.push('inputs=' + w.drawterm.inputs + ' flushes=' + w.drawterm.flushes +
+		 ' resizes=' + w.drawterm.resizes);
+} catch (e) {
+	ok('exception: ' + e, false);
+}
+finish();
+})();
+</script>

@@ -1,0 +1,29 @@
+# Emscripten: drawterm.js + drawterm.wasm for an ordinary browser.
+#
+# gui-web/ is the screen, mouse and keyboard (Canvas 2D through memdraw),
+# and turns drawterm's TCP connections into WebSockets.  A small same-origin
+# gateway (tools/clients/browser-drawterm/serve.py) terminates the WebSocket
+# and connects only the configured CPU/auth ports to the real server.  rcpu's
+# ordinary authentication and TLS-PSK run end to end inside the tunnel.
+#
+# pthreads (drawterm's kprocs) need SharedArrayBuffer, hence COOP/COEP
+# headers from the gateway.  socket/connect/send/recv/... are renamed to the
+# gui-web/wsock.c shims; the rest of drawterm, including libsec's TLS, is
+# unchanged.  getcallerpc() is only used for lock debugging: keep it constant
+# rather than pay for -sUSE_OFFSET_CONVERTER on every lock.
+PTHREAD=-pthread
+AR=emar
+AS=emcc
+RANLIB=emranlib
+CC=emcc
+CFLAGS=-Wall -Wno-missing-braces -Wno-parentheses -Wno-unused-but-set-variable -Wno-implicit-function-declaration -g -I$(ROOT) -I$(ROOT)/include -I$(ROOT)/kern -c -Dlinux -D_THREAD_SAFE -DPTHREAD $(PTHREAD) -D_REENTRANT '-D__builtin_return_address(x)=0' -Dsocket=wssocket -Dconnect=wsconnect -Dsend=wssend -Drecv=wsrecv -Dclose=wsclose -Dsetsockopt=wssetsockopt -Dgetsockname=wsgetsockname -Dgetpeername=wsgetpeername -O2
+O=o
+OS=posix
+GUI=web
+AUDIO=none
+LDADD=--js-library $(ROOT)/gui-web/library.js -sPROXY_TO_PTHREAD \
+	-sSTACK_SIZE=1MB -sDEFAULT_PTHREAD_STACK_SIZE=1MB -sALLOW_MEMORY_GROWTH \
+	-sEXIT_RUNTIME -sENVIRONMENT=web,worker \
+	-sEXPORTED_RUNTIME_METHODS=ENV,UTF8ToString -sEXPORTED_FUNCTIONS=_main,_malloc,_free
+LDFLAGS=$(PTHREAD)
+TARG=drawterm.js

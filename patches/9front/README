@@ -90,17 +90,13 @@ bcm64-uefi-bootinfo.diff
 		KZERO's window above the image, which ../arm64/mmu.c's
 		kmapram() now leaves to the initial map.  2026-11-24.
 
-bcm64-mkfile-bootargs.diff
-		9/bcm64/mkfile: an explicit rule for bootargs.$O from
-		../bcm/bootargs.c.  With ../port/bootargs.c (the shared
-		BootInfo arguments) mk finds two metarules for it and
-		stops; the Raspberry Pi kernels keep bcm's, which reads
-		the firmware's DTB.
-
 native-syscall-contract.diff
 		port/mksystab uses the same architecture selector as libc/APE.
 		Shared bootargs is opt-in; board-local sources keep ownership.
 
-syscall-command-selector.diff
-		cmd/syscall's generated dispatch table uses the architecture-aware
-		syscall selector, keeping the WASM32-only SPAWN out of native builds.
+syscall-tab.diff
+		cmd/syscall/mkfile: tab.h from the same architecture selector
+		as libc, APE and the kernel (libc/9syscall/syscalls), not from
+		sys.h's raw #define lines: mktab.awk took sys.h's #ifdef and
+		#endif around wasm32's SPAWN as calls, and syscall(1) did not
+		compile.  spawn is in wasm32's table only.  2026-11-24.

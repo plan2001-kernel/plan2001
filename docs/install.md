@@ -143,6 +143,46 @@ machine's own tools - echo and hoc from `/sys/src/cmd` (mk, 3c, 3l,
 yacc), installed and run.  The whole system's build (`cd /sys/src; mk
 install`) is people's to run.
 
+`tools/test/run pwa`, only when named: the small distribution installed
+into a browser profile kept for it (`build/test/pwaprofile`), then
+`tools/test/pwaoffline`: online, the service worker caches this
+version's page and `platform.js` completely and the installed system
+boots from its disk; with the server and the browser stopped, a cold
+start of the start URL boots the installed system again and reads back
+what it wrote, and `?boot=net` fails visibly instead of starting
+something else; an update replaces the cache, and an update with a
+missing file is rejected while the last complete version still starts
+offline.  The browser's disk is never touched outside that profile.
+
+The browser tests run headless Chromium with `--password-store=basic`:
+on a desktop whose GNOME keyring is locked, Chromium otherwise waits for
+the keyring and never loads the local page.
+
+## AMD64 UEFI disk image
+
+    tools/native-amd64/build --out O
+    tools/native-amd64/mkimage --in O --out O.img
+    tools/clients/drawterm/build.sh 9pterm
+    tools/native-amd64/boottest --image O.img
+
+`boottest` works on a sparse disposable copy; the image itself is not
+modified. It boots the copy three times: offline (NIC only on an empty
+QEMU hub; loader, BootInfo, kernel, devices, init and rc observed on the
+serial console), networked, and offline again. The networked boot is a
+throwaway CPU/auth guest (`tools/native-amd64/cpuvieras.py`): QEMU user
+networking with `restrict=on`, only the rcpu and auth ports forwarded to
+random `127.0.0.1` ports, random one-off credentials, and a second NIC on
+an empty hub for IPv4/IPv6/ARP checks. One short serial line runs a
+provisioning script from a separate raw disk; every later command runs
+through native 9pterm (`-c` with `-W`/`-T`, stdout, stderr and remote
+status kept apart, text stdin ending in EOF, binary files with `put`).
+The last boot verifies, without network or serial input, a marker written
+during the networked boot. `--offline` runs only the first boot. Results
+are `OK`, `FAIL` (wrong guest result), `SIIRTO` (9pterm or serial could
+not reach the guest) or `AIKA` (remote command timed out); nothing is
+retried. The serial log is written next to the image
+(`O.boottest.log`) and contains no credentials.
+
 ## ARM64 QEMU virt live image
 
 The serial live image uses the frozen release's `sys/src/9/arm64` QEMU

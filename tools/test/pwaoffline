@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Asennetun Plan9-wasm32:n offline-käynnistys oikeassa Chromiumissa
+(sw.js: sivu ja platform.js välimuistista, järjestelmä OPFS-levyltä).
+
+    tools/test/pwaoffline PROFILE SITE
+
+PROFILE: selainprofiili, jonka levylle tools/test/run install on asentanut
+järjestelmän (PROFILE=dir tools/test/run install); profiilia käytetään
+sellaisenaan, sen levyn sisältöä ei pyyhitä.  SITE: sivusto, jolta
+järjestelmä asennettiin (build/test/dist).  Vaiheet:
+
+  1. verkossa: sivu tools/servestä, palvelutyöntekijä aktiivinen ja sen
+     välimuisti kokonainen; asennettu järjestelmä käynnistyy levyltä
+     (levyn oma firmware) ja kirjoittaa satunnaisen merkin levylle
+  2. ilman verkkoa: palvelin ja selain pois, selain uudelleen samalla
+     profiililla (kylmäkäynnistys): start_url käynnistää levyn firmwaren
+     ja järjestelmän, merkki luetaan levyltä; ?boot=net ei käynnisty
+     (verkon live-levy ei ole välimuistissa) eikä vaihda lähdettä
+  3. päivitys: uusi versio verkossa, vanha välimuisti korvautuu
+  4. rikkinäinen päivitys (yksi tiedosto 404): asennus hylätään, edellinen
+     versio jää ja käynnistyy yhä ilman verkkoa
+
+Selainprofiilin ja levyn sisältöä ei näytetä eikä kirjoiteta muualle;
+tulos PASS/FAIL riveinä, paluuarvo 1 jos jokin epäonnistui.
+"""
+import importlib.machinery, importlib.util, json, os, secrets, shutil, signal, socket, subprocess, sys, tempfile, time, urllib.parse, urllib.request
+
+here = os.path.dirname(os.path.abspath(__file__))
+root = os.path.dirname(os.path.dirname(here))
+sys.dont_write_bytecode = True
+_l = importlib.machinery.SourceFileLoader('wasmapp', os.path.join(here, 'wasmapp'))
+_s = importlib.util.spec_from_loader('wasmapp', _l)
+wasmapp = importlib.util.module_from_spec(_s)
+_l.exec_module(wasmapp)
+
+# sama origin kuin asennuksella (wasmapp): OPFS on originin oma
+HTTP = wasmapp.HTTP
+fails = 0
+
+
+def check(name, ok, info=''):
+	global fails
+	fails += 0 if ok else 1
+	print(('PASS: ' if ok else 'FAIL: ') + name + (' (' + info + ')' if info else ''), flush=True)
+
+
+def listening(port):
+	try:
+		socket.create_connection(('127.0.0.1', port), timeout=0.5).close()
+		return True
+	except OSError:
+		return False
+
+
+class Server:
+	def __init__(self, site):
+		self.p = subprocess.Popen([os.path.join(root, 'tools/serve'), '-d', site, '-g', os.environ.get('GATEWAY') or '17080', str(HTTP)],
+			stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+		for _ in range(50):
+			if listening(HTTP):
+				return
+			time.sleep(0.1)
+		raise SystemExit('pwaoffline: tools/serve did not start')
+
+	def stop(self):
+		if self.p.poll() is None:
+			try:
+				os.killpg(self.p.pid, signal.SIGTERM)
+			except OSError:
+				pass
+			self.p.wait(10)
+
+
+class Browser:
+	"""Chromium samalla profiililla; Cdp wasmappista (sama kuin muissa testeissä)."""
+
+	def __init__(self, profile):
+		try:	# edellisen selaimen portti profiilissa: ei sitä
+			os.unlink(os.path.join(profile, 'DevToolsActivePort'))
+		except OSError:
+			pass
+		self.ch = subprocess.Popen(['chromium', '--headless=new', '--no-sandbox', '--disable-gpu',
+			'--password-store=basic', f'--user-data-dir={profile}', '--remote-debugging-port=0',
+			'--window-size=600,600', 'about:blank'],
+			stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+		port = None
+		for _ in range(100):
+			try:
+				port = int(open(os.path.join(profile, 'DevToolsActivePort')).readline())
+				urllib.request.urlopen(f'http://127.0.0.1:{port}/json', timeout=2)
+				break
+			except Exception:
+				time.sleep(0.2)
+		t = json.loads(urllib.request.urlopen(urllib.request.Request(
+			f'http://127.0.0.1:{port}/json/new?about:blank', method='PUT'), timeout=5).read())
+		self.cdp = wasmapp.Cdp(t['webSocketDebuggerUrl'])
+		self.cdp.call('Page.enable')
+		self.cdp.call('Runtime.enable')
+
+	def go(self, query=''):
+		self.cdp.log.clear()
+		self.cdp.call('Page.navigate', url=f'http://127.0.0.1:{HTTP}/{query}')
+
+	def js(self, expr, awaited=False):
+		r = self.cdp.call('Runtime.evaluate', expression=expr, returnByValue=True, awaitPromise=awaited)
+		return r.get('result', {}).get('value')
+
+	def until(self, expr, secs):
+		end = time.time() + secs
+		while time.time() < end:
+			try:
+				if self.js(expr, awaited=True):	# lupaukset odotetaan (caches, serviceWorker)
+					return True
+			except (RuntimeError, SystemExit):
+				pass
+			time.sleep(0.5)
+		return False
+
+	def halted(self, secs):
+		end = time.time() + secs
+		while time.time() < end:
+			try:
+				self.js('1')	# lukee konsolitapahtumat
+			except RuntimeError:
+				pass
+			h = [l for l in self.cdp.log if l.startswith('KERNEL-HALT')]
+			if h:
+				return h[0]
+			time.sleep(0.5)
+		return None
+
+	def eia0(self):
+		return self.js("document.getElementById('eia0').textContent") or ''
+
+	def stop(self):
+		try:
+			os.killpg(self.ch.pid, signal.SIGTERM)
+			self.ch.wait(10)
+		except (OSError, subprocess.TimeoutExpired):
+			try:
+				os.killpg(self.ch.pid, signal.SIGKILL)
+			except OSError:
+				pass
+		time.sleep(1)
+
+
+CACHEINFO = """(async () => {
+	const keys = (await caches.keys()).filter((k) => k.startsWith('plan9-wasm32-shell '));
+	const out = {};
+	for (const k of keys) out[k] = (await (await caches.open(k)).keys()).map((r) => new URL(r.url).pathname).sort();
+	const reg = await navigator.serviceWorker.getRegistration();
+	return JSON.stringify({ caches: out, active: !!(reg && reg.active), state: reg && reg.active && reg.active.state });
+})()"""
+SHELL = ['/', '/icon-192.png', '/icon-512.png', '/icon.svg', '/index.html', '/manifest.webmanifest', '/platform.js']
+
+
+def cacheinfo(b):
+	return json.loads(b.js(CACHEINFO, awaited=True) or '{}')
+
+
+def disk_run(b, cmd, secs=300):
+	"""Asennettu järjestelmä levyltä, rc-komento /boot/initin jälkeen; tuloste eia0:sta."""
+	args = ['/bin/rc', '/boot/init', cmd + '; fshalt -r >/dev/null >[2=1]']
+	b.go('?boot=disk&noreboot=1&console=eia0' + ''.join('&arg=' + urllib.parse.quote(a, safe='') for a in args))
+	h = b.halted(secs)
+	return h, b.eia0(), b.js('window.plan9firmware')
+
+
+def version_site(src, dst, tag, missing=None):
+	"""Kopio sivustosta uudella versiolla (sivu ja sw.js); missing: tiedosto pois (404)."""
+	shutil.rmtree(dst, ignore_errors=True)
+	shutil.copytree(src, dst)
+	for n in ('index.html', 'sw.js'):
+		p = os.path.join(dst, n)
+		t = open(p).read()
+		old = t.split("const VERSION = '", 1)[1].split("'", 1)[0] if n == 'sw.js' else None
+		if old:
+			t = t.replace("const VERSION = '" + old + "'", "const VERSION = '" + old + ' ' + tag + "'")
+		else:
+			t = t.replace('name="plan9-version" content="', 'name="plan9-version" content="' + tag + ' ')
+		open(p, 'w').write(t)
+		try:
+			os.unlink(p + '.gz')	# tools/serve antaisi vanhan .gz:n
+		except OSError:
+			pass
+	if missing:
+		for p in (missing, missing + '.gz'):
+			try:
+				os.unlink(os.path.join(dst, p))
+			except OSError:
+				pass
+
+
+def main():
+	if len(sys.argv) != 3:
+		raise SystemExit(__doc__)
+	profile, site = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+	if listening(HTTP):
+		raise SystemExit('pwaoffline: port %d is in use' % HTTP)
+	tmp = tempfile.mkdtemp(prefix='pwaoffline-')
+	mark = secrets.token_hex(8)
+	srv, b = Server(site), None
+	try:
+		b = Browser(profile)
+		# 1. verkossa
+		b.go('?boot=disk&noreboot=1&console=eia0&noinit=1')
+		check('online: service worker active', b.until("navigator.serviceWorker.getRegistration().then(r => !!(r && r.active))", 60) or
+			b.until("navigator.serviceWorker.controller !== null", 30))
+		b.until('false', 3)
+		ci = cacheinfo(b)
+		shells = list(ci.get('caches', {}).values())
+		check('online: one complete shell cache', len(shells) == 1 and shells[0] == SHELL, json.dumps(ci))
+		h, out, fw = disk_run(b, 'echo ' + mark + ' >/usr/glenda/pwamark; echo PWA-ONLINE `{cat /usr/glenda/pwamark}')
+		check('online: installed system boots from its disk (own firmware)', fw == 'disk' and 'boots from the disk' in out, str(fw))
+		check('online: marker written on the installed disk', ('PWA-ONLINE ' + mark) in out and h is not None and 'reboot' in h, str(h))
+		# 2. ilman verkkoa: palvelin pois, selain kylmänä uudelleen
+		b.stop()
+		srv.stop()
+		check('offline: nothing listens on the site port', not listening(HTTP))
+		b = Browser(profile)
+		b.go('')
+		ok = b.until("window.plan9firmware === 'disk' && !document.body.classList.contains('booting')", 240)
+		check('offline: start_url cold start boots the installed system (disk firmware, screen drawn)', ok,
+			lyhyt(b.eia0()))
+		h, out, fw = disk_run(b, 'echo PWA-OFFLINE `{cat /usr/glenda/pwamark}')
+		check('offline: marker read back from the installed disk', ('PWA-OFFLINE ' + mark) in out and fw == 'disk', str(h))
+		b.go('?boot=net&console=eia0')
+		b.until("document.getElementById('eia0').textContent.includes('did not boot')", 60)
+		out = b.eia0()
+		check('offline: ?boot=net does not boot another system', 'did not boot' in out and b.js('window.plan9firmware') is None, lyhyt(out))
+		# 3. päivitys
+		b.stop()
+		up = os.path.join(tmp, 'up')
+		version_site(site, up, 'pwaupdate')
+		srv = Server(up)
+		b = Browser(profile)
+		b.go('?noinit=1&console=eia0')
+		ok = b.until("caches.keys().then(k => k.some(n => n.endsWith(' pwaupdate')))", 60)
+		b.until('false', 3)
+		ci = cacheinfo(b)
+		keys = list(ci.get('caches', {}))
+		check('update: the new version replaces the old shell cache', ok and len(keys) == 1 and keys[0].endswith(' pwaupdate')
+			and ci['caches'][keys[0]] == SHELL, 'found %s, new version seen %s' % (json.dumps(ci), ok))
+		b.stop()
+		srv.stop()
+		# 4. rikkinäinen päivitys: asennus hylätään, edellinen jää
+		bad = os.path.join(tmp, 'bad')
+		version_site(up, bad, 'pwabroken', missing='icon-512.png')
+		srv = Server(bad)
+		b = Browser(profile)
+		b.go('?noinit=1&console=eia0')
+		b.until('false', 15)
+		ci = cacheinfo(b)
+		keys = list(ci.get('caches', {}))
+		check('broken update: install rejected, previous complete cache kept',
+			len(keys) == 1 and keys[0].endswith(' pwaupdate') and ci['caches'][keys[0]] == SHELL, json.dumps(keys))
+		b.stop()
+		srv.stop()
+		b = Browser(profile)
+		h, out, fw = disk_run(b, 'echo PWA-AFTER `{cat /usr/glenda/pwamark}')
+		check('broken update: offline start still boots the installed system', ('PWA-AFTER ' + mark) in out and fw == 'disk', str(h))
+		# ?boot=net: sivu jää (ei levyn firmwarea), joten sen versio on välimuistin
+		b.go('?boot=net&console=eia0')
+		b.until("document.getElementById('eia0').textContent.includes('did not boot')", 60)
+		ver = b.js("document.querySelector('meta[name=plan9-version]')?.content ?? ''") or ''
+		check('broken update: the offline page is the last complete version', 'pwaupdate' in ver and 'pwabroken' not in ver, ver)
+	finally:
+		if b:
+			b.stop()
+		srv.stop()
+		shutil.rmtree(tmp, ignore_errors=True)
+	print('pwaoffline: %s' % ('ok' if not fails else '%d failed' % fails))
+	return 1 if fails else 0
+
+
+def lyhyt(s, n=200):
+	return ' '.join(s.split())[-n:]
+
+
+if __name__ == '__main__':
+	sys.exit(main())

@@ -1,9 +1,14 @@
 --- a/sys/src/cmd/syscall/mkfile
 +++ b/sys/src/cmd/syscall/mkfile
-@@ -12,4 +12,4 @@
+@@ -11,8 +11,9 @@
+ 
  SYSCALL=/sys/src/libc/9syscall/sys.h
  
 -tab.h:	$SYSCALL mktab.awk
 -	./mktab.awk $SYSCALL >$target
-+tab.h:	$SYSCALL /sys/src/libc/9syscall/syscalls mktab.awk
++# the calls this objtype has (libc/9syscall/syscalls: spawn only on wasm32), as libc's
++tab.h:	$SYSCALL mktab.awk /sys/src/libc/9syscall/syscalls
 +	rc /sys/src/libc/9syscall/syscalls $objtype $SYSCALL defines | ./mktab.awk >$target
+ 
+ clean:V:
+ 	rm -f *.[$OS] [$OS].out $TARG $HFILES

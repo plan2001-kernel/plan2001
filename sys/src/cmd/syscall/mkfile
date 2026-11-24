@@ -11,7 +11,8 @@ BIN=/$objtype/bin
 
 SYSCALL=/sys/src/libc/9syscall/sys.h
 
-tab.h:	$SYSCALL /sys/src/libc/9syscall/syscalls mktab.awk
+# the calls this objtype has (libc/9syscall/syscalls: spawn only on wasm32), as libc's
+tab.h:	$SYSCALL mktab.awk /sys/src/libc/9syscall/syscalls
 	rc /sys/src/libc/9syscall/syscalls $objtype $SYSCALL defines | ./mktab.awk >$target
 
 clean:V:
