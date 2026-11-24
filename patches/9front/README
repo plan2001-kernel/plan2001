@@ -85,3 +85,10 @@ bcm64-mkfile-bootargs.diff
 native-syscall-contract.diff
 		port/mksystab uses the same architecture selector as libc/APE.
 		Shared bootargs is opt-in; board-local sources keep ownership.
+
+syscall-tab.diff
+		cmd/syscall/mkfile: tab.h from the same architecture selector
+		as libc, APE and the kernel (libc/9syscall/syscalls), not from
+		sys.h's raw #define lines: mktab.awk took sys.h's #ifdef and
+		#endif around wasm32's SPAWN as calls, and syscall(1) did not
+		compile.  spawn is in wasm32's table only.  2026-11-24.

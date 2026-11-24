@@ -143,6 +143,21 @@ machine's own tools - echo and hoc from `/sys/src/cmd` (mk, 3c, 3l,
 yacc), installed and run.  The whole system's build (`cd /sys/src; mk
 install`) is people's to run.
 
+`tools/test/run pwa`, only when named: the small distribution installed
+into a browser profile kept for it (`build/test/pwaprofile`), then
+`tools/test/pwaoffline`: online, the service worker caches this
+version's page and `platform.js` completely and the installed system
+boots from its disk; with the server and the browser stopped, a cold
+start of the start URL boots the installed system again and reads back
+what it wrote, and `?boot=net` fails visibly instead of starting
+something else; an update replaces the cache, and an update with a
+missing file is rejected while the last complete version still starts
+offline.  The browser's disk is never touched outside that profile.
+
+The browser tests run headless Chromium with `--password-store=basic`:
+on a desktop whose GNOME keyring is locked, Chromium otherwise waits for
+the keyring and never loads the local page.
+
 ## AMD64 UEFI disk image
 
     tools/native-amd64/build --out O

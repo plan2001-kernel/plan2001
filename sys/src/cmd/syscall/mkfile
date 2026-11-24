@@ -1,0 +1,19 @@
+</$objtype/mkfile
+
+TARG=syscall
+OFILES=syscall.$O\
+
+HFILES=tab.h\
+
+BIN=/$objtype/bin
+
+</sys/src/cmd/mkone
+
+SYSCALL=/sys/src/libc/9syscall/sys.h
+
+# the calls this objtype has (libc/9syscall/syscalls: spawn only on wasm32), as libc's
+tab.h:	$SYSCALL mktab.awk /sys/src/libc/9syscall/syscalls
+	rc /sys/src/libc/9syscall/syscalls $objtype $SYSCALL defines | ./mktab.awk >$target
+
+clean:V:
+	rm -f *.[$OS] [$OS].out $TARG $HFILES

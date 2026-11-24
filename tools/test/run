@@ -26,7 +26,8 @@
 # - the page's plan9.ini: pageini
 # - the install (build/dist: tools/dist): install, the live image, inst/start, the boot from the disk;
 #   dist, the distribution's own ISO installed, its git and a small build on the machine (only when named);
-#   isofile, the ISO from this computer (?iso=file)
+#   isofile, the ISO from this computer (?iso=file);
+#   pwa, the installed system started offline from the PWA's cache (tools/test/pwaoffline; only when named)
 #   PLAN9=... tools/test/run [NAME...]	all without NAMEs
 set -e -o pipefail
 here=$(cd "$(dirname "$0")" && pwd); root=$(dirname "$(dirname "$here")")
@@ -247,6 +248,27 @@ if [[ " $names " == *" dist "* ]]; then
 		gateway down
 	else
 		echo "test: dist: skipped (no build/dist: PLAN9=... tools/dist)"
+	fi
+fi
+# the installed system as an offline PWA (sw.js): installed as install does, into a browser
+# profile kept for it (build/test/pwaprofile, made anew), then tools/test/pwaoffline: the site's
+# shell cached, the server and browser gone, a cold start from the disk, an update and a broken
+# update.  Only when named
+if [[ " $names " == *" pwa "* ]]; then
+	if [ -d "$root/build/dist/root" ]; then
+		"$here/iso" >/dev/null
+		prof=$root/build/test/pwaprofile
+		rm -rf "$prof"; mkdir -p "$prof"
+		gateway up
+		# install's own run and checks (install.out), the profile kept
+		PROFILE=$prof EXPECT=$t/install.out SITE=$root/build/test/dist SENDWAIT=1800 HALTWAIT=1800 EXPECTJS="window.plan9firmware === 'disk'" \
+			THEN='["/bin/rc", "/boot/init", "echo bootargs $bootargs; ls -d /dist/9front /wasm32/bin/hjfs; sed 1q /adm/timezone/local; ea=`{cat /net/ether0/addr}; grep -c database /lib/ndb/local; ndb/query ether $ea sys; fshalt -r >/dev/null >[2=1]"]' \
+			run pwainstall '["/bin/rc", "/boot/init", ". /rc/bin/termrc; ramfs; inst/start"]' "$inst" '&noreboot=1&boot=disk'
+		gateway down
+		echo "test: pwa"
+		"$here/pwaoffline" "$prof" "$root/build/test/dist" || failed="$failed pwa"
+	else
+		echo "test: pwa: skipped (no build/dist: PLAN9=... tools/dist)"
 	fi
 fi
 # the site's network (docs/network.md): aux/ethernetd and aux/etherws on a machine (A, 10.0.2.15 on
