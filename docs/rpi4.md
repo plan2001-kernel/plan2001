@@ -166,15 +166,19 @@ other's entry.
   blob is placed on a 64 KiB boundary below 1 GiB, outside image, scratch,
   firmware FDT and FDT-reserved ranges. Entry is at EL2 or EL1 with
   interrupts off and caches cleaned, X0 = BootInfo.
-- **Firmware description.** `rpi4` requires a bounded FDT from the UEFI
-  configuration table. The loader validates its header, block ranges,
+- **Firmware description.** `rpi4` requires a bounded FDT (at most 2 MiB)
+  from the UEFI configuration table, lying in memory the UEFI map
+  describes (not MMIO). The loader validates its header, block ranges,
   reservation map, structure tokens, BCM2711 compatibility, CPU data,
   eMMC/PCIe DMA windows and any PSCI conduit before copying it into BootInfo.
   Fixed `/reserved-memory` ranges and reservation-map entries are excluded
-  from image, scratch and BootInfo placement; dynamic reserved-memory nodes
-  are rejected because their final addresses are unknown. Missing, malformed
-  or non-BCM2711 FDTs fail with a loader diagnostic. QEMU `virt` retains its
-  separate platform contract and does not forward an FDT to the kernel.
+  from image, scratch and BootInfo placement, and the kernel keeps them out
+  of its memory. Dynamic pools (`size`/`alloc-ranges` without `reg`, such
+  as the firmware's `linux,cma`) are requests to an operating system, not
+  memory in use: they are checked for well-formedness and otherwise ignored
+  by both. Missing, malformed or non-BCM2711 FDTs fail with a loader
+  diagnostic. QEMU `virt` retains its separate platform contract and does
+  not forward an FDT to the kernel.
 - **Entry checks.** Before anything else the kernel checks X0 and the
   blob and, on a mismatch, prints the reason on the PL011 and halts: X0 a
   device tree (started by the Pi firmware), not BootInfo, version, other
@@ -186,6 +190,13 @@ other's entry.
   the device tree: `*ncpu`, and the BCM2711 DMA windows `*emmc2bus`,
   `*pciwin`, `*pcidmawin` that the stock kernel reads from the firmware
   DTB. The device tree's `/chosen/bootargs` is not used.
+- **Initial map.** The kernel's initial `KZERO` window maps physical 0 to
+  1 GiB (`efibootmap=0,0x40000000`) and stays: `INITMAP` in `mem.h` is the
+  whole window for `9pi4efi`, and `../arm64/mmu.c`'s `kmapram()` maps only
+  RAM above it. The BCM2711's peripherals are above 1 GiB. The stock `9pi3`
+  and `9pi4` keep the release's map: the window is cut above the kernel's
+  512 MiB block (the Pi 3's peripherals at `0x3F000000` are in it) and
+  their RAM there is mapped again.
 - **Memory** is BootInfo's map. Loader scratch pages are claimed before
   ExitBootServices and appear as `BootMemLoaderData`; the kernel accepts
   only loader-owned descriptors across its complete early region. Runtime,

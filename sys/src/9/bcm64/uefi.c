@@ -222,11 +222,12 @@ fdtprop(char *path, char *key, uchar *v, int n)
 		}
 		return;
 	}
-	if(strncmp(path,"/reserved-memory/",17)==0 && strcmp(key,"size")==0){
-		/* Dynamic reserved addresses cannot be validated against this ABI. */
-		fdterror=1;
-		return;
-	}
+	/*
+	 * Dynaamiset varaukset (size ja alloc-ranges ilman reg:iä, Pi4:n
+	 * firmwaren linux,cma) ovat pyyntöjä käyttöjärjestelmälle, eivät
+	 * käytössä olevaa muistia: niillä ei ole osoitetta, eikä niissä ole
+	 * mitään suojattavaa.  Ydin ja loader jättävät ne huomiotta.
+	 */
 
 	if(strcmp(path, "") == 0 && strcmp(key, "compatible") == 0){
 		bcm2711 = strlistin((char*)v, n, "brcm,bcm2711");

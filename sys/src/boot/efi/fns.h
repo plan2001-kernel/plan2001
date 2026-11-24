@@ -20,7 +20,6 @@ extern uchar *fdtsrc;
 extern ulong fdtsize;
 int bootmemorymap(void**, uvlong*, uvlong*);
 uvlong bootblobsize(void);
-uvlong bootblobbase(void);
 int bootblobmove(uvlong, uvlong);
 int bootreserve(uvlong, uvlong);
 void confrelocate(int);

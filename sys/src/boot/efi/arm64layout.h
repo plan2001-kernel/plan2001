@@ -24,8 +24,6 @@ struct ArmLayout {
 	uvlong kzero, maplo, maplen, scratchlo, scratchlen, fdtlo, fdtlen, align;
 	int nreserved;
 	uvlong reservedlo[ArmMaxReserved], reservedlen[ArmMaxReserved];
-	int ndynamic;
-	ArmDynamic dynamic[ArmMaxDynamic];
 };
 enum { ArmQemu=1, ArmPi4 };
 char *armplatform(ArmLayout*, char*, int, uvlong, uvlong, uvlong, uvlong);
@@ -33,6 +31,7 @@ char *armimage(ArmLayout*, BootImage*);
 char *armfdtvalidate(void*, uvlong);
 char *armfdtreservations(void*, uvlong, uvlong*, uvlong*, int, int*, ArmDynamic*, int, int*);
 char *armmapvalid(void*, uvlong, uvlong);
+int armpresent(void*, uvlong, uvlong, uvlong, uvlong);
 char *armmemory(ArmLayout*, BootImage*, void*, uvlong, uvlong);
 int armblob(ArmLayout*, BootImage*, void*, uvlong, uvlong, uvlong, uvlong*);
 #endif

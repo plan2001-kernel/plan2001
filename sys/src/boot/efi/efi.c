@@ -237,12 +237,6 @@ bootblobsize(void)
 	return blobsize;
 }
 
-uvlong
-bootblobbase(void)
-{
-	return (uvlong)(uintptr)blob;
-}
-
 /* keep [pa, pa+len) from the firmware's allocator as loader data */
 int
 bootreserve(uvlong pa, uvlong len)

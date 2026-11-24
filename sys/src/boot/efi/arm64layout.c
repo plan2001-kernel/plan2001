@@ -443,6 +443,36 @@ armrange(void *map, uvlong bytes, uvlong stride, uvlong pa, uvlong len, int scra
 	return 1;
 }
 
+/* [pa, pa+len) is memory the firmware describes: covered by descriptors that
+ * are not MMIO, I/O port space or unusable.  For the firmware FDT, whose
+ * allocation type the board's EDK2 chooses, before it is read whole. */
+int
+armpresent(void *map, uvlong bytes, uvlong stride, uvlong pa, uvlong len)
+{
+	EFI_MEMORY_DESCRIPTOR *m;
+	uvlong i,end,top;
+	int found;
+
+	if(!span(pa,len)) return 0;
+	end=pa+len;
+	while(pa<end){
+		found=0;
+		for(i=0;i<bytes;i+=stride){
+			m=(EFI_MEMORY_DESCRIPTOR*)((uchar*)map+i);
+			top=m->PhysicalStart+m->NumberOfPages*4096;
+			if(pa<m->PhysicalStart || pa>=top) continue;
+			if(m->Type==EfiMemoryMappedIO || m->Type==EfiMemoryMappedIOPortSpace
+			|| m->Type==EfiUnusableMemory)
+				return 0;
+			pa=top<end?top:end;
+			found=1;
+			break;
+		}
+		if(!found) return 0;
+	}
+	return 1;
+}
+
 char*
 armmemory(ArmLayout *l, BootImage *im, void *map, uvlong bytes, uvlong stride)
 {
@@ -450,6 +480,8 @@ armmemory(ArmLayout *l, BootImage *im, void *map, uvlong bytes, uvlong stride)
 	int i;
 
 	if((why=armmapvalid(map,bytes,stride))!=nil) return why;
+	if(l->fdtlen && !armpresent(map,bytes,stride,l->fdtlo,l->fdtlen))
+		return "firmware FDT is not in memory the UEFI map describes";
 	for(i=0;i<im->nseg;i++)
 		if(!armrange(map,bytes,stride,im->seg[i].pa,im->seg[i].allocsz,0))
 			return "ARM64 image would overwrite firmware/reserved memory";
