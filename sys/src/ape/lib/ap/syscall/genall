@@ -28,5 +28,5 @@ for(I in $SYS) {
 		./gencall
 }
 ar vu /$objtype/lib/ape/libap.a *.$O
-rm -f *.$O *.s
 if(~ $objtype wasm32) rm -f *.c
+rm -f *.$O *.s

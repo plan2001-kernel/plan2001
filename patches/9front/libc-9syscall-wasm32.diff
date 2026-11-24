@@ -22,15 +22,15 @@
  		{switch($objtype){
  		case 68000 68020
  			echo TEXT $i'(SB)', 1, '$0'
-@@ -147,9 +162,11 @@
+@@ -147,8 +162,10 @@
  			echo RET
  		}} > $i.s
  		$AS $i.s
 +		}
  	}
  	ar vu /$objtype/lib/libc.a *.$O
- 	rm -f *.$O *.s
 +	if(~ $objtype wasm32) rm -f *.c
+ 	rm -f *.$O *.s
  
  nuke clean:V:
  	rm -f *.[$OS]

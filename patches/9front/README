@@ -18,8 +18,9 @@ libc-9syscall-wasm32.diff
 		libc/9syscall/mkfile: wasm32 has no system call instruction;
 		its stubs are C, each a call of the platform's _trap with the
 		call's number and its arguments in memory (3c's convention),
-		compiled by $CC.  The other machines' assembler as it was.
-		2026-10-04.
+		compiled by $CC.  The other machines' assembler as it was;
+		the recipe ends with the common rm, so a native machine's
+		build does not take the wasm32 test's status.  2026-10-04.
 
 libthread-wasm32.diff
 		libthread/mkfile: wasm32's machine part is its own -
@@ -43,7 +44,8 @@ ape-syscall-wasm32.diff
 		ape/lib/ap/syscall/genall: APE's system call stubs on
 		wasm32 are C, as libc's (libc-9syscall-wasm32.diff): gencall
 		takes the other machines' assembler from libc's mkfile, which
-		has none for wasm32.  2026-10-13.
+		has none for wasm32; it ends with the common rm, as libc's.
+		2026-10-13.
 
 The libc and libthread ones are for building wasm32 with 9front's mkfiles, with this
 tree's libc/wasm32/mkfile and libmp's, libsec's empty wasm32/mkfiles.
