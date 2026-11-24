@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""
+Plan2001 AMD64: asennuspaketti toisen järjestelmän levylle (multiboot):
+oma GPT:n Plan 9 -osio ja jaettu ESP, jolta GRUB ketjulataa loaderin.
+
+    tools/native-amd64/mkpayload --image KUVA [--in HAK] --out HAK
+                                 [--esp-dir /EFI/plan2001]
+
+--image: mkimage:n levykuva (--disk on kohdekoneen levyn nimi, esim. sd00);
+--in: tools/native-amd64/build:n tulokset (9pc64, bootx64.efi), joiden on
+oltava samat kuin kuvan ESP:llä.  Tuloshakemistoon:
+
+  plan9part.img.gz  kuvan Plan 9 -osio sellaisenaan (sisäkkäinen Plan 9
+                    -osiotaulu: nvram, other, fscache, fsworm; cwfs64x),
+                    kirjoitetaan kohdelevyn Plan 9 -osion alkuun
+  bootx64.efi, 9pc64, plan9.ini
+                    jaetun ESP:n hakemistoon --esp-dir; plan9.ini on kuvan
+                    oma, bootfile=--esp-dir/9pc64 ja console=0 lisättynä
+  SHA256SUMS        myös purettu osiokuva (plan9part.img) ja sen koko
+                    tiedostossa plan9part.size (tavua, 512:n monikerta)
+
+Osiokuva on kuvan Plan 9 -osion kokoinen; kohdeosion on oltava vähintään
+yhtä suuri (cwfs käyttää vain sisäkkäisen taulun osiot).
+"""
+
+import argparse
+import gzip
+import hashlib
+import os
+import struct
+import subprocess
+import sys
+import uuid
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vm9  # noqa: E402
+
+SEKTORI = 512
+PLAN9_TYYPPI = uuid.UUID("c91818f9-8025-47af-89d2-f030d7000c2c")
+ESP_TYYPPI = uuid.UUID("c12a7328-f81f-11d2-ba4b-00a0c93ec93b")
+LOHKO = 4 << 20
+
+
+def gpt_osiot(polku):
+    """[(tyyppi, alku, loppu)] ensisijaisesta GPT:stä."""
+    with open(polku, "rb") as f:
+        f.seek(SEKTORI)
+        h = f.read(92)
+        if h[:8] != b"EFI PART":
+            raise vm9.VirheVM("%s: ei GPT:tä" % polku)
+        taulu, n, koko = struct.unpack_from("<QII", h, 72)
+        f.seek(taulu * SEKTORI)
+        data = f.read(n * koko)
+    osiot = []
+    for i in range(n):
+        e = data[i * koko:(i + 1) * koko]
+        t = uuid.UUID(bytes_le=e[:16])
+        if t.int == 0:
+            continue
+        a, b = struct.unpack_from("<QQ", e, 32)
+        osiot.append((t, a, b))
+    return osiot
+
+
+def kopioi_osio(polku, alku, pituus, ulos):
+    """Osio gzip-tiedostoksi; reiät luetaan nollina.  Palauttaa sha256:n."""
+    h = hashlib.sha256()
+    nollat = bytes(LOHKO)
+    with open(polku, "rb") as f, gzip.open(ulos, "wb", compresslevel=6) as g:
+        fd = f.fileno()
+        pos = alku
+        loppu = alku + pituus
+        while pos < loppu:
+            n = min(LOHKO, loppu - pos)
+            try:
+                data_alku = os.lseek(fd, pos, os.SEEK_DATA)
+            except OSError:
+                data_alku = loppu
+            if data_alku >= pos + n:
+                # koko lohko on reikää
+                blk = nollat[:n]
+            else:
+                f.seek(pos)
+                blk = f.read(n)
+            h.update(blk)
+            g.write(blk)
+            pos += n
+    return h.hexdigest()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--image", required=True)
+    ap.add_argument("--in", dest="sisaan", default=vm9.oletus_ulos())
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--esp-dir", default="/EFI/plan2001")
+    a = ap.parse_args()
+    osiot = gpt_osiot(a.image)
+    p9 = [o for o in osiot if o[0] == PLAN9_TYYPPI]
+    esp = [o for o in osiot if o[0] == ESP_TYYPPI]
+    if len(p9) != 1 or len(esp) != 1:
+        raise vm9.VirheVM("%s: odotettiin yksi ESP ja yksi Plan 9 -osio" % a.image)
+    os.makedirs(a.out, exist_ok=True)
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    mt = "%s@@%d" % (a.image, esp[0][1] * SEKTORI)
+
+    # kuvan ESP:n ydin ja loader ovat samat kuin --in:n
+    for t, kuvassa in (("9pc64", "::/9pc64"), ("bootx64.efi", "::/efi/boot/bootx64.efi")):
+        kohde = os.path.join(a.out, t)
+        subprocess.check_call(["mcopy", "-n", "-o", "-i", mt, kuvassa, kohde], env=env)
+        if open(kohde, "rb").read() != open(os.path.join(a.sisaan, t), "rb").read():
+            raise vm9.VirheVM("%s: kuvan ESP:n %s ei ole %s" % (a.image, t, os.path.join(a.sisaan, t)))
+
+    ini = subprocess.check_output(["mtype", "-i", mt, "::/plan9.ini"], env=env).decode()
+    rivit = [r for r in ini.splitlines() if r and not r.startswith(("bootfile=", "console="))]
+    rivit = ["bootfile=%s/9pc64" % a.esp_dir.rstrip("/")] + rivit + ["console=0"]
+    with open(os.path.join(a.out, "plan9.ini"), "w") as f:
+        f.write("\n".join(rivit) + "\n")
+
+    _, alku, loppu = p9[0]
+    pituus = (loppu - alku + 1) * SEKTORI
+    print("Plan 9 -osio: sektorit %d-%d, %d tavua" % (alku, loppu, pituus))
+    sha = kopioi_osio(a.image, alku * SEKTORI, pituus, os.path.join(a.out, "plan9part.img.gz"))
+    with open(os.path.join(a.out, "plan9part.size"), "w") as f:
+        f.write("%d\n" % pituus)
+    summat = ["%s  plan9part.img" % sha]
+    for t in ("plan9part.img.gz", "plan9part.size", "9pc64", "bootx64.efi", "plan9.ini"):
+        summat.append("%s  %s" % (vm9.sha256(os.path.join(a.out, t)), t))
+    with open(os.path.join(a.out, "SHA256SUMS"), "w") as f:
+        f.write("\n".join(summat) + "\n")
+    print(open(os.path.join(a.out, "plan9.ini")).read().rstrip())
+    for t in sorted(os.listdir(a.out)):
+        print("%-18s %14d" % (t, os.path.getsize(os.path.join(a.out, t))))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except vm9.VirheVM as e:
+        print("mkpayload: %s" % e, file=sys.stderr)
+        sys.exit(1)

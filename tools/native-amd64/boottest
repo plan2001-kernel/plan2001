@@ -5,13 +5,14 @@ Plan2001 AMD64 -levykuvan käynnistys- ja regressiotesti QEMU:ssa: OVMF
 -> rc, kuvan omalta ESP:ltä ja cwfs:ltä.
 
     tools/native-amd64/boottest [--image KUVA] [--offline] [--keep]
+                                [--disk sdE0] [--bus hd] [--machine q35] [--memory 2048]
 
 Kuvasta tehdään harva kertakäyttökopio (lähdekuva ei muutu); kopion ESP:n
 plan9.ini:hin lisätään vain console=0, ellei siinä jo ole console-riviä.
 Kopio käynnistetään kolmesti:
 
   1. offline: ei verkkoa (NIC vain tyhjässä QEMU-hubissa).  Sarjakonsolista
-     havaitaan loaderin merkit, BootInfo, ydin, laitteet (#l, sdE0), init
+     havaitaan loaderin merkit, BootInfo, ydin, laitteet (#l, juurilevy), init
      ja rc.  Sarjaportti on tässä vain käynnistyksen ja vianetsinnän kanava.
   2. verkko: eristetty CPU/auth-vieras (cpuvieras.py): QEMU:n user-verkko
      restrict=on ja vain loopback-porttiohjaukset, kertakäyttötunnukset.
@@ -26,6 +27,9 @@ Kopio käynnistetään kolmesti:
      käynnistyksessä merkin ja laitteet sarjakonsoliin, ja testi vertaa
      merkkiä vaiheessa 2 kirjoitettuun satunnaisarvoon.
 
+--disk on kuvan juurilevyn nimi (mkimage --disk), --bus sen liitäntä
+(vm9.Kone: hd = AHCI, esim. vscsi:s0:0:1 = virtio-scsi target 0 LUN 1,
+vscsi10:... vain VirtIO 1.0, vblk, vblk10), --machine q35 tai pc (i440FX).
 --offline ajaa vain vaiheen 1 (erillinen offline-savutesti).  Tulokset
 luokitellaan: FAIL (vieraan tulos väärä), SIIRTO (9pterm/sarja ei
 tavoittanut vierasta), AIKA (etäkomento ylitti aikarajan); uusintayrityksiä
@@ -97,19 +101,37 @@ def kaynnistysmerkit(vm, tk, vaihe):
     tk.ok("%s: 9front pc64 -ydin tulostaa konsoliin" % vaihe, True)
 
 
+class Kokoonpano:
+    """Juurilevyn nimi ja liitäntä sekä koneen tyyppi ja muisti."""
+    levy = "sdE0"
+    vayla = "hd"
+    # CPU/auth-provisiointilevy: AHCI-portti 1, tai virtio-blk, kun juuri ei ole
+    # AHCI:lla (AHCI-levy ilman porttia 0 pysäyttää 9front-11952:n käynnistyksen)
+    provisiointi = ("hd", "sdE1")
+    kone = "q35"
+    muisti = "2048"
+
+
+KP = Kokoonpano()
+
+
 def ytimen_loki(vm, vaihe, tk):
     """Ytimen omat käynnistysrivit: BootInfo, #l ja juurilevy."""
     loki = vm.kaikki.decode("latin-1")
     tk.ok("%s: ydin käytti BootInfoa (bootinfo: epoch)" % vaihe, "bootinfo: epoch" in loki)
     tk.ok("%s: #l0 virtio-net löytyi" % vaihe, re.search(r"#l0: virtio", loki) is not None)
-    tk.ok("%s: juurilevy sdE0 löytyi" % vaihe, re.search(r"sdE0: LLBA", loki) is not None)
+    if KP.vayla == "hd":
+        tk.ok("%s: juurilevy %s löytyi" % (vaihe, KP.levy), re.search(KP.levy + r": LLBA", loki) is not None)
+    else:
+        # virtio-levyt eivät tulosta konsoliin; juuri on cwfs:n oma tuloste
+        tk.ok("%s: juuri-cwfs käynnistyi (%s)" % (vaihe, KP.levy), "cwfs" in loki)
 
 
 def offline_kone(kuva, loki):
     # NIC tyhjään QEMU-hubiin: #l:n ajuri toimii, mutta verkkoyhteyttä ei ole
-    return vm9.Kone([(kuva, "raw", False, "hd")], vm9.Ovmf.etsi(), loki, muisti="2048", cpu="2",
+    return vm9.Kone([(kuva, "raw", False, KP.vayla)], vm9.Ovmf.etsi(), loki, muisti=KP.muisti, cpu="2",
                     ylim=["-netdev", "hubport,id=n0,hubid=0",
-                          "-device", "virtio-net-pci,netdev=n0,mac=" + TESTI_MAC])
+                          "-device", "virtio-net-pci,netdev=n0,mac=" + TESTI_MAC], kone=KP.kone)
 
 
 def vaihe_offline(kuva, loki, tk, merkki=None):
@@ -127,8 +149,8 @@ def vaihe_offline(kuva, loki, tk, merkki=None):
                   arvo == merkki, "luettu %s, odotettu %s" % (arvo or "-", merkki))
             m = vm.odota(r"P2LAITTEET ([^\r\n]*)\r?\n", 60)
             laitteet = m.group(1).decode("latin-1")
-            tk.ok("offline-2: #l ja #S (ether0, sdE0) ilman verkkoa",
-                  "ether0" in laitteet and "sdE0" in laitteet, laitteet)
+            tk.ok("offline-2: #l ja #S (ether0, %s) ilman verkkoa" % KP.levy,
+                  "ether0" in laitteet and KP.levy in laitteet, laitteet)
         kehote = vm9.kaynnista_9front(vm, 300)
         tk.ok("%s: init ja rc (%s)" % (vaihe, kehote), True)
         ytimen_loki(vm, vaihe, tk)
@@ -238,9 +260,9 @@ def asennettu(e):
     e.aja("verkko: *acpi ja *bootscreen BootInfosta, ei *e820:ta",
           "ls '#ec' | sed 's,.*/,,' | grep -e '^\\*'; cat '#ec/*bootscreen'",
           lambda t: "*acpi" in t.stdout and "*bootscreen" in t.stdout and "*e820" not in t.stdout)
-    e.aja("verkko: #S: juurilevy sdE0 ja provisiointilevy sdE1",
-          "ls '#S'; cat '#S/sdE0/ctl' | sed 3q",
-          lambda t: "sdE0" in t.stdout and "sdE1" in t.stdout and t.status == "")
+    e.aja("verkko: #S: juurilevy %s ja provisiointilevy %s" % (KP.levy, KP.provisiointi[1]),
+          "ls '#S'; cat '#S/%s/ctl' | sed 3q" % KP.levy,
+          lambda t: KP.levy in t.stdout and KP.provisiointi[1] in t.stdout and t.status == "")
     mac_ohj = cpuvieras.OHJAUS_MAC.replace(":", "")
     mac_testi = TESTI_MAC.replace(":", "")
     e.aja("verkko: #l: ohjauskortti ether0 ja testikortti ether1",
@@ -272,7 +294,8 @@ def asennettu(e):
 
 def vaihe_verkko(kuva, loki, tyo, tk):
     """Palauttaa pysyvyysmerkin, jos se kirjoitettiin ja fs pysähtyi."""
-    v = cpuvieras.CpuVieras(kuva, tyo, loki, testi_nicit=[TESTI_MAC])
+    v = cpuvieras.CpuVieras(kuva, tyo, loki, testi_nicit=[TESTI_MAC], muisti=KP.muisti,
+                            laji=KP.vayla, kone=KP.kone, provisiointi=KP.provisiointi)
     merkki = None
     try:
         v.vm.kaynnista()
@@ -320,7 +343,14 @@ def main():
     ap.add_argument("--offline", action="store_true", help="vain offline-savutesti (vaihe 1)")
     ap.add_argument("--9pterm", dest="ninepterm", help="9pterm-ohjelma (oletus NINEPTERM tai build.sh:n polku)")
     ap.add_argument("--keep", action="store_true", help="säilytä testikopio (KUVA.boottest.img)")
+    ap.add_argument("--disk", default=KP.levy, help="juurilevyn nimi kohdekoneessa (mkimage --disk)")
+    ap.add_argument("--bus", default=KP.vayla, help="juurilevyn liitäntä (vm9.Kone: hd, vscsi:s0:0:1, ...)")
+    ap.add_argument("--machine", default=KP.kone, choices=("q35", "pc"))
+    ap.add_argument("--memory", default=KP.muisti, help="muisti MiB")
     a = ap.parse_args()
+    KP.levy, KP.vayla, KP.kone, KP.muisti = a.disk, a.bus, a.machine, a.memory
+    if KP.vayla != "hd":
+        KP.provisiointi = ("vblk", "sdF1" if KP.vayla.startswith("vblk") else "sdF0")
     if a.ninepterm:
         os.environ["NINEPTERM"] = os.path.abspath(a.ninepterm)
     for t in ("mtype", "mcopy"):

@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""
+Plan2001 AMD64: VirtIO-levyajureiden (sdvirtio, sdvirtio10) osoitteistus-
+ja I/O-testi QEMU:ssa.  Juurena AHCI-kuva (mkimage --disk sdE0); lisäksi
+erilliset harvat testilevyt eri virtio-scsi-targeteissa ja -LUNeissa sekä
+virtio-blk-levyt.  Kokoonpanot (kukin oma käynnistys):
+
+  legacy   transitional virtio-scsi (sdvirtio): t0/l0, t0/l1, t1/l300
+           (flat space -LUN), t2/l0, t3/l5; toinen ohjain vain t0/l1
+           (Oracle Cloud); virtio-blk
+  modern   sama vain VirtIO 1.0 -laitteina (sdvirtio10)
+  mixed    legacy- ja VirtIO 1.0 -ohjaimet yhtä aikaa, kummassakin vain
+           t0/l1, sekä virtio-blk molemmilla liitännöillä: ohjainnimet
+           eivät törmää
+
+Jokaisen levyn koko on yksilöllinen, ja sen alkuun kirjoitetaan isännässä
+oma satunnaissisältö.  Vieraassa (komennot natiivilla 9ptermillä kuten
+boottestissa; vaatii 9ptermin) tarkistetaan odotettu
+yksikön nimi, koko, luettu sisältö (md5), kopio levyn sisällä (4 MiB
+8 MiB:n kohtaan) ja levykohtainen merkki 16 MiB:n kohtaan; sammutuksen
+jälkeen isäntä tarkistaa jokaisen levytiedoston: oma kopio ja oma merkki
+vain omalla levyllä.
+
+    tools/native-amd64/virtiotest [--image KUVA] [--machine q35|pc]
+                                  [--memory 1024] [--only legacy,modern,mixed]
+"""
+
+import argparse
+import hashlib
+import os
+import random
+import re
+import secrets
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vm9  # noqa: E402
+import cpuvieras  # noqa: E402
+
+MIB = 1 << 20
+ALKU = 4 * MIB          # isännän kirjoittama satunnaissisältö
+KOPIO = 8 * MIB         # vieras kopioi alun tähän
+MERKKI = 16 * MIB       # vieraan levykohtainen merkki
+
+
+def kokoonpano(nimi):
+    """[(levy, laji, MiB, odotettu yksikkö)]"""
+    if nimi in ("legacy", "modern"):
+        v = "vscsi" if nimi == "legacy" else "vscsi10"
+        b = "vblk" if nimi == "legacy" else "vblk10"
+        return [("A", v + ":a:0:0", 64, "sd00"),
+                ("B", v + ":a:0:1", 65, "sd01"),
+                ("C", v + ":a:1:300", 66, "sd03"),
+                ("D", v + ":a:2:0", 67, "sd02"),
+                ("E", v + ":a:3:5", 68, "sd04"),
+                ("F", v + ":b:0:1", 69, "sd10"),
+                ("G", b, 70, "sdF0")]
+    return [("H", "vscsi:a:0:1", 71, "sd00"),
+            ("I", "vscsi10:c:0:1", 72, "sd10"),
+            ("J", "vblk", 73, "sdF0"),
+            ("K", "vblk10", 74, "sdG0")]
+
+
+class Tulos:
+    def __init__(self):
+        self.ok_n = 0
+        self.virheet = []
+
+    def ok(self, nimi, ehto, tieto=""):
+        print("%-5s %s%s" % ("OK" if ehto else "FAIL", nimi, (": " + tieto) if tieto else ""))
+        sys.stdout.flush()
+        if ehto:
+            self.ok_n += 1
+        else:
+            self.virheet.append(nimi)
+
+
+def sarjakonsoli(kuva, tyo):
+    """Kopion ESP:n plan9.ini:hin console=0 (kuten boottest), ellei sitä ole."""
+    mt = "%s@@%d" % (kuva, 2048 * 512)
+    env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+    ini = subprocess.check_output(["mtype", "-i", mt, "::/plan9.ini"], env=env).decode()
+    if not any(r.startswith("console=") for r in ini.splitlines()):
+        p = os.path.join(tyo, "plan9.ini")
+        open(p, "w").write(ini.rstrip("\n") + "\nconsole=0\n")
+        subprocess.check_call(["mcopy", "-o", "-i", mt, p, "::/plan9.ini"], env=env)
+
+
+def aja(pterm, komento, aikaraja=120):
+    """9pterm-komento; palauttaa (stdout, virhe), virhe tyhjä onnistuessa."""
+    try:
+        t = pterm.aja(komento, aikaraja=aikaraja)
+    except (cpuvieras.Aikaraja, cpuvieras.Siirtovirhe) as e:
+        return "", "%s: %s" % (type(e).__name__, str(e)[:200])
+    return t.stdout, (t.status + " " + t.stderr).strip()
+
+
+def tayta(polku, nimi, mib):
+    with open(polku, "wb") as f:
+        f.truncate(mib * MIB)
+        f.write(random.Random("p2vt-" + nimi).randbytes(ALKU))
+
+
+def aja_kokoonpano(nimi, a, tyo, tk):
+    levyt = kokoonpano(nimi)
+    juuri = os.path.join(tyo, "juuri.img")
+    subprocess.check_call(["cp", "--sparse=always", a.image, juuri])
+    sarjakonsoli(juuri, tyo)
+    lisat = []
+    alku = {}
+    for l, laji, mib, _ in levyt:
+        p = os.path.join(tyo, l + ".img")
+        tayta(p, l, mib)
+        alku[l] = open(p, "rb").read(ALKU)
+        lisat.append((p, "raw", False, laji))
+    tunnus = secrets.token_hex(4)
+    loki = os.path.join(a.logdir or tyo, nimi + ".log")
+    # komennot natiivilla 9ptermillä; sarjakonsoli vain käynnistykseen
+    v = cpuvieras.CpuVieras(juuri, tyo, loki, muisti=a.memory, kone=a.machine, lisalevyt=lisat)
+    try:
+        v.vm.kaynnista()
+        vm9.kaynnista_9front(v.vm, 300)
+        t = v.provisioi()
+        if t.stdout != "glenda":
+            raise vm9.VirheVM("9pterm-kirjautuminen: %r" % t.stdout)
+        e = v.pterm
+        t, _ = aja(e, "grep -e 'target [0-9]* lun' /dev/kmesg; ls '#S'")
+        print("  " + "\n  ".join(t.strip().splitlines()))
+        for l, laji, mib, yks in levyt:
+            n = "%s %s (%s, %d MiB)" % (nimi, yks, laji, mib)
+            t, s = aja(e, "grep geometry '#S/%s'/ctl" % yks)
+            tk.ok(n + ": yksikkö ja koko", s == "" and ("geometry %d 512" % (mib * 2048)) in t,
+                  t.strip() or s)
+            if s:
+                continue
+            md5 = hashlib.md5(alku[l]).hexdigest()
+            t, s = aja(e, "dd -if '#S/%s'/data -bs 65536 -count %d >[2]/dev/null | md5sum"
+                       % (yks, ALKU // 65536))
+            tk.ok(n + ": luku (md5 4 MiB)", t.split()[:1] == [md5], t.strip() or s)
+            merkki = "P2VT-%s-%s-%s" % (nimi, l, tunnus)
+            t, s = aja(e, "dd -if '#S/%s'/data -bs 65536 -count %d >[2]/dev/null | "
+                       "dd -of '#S/%s'/data -bs 65536 -seek %d -trunc 0 >[2]/dev/null && "
+                       "echo %s | dd -of '#S/%s'/data -bs 512 -conv sync -seek %d -trunc 0 >[2]/dev/null && "
+                       "dd -if '#S/%s'/data -bs 512 -skip %d -count 1 >[2]/dev/null | sed 1q"
+                       % (yks, ALKU // 65536, yks, KOPIO // 65536, merkki, yks, MERKKI // 512,
+                          yks, MERKKI // 512))
+            tk.ok(n + ": kirjoitus ja takaisinluku", s == "" and t.strip() == merkki, t.strip() or s)
+    except (vm9.VirheVM, cpuvieras.Siirtovirhe) as x:
+        tk.ok(nimi + ": käynnistys ja komennot", False, str(x)[-1500:])
+    finally:
+        if v.vm.proc is not None and v.vm.proc.poll() is None:
+            tk.ok(nimi + ": fshalt", v.sammuta(120))
+        v.siivoa()
+    for l, laji, mib, yks in levyt:
+        d = open(os.path.join(tyo, l + ".img"), "rb")
+        sisalto_alku = d.read(ALKU)
+        d.seek(KOPIO)
+        kopio = d.read(ALKU)
+        d.seek(MERKKI)
+        merkki = d.read(512).split(b"\n")[0].decode("latin-1")
+        tk.ok("%s %s: levytiedostossa oma sisältö, kopio ja merkki" % (nimi, l),
+              sisalto_alku == alku[l] and kopio == alku[l]
+              and merkki == "P2VT-%s-%s-%s" % (nimi, l, tunnus), merkki)
+        os.unlink(os.path.join(tyo, l + ".img"))
+    os.unlink(juuri)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--image", default=os.path.join(vm9.oletus_ulos(), "plan2001-amd64.img"),
+                    help="AHCI-juurikuva (mkimage --disk sdE0)")
+    ap.add_argument("--machine", default="pc", choices=("q35", "pc"))
+    ap.add_argument("--memory", default="1024")
+    ap.add_argument("--only", default="legacy,modern,mixed")
+    ap.add_argument("--logdir", help="säilytä konsolilokit tähän hakemistoon")
+    a = ap.parse_args()
+    if not os.path.isfile(a.image):
+        raise vm9.VirheVM("%s puuttuu: aja tools/native-amd64/mkimage" % a.image)
+    cpuvieras.etsi_9pterm()
+    tk = Tulos()
+    with tempfile.TemporaryDirectory(prefix="p2vt-") as tyo:
+        for nimi in a.only.split(","):
+            aja_kokoonpano(nimi, a, tyo, tk)
+    print("yhteenveto: OK %d, FAIL %d" % (tk.ok_n, len(tk.virheet)))
+    if tk.virheet:
+        sys.exit(1)
+    print("virtiotest: kaikki tarkistukset OK")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except vm9.VirheVM as e:
+        print("virtiotest: %s" % e, file=sys.stderr)
+        sys.exit(1)
