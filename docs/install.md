@@ -158,9 +158,14 @@ by `tools/native-amd64/build` (default `~/.cache/plan2001/base.qcow2`).
 
 Artifacts and serial captures stay under `build/native-arm64`. `mkimage`
 creates a new 128 MiB FAT image containing `EFI/BOOT/BOOTAA64.EFI`,
-`9qemu` and `plan9.ini`; it refuses to overwrite an existing path. Use
+`9qemu` and `plan9.ini` (`efiplatform=qemu-virt`); it refuses to overwrite an existing path. Use
 `--build` and `--image` to select another artifact directory or image.
-`build` accepts `--out`, `--iso` and `--buildvm`.
+For SMP, pass the same `--cpus N` (1–16) to `mkimage` and `boottest`;
+the test checks the guest CPU count before exercising storage and networking.
+`build` accepts `--out`, `--iso` and `--buildvm`; `--loader-only` rebuilds
+just `bootaa64.efi` for loader development. Native builds consume the
+verified `tools/tree` source assembly and build libc and APE with the
+architecture-aware syscall selector.
 
 The target command uses `virt,gic-version=3,highmem=off`, a Cortex-A72,
 one CPU and 1024 MiB RAM. These settings match the pinned board's GICv3,

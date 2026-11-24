@@ -2,18 +2,196 @@
 #include "fns.h"
 #include "efi.h"
 #include "mem.h"
+#include "arm64layout.h"
 
-/* 9front-11952 ARM64 QEMU virt: KZERO + physical address, X0=BootInfo.
- * The kernel handles EL1/EL2 entry and builds its own translation tables.
+/* ARM64: KZERO + physical address, X0=BootInfo.  The platform contract
+ * (arm64layout.h) gives KZERO and the kernel's early direct map; the
+ * kernel handles EL1/EL2 entry and builds its own translation tables.
  */
 
 void jump(void *pc, void *bootinfo);
 
-enum {
-	RamBase	= 0x40000000,		/* QEMU virt */
-	KernelLow = RamBase + 16*1024*1024,	/* blob stays above image + tables */
-	KernelMap = 0x80000000ULL,	/* the kernel's boot map covers 0..2 GiB */
-};
+/* Initialized data addresses relocate with the EFI image (efi.c).
+ * Globals taken by address go through linkfix(): 7l may address them
+ * relative to R28 or by their link-time address, depending on layout. */
+static ArmLayout layout = { .align = 4096 };
+static uvlong scratchpa[ImageMaxSeg], scratchlen[ImageMaxSeg];
+static int nscratch;
+
+/* The platform is explicit configuration, not an inference from a DTB.
+ * Firmware DTBs are not forwarded on ARM64 until a board-validated FDT
+ * contract exists. BootInfo's optional FDT fields remain zero. */
+int
+archfdtallowed(void)
+{
+	return 0;
+}
+
+/* the one value of key in plan9.ini; duplicates are rejected */
+static char*
+value(char *key, char *out, int cap)
+{
+	char *p, *e;
+	int n, k, found;
+
+	key = linkfix(key);
+	n = conflen() - 1;
+	k = strlen(key);
+	found = 0;
+	out[0] = 0;
+	for(p = confaddr; p < confaddr+n; p = e+1){
+		for(e = p; e < confaddr+n && *e != '\n'; e++)
+			if(*e == 0)
+				return "embedded NUL in ARM64 layout configuration";
+		if(e-p < k || memcmp(p, key, k) != 0)
+			continue;
+		if(found++ || e-p-k >= cap)
+			return "duplicate/oversized ARM64 layout setting";
+		memmove(out, p+k, e-p-k);
+		out[e-p-k] = 0;
+	}
+	return nil;
+}
+
+/* decimal or 0x hexadecimal, without overflow */
+static int
+number(char **text, uvlong *v)
+{
+	char *p;
+	uvlong a;
+	int base, d, n;
+
+	p = *text;
+	base = 10;
+	a = 0;
+	n = 0;
+	if(p[0] == '0' && p[1] == 'x'){
+		base = 16;
+		p += 2;
+	}
+	for(;; p++){
+		if(*p >= '0' && *p <= '9')
+			d = *p - '0';
+		else if(*p >= 'a' && *p <= 'f')
+			d = *p - 'a' + 10;
+		else if(*p >= 'A' && *p <= 'F')
+			d = *p - 'A' + 10;
+		else
+			break;
+		if(d >= base || a > (~(uvlong)0 - d) / base)
+			return 0;
+		a = a*base + d;
+		n++;
+	}
+	if(n == 0)
+		return 0;
+	*v = a;
+	*text = p;
+	return 1;
+}
+
+/* "base,length" and nothing else */
+static int
+pair(char *s, uvlong *a, uvlong *n)
+{
+	if(!number(&s, a) || *s++ != ',' || !number(&s, n) || *s != 0)
+		return 0;
+	return 1;
+}
+
+/* release the early scratch reservations of a failed attempt */
+void
+archrelease(void)
+{
+	uvlong *pa = linkfix(scratchpa), *len = linkfix(scratchlen);
+
+	while(nscratch > 0){
+		nscratch--;
+		efifree(pa[nscratch], len[nscratch]);
+	}
+}
+
+char*
+archinit(void)
+{
+	char platform[32], map[80], scratch[80], *why;
+	uvlong lo, len, sl, sn;
+	int explicit;
+
+	archrelease();
+	if((why = value("efiplatform=", platform, sizeof platform)) != nil)
+		return why;
+	if((why = value("efibootmap=", map, sizeof map)) != nil)
+		return why;
+	if((why = value("efiscratch=", scratch, sizeof scratch)) != nil)
+		return why;
+	explicit = 0;
+	lo = len = sl = sn = 0;
+	if(map[0]){
+		if(!pair(map, &lo, &len))
+			return "invalid efibootmap (base,length required)";
+		explicit |= 1;
+	}
+	if(scratch[0]){
+		if(!pair(scratch, &sl, &sn))
+			return "invalid efiscratch (base,length required)";
+		explicit |= 2;
+	}
+	return armplatform(linkfix(&layout), platform, explicit, lo, len, sl, sn);
+}
+
+/*
+ * Validate the complete image plan against the platform contract, then
+ * place the BootInfo blob and check every range against the firmware's
+ * memory descriptors before any image byte is written.
+ */
+char*
+archimage(BootImage *im)
+{
+	void *map;
+	EFI_MEMORY_DESCRIPTOR *m;
+	uvlong bytes, stride, pa, n, i, lo, hi, top;
+	uvlong *savedpa = linkfix(scratchpa), *savedlen = linkfix(scratchlen);
+	char *why;
+
+	if((why = armimage(linkfix(&layout), im)) != nil)
+		return why;
+	if(bootmemorymap(&map, &bytes, &stride) != 0)
+		return "cannot snapshot UEFI memory map";
+	n = (bootblobsize() + layout.align-1) & ~(layout.align-1);
+	if(!armblob(linkfix(&layout), im, map, bytes, stride, n, &pa))
+		return "no conventional RAM for ARM64 BootInfo in declared map";
+	if(bootblobmove(pa, n) != 0)
+		return "cannot claim ARM64 BootInfo range";
+	if(bootmemorymap(&map, &bytes, &stride) != 0)
+		return "cannot refresh UEFI memory map";
+	if((why = armmemory(linkfix(&layout), im, map, bytes, stride)) != nil)
+		return why;
+	/* Reserve conventional parts of the kernel's after-EBS scratch before
+	 * kernel allocation. Boot-services portions are already non-allocatable
+	 * in the final map; resident firmware types were rejected by armmemory. */
+	for(i = 0; layout.scratchlen && i < bytes; i += stride){
+		m = (EFI_MEMORY_DESCRIPTOR*)((uchar*)map + i);
+		if(m->Type != EfiConventionalMemory)
+			continue;
+		lo = m->PhysicalStart;
+		hi = lo + m->NumberOfPages*4096;
+		top = layout.scratchlo + layout.scratchlen;
+		if(lo < layout.scratchlo)
+			lo = layout.scratchlo;
+		if(hi > top)
+			hi = top;
+		if(lo >= hi)
+			continue;
+		if(nscratch == ImageMaxSeg || bootreserve(lo, hi-lo) != 0){
+			archrelease();
+			return "cannot reserve ARM64 early scratch";
+		}
+		savedpa[nscratch] = lo;
+		savedlen[nscratch++] = hi - lo;
+	}
+	return nil;
+}
 
 /* the ISA into the BootInfo; there is no TSC (its tscfreq stays 0) */
 void
@@ -22,11 +200,11 @@ archconf(BootInfo *bi)
 	bi->arch = BootArchArm64;
 }
 
-/* the kernel's physical entry from its ELF entry: linked at KZERO + pa */
+/* the kernel's physical entry from its entry: linked at KZERO + pa */
 uvlong
 archentry(uvlong entry)
 {
-	return entry - 0xffffffff80000000ULL;
+	return entry - layout.kzero;
 }
 
 /*
@@ -41,14 +219,14 @@ archdataround(void)
 }
 
 /*
- * May the BootInfo blob lie at [pa, pa+len)?  Not in the first 16 MB of
- * RAM (the kernel's image and boot page tables), and within the physical
- * range the kernel's boot map covers.
+ * May the BootInfo blob lie at [pa, pa+len)?  Provisional allocation only:
+ * archimage() rehomes it using the actual image plan and firmware
+ * descriptors before claiming or writing any image.
  */
 int
 archblobok(uvlong pa, uvlong len)
 {
-	return pa >= KernelLow && pa < KernelMap && len <= KernelMap - pa;
+	return pa != 0 && len != 0 && pa <= ~(uvlong)0 - len;
 }
 
 /* ELF-ytimen e_machine (sub.c bootelf()): EM_AARCH64 */
@@ -58,16 +236,16 @@ archelfmachine(void)
 	return 183;
 }
 
-/* the kernel's entry must be in RAM the boot map covers */
+/* the kernel's entry must be in RAM the declared boot map covers */
 int
 archentryok(uvlong entry)
 {
 	uvlong pa;
 
-	if(entry < 0xffffffff80000000ULL)
+	if(!layout.platform || entry < layout.kzero)
 		return 0;
-	pa = entry - 0xffffffff80000000ULL;
-	return pa >= RamBase && pa < KernelMap;
+	pa = entry - layout.kzero;
+	return pa >= layout.maplo && pa - layout.maplo < layout.maplen;
 }
 
 /*

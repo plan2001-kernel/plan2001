@@ -1,0 +1,24 @@
+#!/bin/rc
+# Run in the native build VM after source assembly; these are dry runs.
+rfork ne
+fn fail { echo 'native-rules: '^$"* >[1=2]; exit $"* }
+log=/tmp/native-rules.$pid
+fn sigexit { rm -f $log }
+for(board in arm64 bcm64 bcm){
+ cd /sys/src/9/$board || fail $board
+ if(~ $board bcm){
+  target=bootargs.5
+  expected='5c .* bootargs.c'
+ }
+ if not {
+  target=bootargs.7
+  if(~ $board bcm64) expected='7c .*../bcm/bootargs.c'
+  if not expected='7c .* bootargs.c'
+ }
+ if(~ $board arm64) rm -f bootargs.7
+ mk -n $target >$log >[2=1] || fail $board
+ cat $log
+ grep -s $expected $log || fail 'wrong bootargs source for '^$board
+ if(grep -s 'ambiguous recipes|syntax error' $log) fail 'ambiguous '^$board
+ echo 'PASS: native bootargs source '^$board
+}

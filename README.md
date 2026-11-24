@@ -42,6 +42,8 @@ Extend the loader for network boot rather than replacing it. The proposed UEFI H
 
 **Native implementation order:** complete AMD64 on UEFI first. ARM64 starts with QEMU `virt` under UEFI and its BootInfo pointer in `X0`; later hardware platforms (including Raspberry Pi) are distinct follow-up work. RISC-V64 is a new 9front port, not an existing upstream port: its first platform is QEMU `virt` with UEFI and a BootInfo pointer in `a0`, after the AMD64 and ARM64 baselines work. The ABI and intended targets do not imply these ports are already bootable.
 
+**ARM64 loader platform contract:** select `efiplatform=qemu-virt` or `efiplatform=rpi4` explicitly. QEMU retains the frozen board's headed 9front a.out path. Pi4 requires a linked AArch64 ELF64 ET_EXEC image with explicit physical load addresses and matching virtual addresses, plus `efibootmap=base,length` and `efiscratch=base,length` describing the kernel's actual early mapping and writes outside its load segments. Raw `-H6` images, relocation guesses and arbitrary firmware DTBs are not part of this contract. Validate the complete image and BootInfo placement against UEFI memory descriptors before writing image bytes; retain resident firmware and reserved memory. This loader contract does not implement Pi4 kernel relocation, PSCI or hardware support. BootInfo v1 and its X0 handoff remain unchanged.
+
 The purpose of this unification is a common kernel hand-off and maintained source code, **not** binary-identical firmware on fundamentally different execution platforms.
 
 ### Boot source is chosen explicitly

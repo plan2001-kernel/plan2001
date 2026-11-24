@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Exercise production ARM64 layout policy, config and native image parsers.
+No firmware or physical Pi4 is emulated by these sanitizer-backed tests.
+"""
+import pathlib
+import subprocess
+import tempfile
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+EFI = ROOT / 'sys/src/boot/efi'
+
+def body(name):
+    return '\n'.join(l for l in (EFI / name).read_text().splitlines() if not l.startswith('#include'))
+
+preamble = r'''
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint8_t uchar;
+typedef uint16_t ushort,u16int;
+typedef uint32_t uint,ulong,u32int;
+typedef uint64_t uvlong,u64int;
+typedef uintptr_t uintptr;
+#define nil NULL
+#include "sys/include/bootinfo.h"
+#include "efi.h"
+#include "image.h"
+#include "arm64layout.h"
+#include "mem.h"
+typedef struct {int32_t magic,text,data,bss,syms,entry,spsz,pcsz;} Exec;
+#define R_MAGIC 0x8c47
+#define S_MAGIC 0x8a97
+#define I_MAGIC 0x1eb
+#define ROUNDUP(n,a) (((n)+(a)-1)&~((a)-1))
+static unsigned checks;
+static void check(int ok,const char *name){checks++;if(!ok){fprintf(stderr,"FAIL: %s\n",name);exit(1);}}
+static EFI_MEMORY_DESCRIPTOR memory[8];
+static int nmemory,claims,released,moved;
+char *confaddr;
+int conflen(void){return strlen(confaddr)+1;}
+int bootmemorymap(void **m,uvlong *n,uvlong *s){*m=memory;*n=nmemory*sizeof(memory[0]);*s=sizeof(memory[0]);return 0;}
+uvlong bootblobsize(void){return 0x12000;}
+int bootblobmove(uvlong a,uvlong n){check(a && n>=bootblobsize(),"blob relocation");moved++;return 0;}
+int bootreserve(uvlong a,uvlong n){(void)a;(void)n;return 0;}
+void efifree(uvlong a,uvlong n){(void)a;(void)n;released++;}
+int efialloc(uvlong a,uvlong n){(void)a;(void)n;claims++;return 1;}
+void cacheclean(uvlong a,uvlong n){(void)a;(void)n;}
+void cachesync(void){}
+void *rebase(void *p){return p;}
+void *linkfix(void *p){return p;}
+void jump(void *p,void *b){(void)p;(void)b;abort();}
+void print(char *s){(void)s;}
+void tracehex(char *s,uvlong v){(void)s;(void)v;}
+void (*stop)(void);
+void close(void *f){(void)f;}
+void fbmark(int n){(void)n;}
+int bootexit(void){abort();}
+void *bootinfofinish(void){abort();}
+typedef struct {uchar b[8192];int pos,n;} File;
+int readn(void *vf,void *p,int n){File*f=vf;if(n<0 || n>f->n-f->pos)return 0;memcpy(p,f->b+f->pos,n);f->pos+=n;return n;}
+'''
+tests = r'''
+static void mem(int i,uint type,uvlong a,uvlong n){memory[i]=(EFI_MEMORY_DESCRIPTOR){0};memory[i].Type=type;memory[i].PhysicalStart=a;memory[i].NumberOfPages=n/4096;}
+static void qmem(void){nmemory=2;mem(0,EfiReservedMemoryType,0x40000000,0x10000);mem(1,EfiConventionalMemory,0x40010000,0x3fff0000);}
+static void pmem(void){nmemory=3;mem(0,EfiReservedMemoryType,0,0x200000);mem(1,EfiConventionalMemory,0x200000,0x2fe00000);mem(2,EfiRuntimeServicesCode,0x30000000,0x10000000);}
+static BootImage image(ArmLayout*l,uvlong pa){BootImage x={0};x.format=ImageElf;x.nseg=1;x.entry=l->kzero+pa;x.seg[0]=(BootSegment){pa,l->kzero+pa,0x10000,0x20000,0,ImageExec};return x;}
+static void policy(void){
+ ArmLayout q,p,t;BootImage im,x;uvlong a;char*why;int i;
+ check(armplatform(&q,"qemu-virt",0,0,0,0,0)==nil,"QEMU contract");
+ check(armplatform(&p,"rpi4",3,0,0x40000000,0,0)==nil,"Pi4 explicit contract");
+ check(armplatform(&t,"unknown",0,0,0,0,0)!=nil,"unknown platform");
+ check(armplatform(&t,"",0,0,0,0,0)!=nil,"missing platform");
+ check(armplatform(&t,"rpi4",0,0,0,0,0)!=nil,"Pi4 missing layout");
+ check(armplatform(&t,"rpi4",1,0,0x40000000,0,0)!=nil,"Pi4 missing scratch agreement");
+ check(armplatform(&t,"rpi4",3,0x10000,~0ULL,0,0)!=nil,"overflowing map");
+ check(armplatform(&t,"rpi4",3,1,0x10000,0,0)!=nil,"unaligned map");
+ check(armplatform(&t,"rpi4",3,0,0x40000000,0x40000000,0x10000)!=nil,"scratch outside map");
+ check(armplatform(&t,"rpi4",3,0,0x40000000,0x10000,0)!=nil,"ambiguous zero scratch");
+ check(armplatform(&t,"qemu-virt",1,0,0,0,0)!=nil,"QEMU mapping cannot be guessed/overridden");
+ qmem();im=image(&q,0x40100000);im.format=ImageAout;im.magic=R_MAGIC;
+ check(armimage(&q,&im)==nil,"QEMU a.out");
+ check(armmemory(&q,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]))==nil,"QEMU firmware map");
+ check(armblob(&q,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),0x12000,&a),"QEMU blob placement");
+ check(a>=q.maplo && a+0x12000<=q.maplo+q.maplen,"QEMU blob in map");
+ x=im;x.magic=S_MAGIC;check(armimage(&q,&x)!=nil,"wrong a.out architecture");
+ x=im;x.entry+=4;check(armimage(&q,&x)!=nil,"a.out text origin cannot be inferred");
+ pmem();im=image(&p,0x2000000);
+ check(armimage(&p,&im)==nil,"Pi4 linked ELF");
+ check(armmemory(&p,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]))==nil,"Pi4 TF-A/EDK2 reservations");
+ check(armblob(&p,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),0x12000,&a),"Pi4 blob placement");
+ check((a&65535)==0 && a>=0x200000 && a+0x20000<=0x30000000,"Pi4 blob avoids TF-A/EDK2");
+ x=im;x.format=ImageAout;x.magic=R_MAGIC;check(armimage(&p,&x)!=nil,"Pi4 rejects QEMU-style a.out");
+ x=im;x.format=0;check(armimage(&p,&x)!=nil,"raw H6 is not a load contract");
+ x=im;x.seg[0].filesz=x.seg[0].memsz+1;check(armimage(&p,&x)!=nil,"file exceeds memory");
+ x=im;x.seg[0].pa=~0ULL-4095;check(armimage(&p,&x)!=nil,"physical overflow");
+ x=im;x.seg[0].va=~0ULL-4095;check(armimage(&p,&x)!=nil,"virtual overflow");
+ x=im;x.seg[0].va++;check(armimage(&p,&x)!=nil,"virtual/physical disagreement");
+ x=im;x.seg[0].pa++;check(armimage(&p,&x)!=nil,"unaligned segment");
+ x=im;x.entry=x.seg[0].va+x.seg[0].filesz;check(armimage(&p,&x)!=nil,"entry in BSS");
+ x=im;x.entry++;check(armimage(&p,&x)!=nil,"unaligned entry");
+ x=im;x.seg[0].flags=0;check(armimage(&p,&x)!=nil,"non-executable entry");
+ x=im;x.nseg=2;x.seg[1]=x.seg[0];check(armimage(&p,&x)!=nil,"overlapping load segments");
+ t=p;t.scratchlo=im.seg[0].pa;t.scratchlen=65536;check(armimage(&t,&im)!=nil,"scratch/load overlap");
+ for(i=0;i<8;i++){
+  static uint types[]={EfiReservedMemoryType,EfiRuntimeServicesCode,EfiRuntimeServicesData,EfiMemoryMappedIO,EfiACPIReclaimMemory,EfiLoaderCode,EfiLoaderData,EfiBootServicesData};
+  pmem();memory[1].Type=types[i];
+  check(armmemory(&p,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]))!=nil,"never write image into firmware/loader/reserved RAM");
+ }
+ pmem();memory[1].Attribute=1ULL<<63;check(armmemory(&p,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]))!=nil,"runtime attribute on conventional RAM");
+ pmem();memory[2].PhysicalStart=0x2000000;check(armmapvalid(memory,nmemory*sizeof(memory[0]),sizeof(memory[0]))!=nil,"overlapping descriptors");
+ pmem();memory[2].NumberOfPages=~0ULL/4096+1;check(armmapvalid(memory,nmemory*sizeof(memory[0]),sizeof(memory[0]))!=nil,"descriptor multiplication overflow");
+ pmem();memory[2].PhysicalStart=~0ULL-4095;check(armmapvalid(memory,nmemory*sizeof(memory[0]),sizeof(memory[0]))!=nil,"descriptor end overflow");
+ pmem();check(armmapvalid(memory,sizeof(memory[0]),1)!=nil,"short descriptor stride");
+ check(armmapvalid(memory,sizeof(memory[0])+1,sizeof(memory[0]))!=nil,"partial descriptor");
+ check(!armblob(&p,&im,memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),~0ULL,&a),"blob size overflow");
+ qmem();memory[1].Type=EfiBootServicesData;check(armrange(memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),q.scratchlo,q.scratchlen,1),"boot-services scratch only after EBS");
+ memory[1].Type=EfiRuntimeServicesData;check(!armrange(memory,nmemory*sizeof(memory[0]),sizeof(memory[0]),q.scratchlo,q.scratchlen,1),"resident scratch rejected");
+ (void)why;
+}
+static void config(void){
+ char *bad[]={"", "efiplatform=other\n", "efiplatform=qemu-virt\nefiplatform=rpi4\n", "efiplatform=rpi4\nefibootmap=-1,0x10000\nefiscratch=0,0\n", "efiplatform=rpi4\nefibootmap=0,0x10000000000000000\nefiscratch=0,0\n", "efiplatform=rpi4\nefibootmap=0,0x40000000 junk\nefiscratch=0,0\n"};
+ unsigned i;
+ for(i=0;i<sizeof bad/sizeof bad[0];i++){confaddr=bad[i];check(archinit()!=nil,"strict config rejection");}
+ confaddr="efiplatform=rpi4\nefibootmap=0,0x40000000\nefiscratch=0,0\n";check(archinit()==nil,"Pi4 explicit config");
+ check(!archfdtallowed(),"arbitrary firmware DTB is not forwarded");
+}
+static void parsers(void){
+ File good={0},f;Elf64Ehdr*h=(void*)good.b;Elf64Phdr*p=(void*)(good.b+sizeof *h);char *why;
+ good.n=sizeof good.b;
+ h->ident[0]=0x7f;h->ident[1]='E';h->ident[2]='L';h->ident[3]='F';h->ident[4]=2;h->ident[5]=1;
+ h->type=2;h->machine=183;h->version=1;h->ehsize=sizeof *h;h->phoff=sizeof *h;h->phentsize=sizeof *p;h->phnum=1;h->entry=0xffffffffc2000004ULL;
+ p->type=1;p->flags=1;p->offset=4096;p->paddr=0x2000000;p->vaddr=0xffffffffc2000000ULL;p->filesz=1024;p->memsz=65536;p->align=4096;
+ confaddr="efiplatform=rpi4\nefibootmap=0,0x40000000\nefiscratch=0,0\n";
+ pmem();claims=moved=0;f=good;why=bootkern(&f);
+ check(why && strstr(why,"cannot claim ELF") && claims==1 && moved==1,"Pi4 ELF reaches allocation only after valid preflight");
+ #define BAD(change,msg) do { f=good;h=(void*)f.b;p=(void*)(f.b+sizeof *h);change;claims=0;why=bootkern(&f);check(why && claims==0,msg); } while(0)
+ BAD(h->type=3,"ET_DYN rejected");
+ BAD(h->machine=62,"wrong ELF ISA rejected");
+ BAD(h->phnum=17,"excess program headers rejected");
+ BAD(h->entry=p->vaddr+p->filesz,"BSS entry rejected before allocation");
+ BAD(p->filesz=p->memsz+1,"invalid ELF sizes rejected");
+ BAD(p->paddr=~0ULL-4095,"ELF physical overflow rejected");
+ BAD(p->offset=~0ULL-512,"ELF file offset overflow rejected");
+ BAD(p->align=3,"ELF non-power-of-two alignment rejected");
+ BAD(p->vaddr++,"ELF virtual/physical mismatch rejected");
+ BAD(f.n=12,"short header rejected");
+ BAD(f.b[0]=0x11,"raw image rejected");
+ pmem();memory[1].Type=EfiRuntimeServicesData;claims=0;f=good;why=bootkern(&f);check(why && claims==0,"ELF cannot overwrite resident EDK2/TF-A");
+}
+int main(void){policy();config();parsers();printf("PASS: ARM64 loader %u platform, memory, config and image checks (ASan/UBSan)\n",checks);return 0;}
+'''
+# The actual common executable parsers are compiled, not a test reimplementation.
+sub = (EFI / 'sub.c').read_text()
+endian = sub[sub.index('static ulong\nbeswal('):sub.index('/*\n * Restricted ELF64')]
+defs = sub[sub.index('enum {\n\tElfMagic0'):sub.index('static char*\nbootelf(')]
+parsers = sub[sub.index('static char*\nbootelf('):]
+with tempfile.TemporaryDirectory(prefix='arm64-loader-') as td:
+    c = pathlib.Path(td) / 'test.c'
+    exe = pathlib.Path(td) / 'test'
+    c.write_text(preamble + body('arm64layout.c') + body('archaa64.c') + endian + defs + parsers + tests)
+    subprocess.run(['cc', '-std=c11', '-DPLAN2001_EFI_GCC', '-Wall', '-Wextra', '-Werror', '-Wno-sign-compare',
+                    '-fsanitize=address,undefined', '-I', str(ROOT), '-I', str(EFI), str(c), '-o', str(exe)], check=True)
+    subprocess.run([str(exe)], check=True)

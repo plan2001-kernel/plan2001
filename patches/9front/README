@@ -73,7 +73,7 @@ arp-first-request.diff
 
 spawn-wasm32.diff
 		The rc spawn fast path is enabled only for objtype=wasm32. Native
-		rc continues to fork/exec and links against stock 9front libc.
+		rc continues to fork/exec with the native syscall interface.
 
 bcm64-uefi-bootinfo.diff
 		9/bcm64: the Raspberry Pi 4 kernel the Plan2001 EFI loader
@@ -89,3 +89,14 @@ bcm64-uefi-bootinfo.diff
 		finds two metarules and stops), and mem.c no longer unmaps
 		KZERO's window above the image, which ../arm64/mmu.c's
 		kmapram() now leaves to the initial map.  2026-11-24.
+
+bcm64-mkfile-bootargs.diff
+		9/bcm64/mkfile: an explicit rule for bootargs.$O from
+		../bcm/bootargs.c.  With ../port/bootargs.c (the shared
+		BootInfo arguments) mk finds two metarules for it and
+		stops; the Raspberry Pi kernels keep bcm's, which reads
+		the firmware's DTB.
+
+native-syscall-contract.diff
+		port/mksystab uses the same architecture selector as libc/APE.
+		Shared bootargs is opt-in; board-local sources keep ownership.

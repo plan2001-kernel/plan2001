@@ -1,17 +1,21 @@
 --- a/sys/src/libc/9syscall/sys.h
 +++ b/sys/src/libc/9syscall/sys.h
-@@ -50,3 +50,4 @@
+@@ -50,3 +50,6 @@
  #define	PWRITE		51
  #define	TSEMACQUIRE	52
  #define _NSEC		53
++#ifdef __wasm32__
 +#define	SPAWN		54
++#endif
 --- a/sys/include/libc.h
 +++ b/sys/include/libc.h
-@@ -755,6 +755,7 @@
+@@ -755,6 +755,9 @@
  extern	int	dup(int, int);
  extern	int	errstr(char*, uint);
  extern	int	exec(char*, char*[]);
++#ifdef __wasm32__
 +extern	int	spawn(char*, char*[], int*, int, int);
++#endif
  extern	int	execl(char*, ...);
  extern	int	fork(void);
  extern	int	rfork(int);
