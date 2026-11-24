@@ -413,4 +413,6 @@ def main():
 			shutil.rmtree(tmp, ignore_errors=True)	# Chromium's profile: 12 MB each, /tmp is small
 
 
-main()
+# tuotavissa (tools/test/pwaoffline: Cdp); ajettuna testi
+if __name__ == '__main__':
+	main()

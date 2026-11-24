@@ -63,8 +63,12 @@
 <textarea id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="keyboard"></textarea>
 <script type="module">
 import { boot, diskboot } from './platform.js';
-/* the standalone PWA's fallback (manifest.webmanifest): installable, nothing cached */
-if (location.protocol === 'https:' && 'serviceWorker' in navigator)
+/*
+ * the standalone PWA (manifest.webmanifest): installable, and sw.js keeps this page and
+ * platform.js for an offline start from the installed disk.  Any secure context: https,
+ * and tools/serve's loopback http.  The disk's own firmware (a Blob page) registers none
+ */
+if (window.isSecureContext && /^https?:$/.test(location.protocol) && !window.plan9firmware && 'serviceWorker' in navigator)
 	navigator.serviceWorker.register('sw.js').catch(() => {});
 /* the keyboard overlays the page; the page and Rio's framebuffer keep their size */
 const vk = 'virtualKeyboard' in navigator ? navigator.virtualKeyboard : null;
@@ -307,7 +311,15 @@ const isofile = iso === 'file' ? await new Promise((done) => {
 	d.classList.add('on');
 	f.addEventListener('change', () => { if (f.files.length) { d.classList.remove('on'); done(f.files[0]); } });
 }) : null;
-boot(fromdisk ? fromdisk.kernel : '9wasm32.wasm', {
+/* käynnistys ei alkanut (esim. ?boot=net ilman verkkoa): syy näkyviin, ei muuta lähdettä;
+ * try kattaa myös argumentit (9wasm32.fs:n haku) */
+const bootfail = (e) => {
+	pre.textContent += '\nPlan9-wasm32 did not boot: ' + (e?.message ?? e) + '\n';
+	if (!(q.get('console') === '1')) { const h = document.getElementById('halt'); h.textContent = 'Plan9-wasm32 did not boot: ' + (e?.message ?? e); h.style.display = 'block'; }
+	console.error('BOOT-FAIL', e);
+};
+try {
+await boot(fromdisk ? fromdisk.kernel : '9wasm32.wasm', {
 	eia: (b) => { pre.textContent += dec.decode(b, { stream: true }); },
 	halt: (why) => {
 		/*
@@ -353,6 +365,9 @@ boot(fromdisk ? fromdisk.kernel : '9wasm32.wasm', {
 	bad: q.get('bad'),	/* a test's: a BootInfo the kernel must refuse (arch, rd, fb; platform.js) */
 	oldheader: q.has('oldheader'),	/* a test's: an older v1 loader's shorter header */
 });
+} catch (e) {
+	bootfail(e);
+}
 </script>
 </body>
 </html>
