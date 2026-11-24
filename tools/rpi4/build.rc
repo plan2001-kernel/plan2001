@@ -65,16 +65,29 @@ echo '--- ydin: /sys/src/9/bcm64 (pi3, pi4)'
 bind /n/dist/sys/src/libc/9syscall/sys.h /sys/src/libc/9syscall/sys.h
 rm -f /sys/src/9/port/systab.h
 cd /sys/src/9/bcm64 || die bcm64
-for(c in pi4 pi3){
+# pi4efi:n oliot on käännetty -DUEFI:llä: puhdas pöytä joka kerta
+for(c in pi4 pi3 pi4efi){
+	mk clean >[2=1] || die 'mk clean '^$c
 	mk 'CONF='^$c >[2=1] || die 'ytimen käännös '^$c
 	mk 'CONF='^$c install >[2=1] || die 'ytimen asennus '^$c
 }
+mk clean >[2=1]
+
+# jaettu ARM64 EFI-loader sellaisenaan (Codex #17 omistaa sen)
+echo '--- jaettu EFI-loader: /sys/src/boot/efi bootaa64.efi'
+cd /sys/src/boot/efi || die efi
+efi=()
+if(mk bootaa64.efi >[2=1])
+	efi=/sys/src/boot/efi/bootaa64.efi
+if not
+	echo 'build.rc: bootaa64.efi ei käänny'
 
 rm -rf $p2/out
 mkdir -p $p2/out
-cp /arm64/9pi4 /arm64/s9pi4 /arm64/9pi3 $p2/out || die 'ytimien kopio'
+cp /arm64/9pi4 /arm64/s9pi4 /arm64/9pi3 /arm64/9pi4efi /arm64/s9pi4efi $efi $p2/out || die 'ytimien kopio'
 cd $p2/out
 nm s9pi4 | grep -e ' T _start$' -e ' T main$' >entry.txt
+nm s9pi4efi | grep -e ' T _start$' -e ' D bootinfopa$' -e ' B bootinfopa$' -e ' T uefibootinit$' -e ' [BD] end$' >entryefi.txt
 file /arm64/bin/rc /arm64/init >file.txt
 cp /sys/src/9/bcm64/pi4 conf.pi4
 du -s /arm64/bin >du.txt

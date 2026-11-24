@@ -36,6 +36,11 @@ import vm9  # noqa: E402
 KUVA_MT = 2048
 # bcm64/mkfile: loadaddr; ydin on raaka (-H6) ja alkaa _startista
 LATAUS = 0xFFFFFFFFC0080000
+# pi4efi (bcm64/mem.h, mkfile): KZERO, PHYSBASE ja tekstin alku
+KZERO = 0xFFFFFFFFC0000000
+PHYSBASE = 0x01000000
+LATAUS_EFI = KZERO + PHYSBASE + 0x80000
+ALKUKARTTA = 1 << 30	# l.s:n KZERO-ikkuna, BootInfon on oltava sen alla
 
 
 def jasenet():
@@ -60,6 +65,32 @@ def tarkista_ydin(polku):
     # MOV R0, R26 (l.s): ORR X26, XZR, X0 = 0xaa0003fa
     if kasky != 0xAA0003FA:
         raise vm9.VirheVM("%s: ensimmäinen käsky %#x ei ole l.s:n MOV R0, R26" % (polku, kasky))
+
+
+def efi_asettelu(polku):
+    """
+    9pi4efi: 9frontin arm64 a.out, jonka loader lataa (Codex #17:n
+    alustasopimus, docs/rpi4.md): teksti fyysiseen entry-KZERO, data
+    seuraavalle 64 KiB:n rajalle, bss perään; loader varaa myös
+    [PHYSBASE, teksti).  Palauttaa (entry, teksti_pa, loppu_pa).
+    """
+    with open(polku, "rb") as f:
+        h = f.read(40)
+        kasky = f.read(4)
+    magic, teksti, data, bss = struct.unpack(">4I", h[:16])
+    if magic != 0x8C47:
+        raise vm9.VirheVM("%s: a.out magic %#x, ei arm64:n 0x8c47" % (polku, magic))
+    (entry,) = struct.unpack(">Q", h[32:40])
+    if entry != LATAUS_EFI:
+        raise vm9.VirheVM("%s: entry %#x, ei %#x (mem.h PHYSBASE, mkfile loadaddr)" % (polku, entry, LATAUS_EFI))
+    if struct.unpack("<I", kasky)[0] != 0xAA0003FA:
+        raise vm9.VirheVM("%s: tekstin alku ei ole l.s:n _start" % polku)
+    tpa = entry - KZERO
+    dpa = (tpa + teksti + 0xFFFF) & ~0xFFFF
+    loppu = (dpa + data + bss + 0xFFFF) & ~0xFFFF
+    if loppu > ALKUKARTTA:
+        raise vm9.VirheVM("%s: ydin ei mahdu alkukartoitukseen (%#x)" % (polku, loppu))
+    return entry, tpa, loppu
 
 
 def tarkista_kuva(polku):
@@ -121,7 +152,7 @@ def main():
             vm.sammuta()
         tiedostot = vm9.tar_levylta(ulos, a.out)
 
-    for t in ("9pi4", "s9pi4", "9pi3", "entry.txt"):
+    for t in ("9pi4", "s9pi4", "9pi3", "9pi4efi", "s9pi4efi", "entry.txt"):
         if t not in tiedostot:
             raise vm9.VirheVM("%s puuttuu tuloksista (%s)" % (t, loki))
     tarkista_ydin(os.path.join(a.out, "9pi4"))
@@ -129,6 +160,10 @@ def main():
     if entry != LATAUS:
         raise vm9.VirheVM("s9pi4:n sisääntulo %#x ei ole bcm64/mkfile:n loadaddr %#x" % (entry, LATAUS))
     print("9pi4: raaka arm64-kuva, s9pi4 a.out magic %#x, entry %#x" % (magic, entry))
+    e, tpa, loppu = efi_asettelu(os.path.join(a.out, "9pi4efi"))
+    print("9pi4efi: a.out entry %#x; loaderin varaus [%#x, %#x), teksti %#x" % (e, PHYSBASE, loppu, tpa))
+    if "bootaa64.efi" not in tiedostot:
+        print("bootaa64.efi: jaettu loader ei kääntynyt (build.log)")
 
     if a.no_image:
         os.unlink(kuva + ".part")

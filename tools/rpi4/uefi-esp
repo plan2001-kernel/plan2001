@@ -7,6 +7,13 @@ tiedostoon: MBR + yksi FAT32-osio (ESP), jossa pinnattu RPi4 UEFI
 laitteita, ei kirjoitusta oikealle levylle.
 
     tools/rpi4/uefi-esp [--zip ZIP] [--loader BOOTAA64.EFI] [--out KUVA]
+    tools/rpi4/uefi-esp --base plan2001-rpi4.img --loader BOOTAA64.EFI \
+        --kernel 9pi4efi [--out KUVA]
+
+--base: koko SD-kuva UEFI-polulle.  tools/rpi4/build:n levykuvasta
+tehdään kopio, jonka Plan 9 -osio (hjfs-juuri) säilyy ja FAT-osio
+alustetaan uudelleen: RPi4 UEFI, EFI/BOOT/BOOTAA64.EFI, ydin ja
+plan9.ini (bootfile=, console=1: EDK2:n PL011 GPIO14/15:ssä).
 
 Laiteohjelmisto: RPi4_UEFI_Firmware_v1.53.zip (pftf/RPi4, SHA256 alla).
 Ilman --zip sitä haetaan välimuistista ~/.cache/plan2001/rpi4-uefi; jos se
@@ -86,9 +93,13 @@ def mtools(*k):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--zip")
-    ap.add_argument("--loader", help="Plan2001:n bootaa64.efi (Codex #12:n käännös)")
+    ap.add_argument("--loader", help="Plan2001:n jaettu bootaa64.efi (tools/rpi4/build tai Codex #17)")
     ap.add_argument("--out", default=os.path.join(valimuisti(), "plan2001-rpi4-uefi.img"))
+    ap.add_argument("--base", help="tools/rpi4/build:n plan2001-rpi4.img (Plan 9 -osio säilyy)")
+    ap.add_argument("--kernel", help="9pi4efi, --basen kanssa")
     a = ap.parse_args()
+    if a.base:
+        return koko_kuva(a)
 
     if os.path.realpath(a.out).startswith("/dev/"):
         raise Virhe("tulos on laite (%s): kirjoitetaan vain tiedostoon" % a.out)
@@ -121,6 +132,45 @@ def main():
             mtools("mcopy", "-i", kohde, a.loader, "::/EFI/BOOT/BOOTAA64.EFI")
         os.rename(osa, a.out)
     print("uefi-esp: %s (RPi4 UEFI %s%s)" % (a.out, VERSIO, ", BOOTAA64.EFI" if a.loader else ""))
+
+
+def koko_kuva(a):
+    """--base: kopio levykuvasta, FAT-osio (p1) UEFI-käynnistykselle."""
+    for p, n in ((a.base, "--base"), (a.loader, "--loader"), (a.kernel, "--kernel")):
+        if not p or not os.path.isfile(p):
+            raise Virhe("%s puuttuu: %s" % (n, p))
+    if os.path.realpath(a.out).startswith("/dev/") or os.path.exists(a.out):
+        raise Virhe("%s: tulos on laite tai on jo olemassa" % a.out)
+    lahde = hae_zip(a.zip)
+    with open(a.base, "rb") as f:
+        m = f.read(512)
+    tila, tyyppi = m[446], m[450]
+    alku, koko = struct.unpack("<II", m[454:462])
+    if m[510:512] != b"\x55\xaa" or tila != 0x80 or tyyppi not in (0x0B, 0x0C) or m[466] != 0x39:
+        raise Virhe("%s: ei tools/rpi4/build:n levykuva (MBR)" % a.base)
+    osa = a.out + ".part"
+    subprocess.check_call(["cp", "--sparse=always", a.base, osa])
+    kohde = "%s@@%d" % (osa, alku * 512)
+    with tempfile.TemporaryDirectory(prefix="p2uefi-") as tyo:
+        with zipfile.ZipFile(lahde) as z:
+            for n in z.namelist():
+                if os.path.isabs(n) or ".." in n.split("/"):
+                    raise Virhe("%s: kelvoton polku %r" % (lahde, n))
+            z.extractall(os.path.join(tyo, "fw"))
+        os.unlink(os.path.join(tyo, "fw", "Readme.md"))
+        ini = os.path.join(tyo, "plan9.ini")
+        with open(ini, "w") as f:
+            f.write("bootfile=/%s\nconsole=1\n" % os.path.basename(a.kernel))
+        mtools("mformat", "-i", kohde, "-F", "-T", str(koko), "-H", str(alku), "-v", "PLAN2001", "::")
+        fw = os.path.join(tyo, "fw")
+        mtools("mcopy", "-i", kohde, "-s", "-Q", *[os.path.join(fw, n) for n in sorted(os.listdir(fw))], "::")
+        mtools("mmd", "-i", kohde, "::/EFI", "::/EFI/BOOT")
+        mtools("mcopy", "-i", kohde, a.loader, "::/EFI/BOOT/BOOTAA64.EFI")
+        mtools("mcopy", "-i", kohde, a.kernel, "::/" + os.path.basename(a.kernel))
+        mtools("mcopy", "-i", kohde, ini, "::/plan9.ini")
+    os.rename(osa, a.out)
+    print("uefi-esp: %s (RPi4 UEFI %s, BOOTAA64.EFI, %s, Plan 9 -osio %s:sta)" %
+          (a.out, VERSIO, os.path.basename(a.kernel), a.base))
 
 
 if __name__ == "__main__":

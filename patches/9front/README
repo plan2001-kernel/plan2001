@@ -75,9 +75,17 @@ spawn-wasm32.diff
 		The rc spawn fast path is enabled only for objtype=wasm32. Native
 		rc continues to fork/exec and links against stock 9front libc.
 
-bcm64-mkfile-bootargs.diff
-		9/bcm64/mkfile: an explicit rule for bootargs.$O from
-		../bcm/bootargs.c.  With ../port/bootargs.c (the shared
-		BootInfo arguments) mk finds two metarules for it and
-		stops; the Raspberry Pi kernels keep bcm's, which reads
-		the firmware's DTB.
+bcm64-uefi-bootinfo.diff
+		9/bcm64: the Raspberry Pi 4 kernel the Plan2001 EFI loader
+		enters under TF-A and EDK2 (CONF=pi4efi, -DUEFI; uefi.c is
+		new): mem.h's low area and KTZERO moved up by PHYSBASE, past
+		the firmware's 0 - 0x400000; X0 kept as BootInfo v1's address
+		(l.s); memory from BootInfo's map, configuration from
+		plan9.ini and the device tree it carries, secondary CPUs and
+		reset by PSCI (main.c, mem.c); smccall and hvccall (l.s).
+		The stock pi3 and pi4 kernels are as they were, but for two
+		fixes: an explicit rule for bootargs.$O from ../bcm/bootargs.c
+		(with ../port/bootargs.c, the shared BootInfo arguments, mk
+		finds two metarules and stops), and mem.c no longer unmaps
+		KZERO's window above the image, which ../arm64/mmu.c's
+		kmapram() now leaves to the initial map.  2026-11-24.

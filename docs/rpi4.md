@@ -14,8 +14,8 @@ Each stage is tested and reported on its own:
 |---|---|---|
 | (a) stock 9front Pi 4 boot | VideoCore firmware (`start4cd.elf`, `config.txt`) → `9pi4` at physical `0x80000`, X0 = DTB | `tools/rpi4/build` image; release image `tools/rpi4/stock` |
 | (b) Pi 4 UEFI/EDK2 launch | VideoCore firmware → `RPI_EFI.fd` (TF-A + EDK2) → `EFI/BOOT/BOOTAA64.EFI` | `tools/rpi4/uefi-esp` |
-| (c) Plan2001 BootInfo v1 hand-off | EDK2 → Plan2001 EFI loader → kernel, X0 = BootInfo | not yet possible, see below |
-| (d) 9front kernel → init → rc | after (a), or after (c) once it exists | hardware; `tools/rpi4/boottest` (emulated, partial) |
+| (c) Plan2001 BootInfo v1 hand-off | EDK2 → Plan2001 EFI loader → `9pi4efi`, X0 = BootInfo | `tools/rpi4/uefi-esp --base`; loader with the Pi 4 platform (below); `tools/rpi4/bootinfotest` (emulated entry) |
+| (d) 9front kernel → init → rc | after (a) or (c) | hardware; `tools/rpi4/boottest` (emulated, partial) |
 
 Stage (a) uses the Raspberry Pi firmware's `kernel8`-style boot. It is
 the upstream baseline for diagnosing the hardware and the port; it is not
@@ -27,13 +27,16 @@ Plan2001's UEFI boot, which remains the native boot policy (README).
     tools/rpi4/build --no-image # kernels and userland only
     tools/rpi4/boottest         # QEMU raspi4b/raspi3b serial smoke test
     tools/rpi4/stock            # 9front-11952.pi3.img, SHA256-checked
+    tools/rpi4/bootinfotest     # 9pi4efi's BootInfo entry in QEMU raspi4b
 
 `tools/rpi4/build` runs in the 9front-11952 build VM of
 `tools/native-amd64` (`PLAN2001_BUILDVM`, default
 `~/.cache/plan2001/base.qcow2`) with no network, from the pinned ISO
 (SHA256-checked) with this tree's files over it (`tools/tree` must
 succeed first). In the VM it runs `objtype=arm64 mk install` in
-`/sys/src`, builds and installs `9pi4` and `9pi3`, and makes the SD
+`/sys/src`, builds and installs `9pi4`, `9pi3` and `9pi4efi` (each
+after `mk clean`: `9pi4efi`'s objects are built with `-DUEFI`), builds
+the shared `bootaa64.efi` from `/sys/src/boot/efi` as it is, and makes the SD
 image with 9front's own `/sys/lib/dist/mkfile` rule `%.pi3.img`. The Pi
 firmware files and `bcm2711-rpi-4-b.dtb` are the release's
 `/sys/src/boot/bcm` files; nothing is fetched.
@@ -41,6 +44,9 @@ firmware files and `bcm2711-rpi-4-b.dtb` are the release's
 Output (default `~/.cache/plan2001/rpi4`, or `--out`/`PLAN2001_RPI4_OUT`):
 
 - `9pi4`, `s9pi4` (with symbols), `9pi3`
+- `9pi4efi`, `s9pi4efi`: the UEFI kernel (below); `build` checks its
+  a.out header and layout against the loader contract
+- `bootaa64.efi`: the shared ARM64 EFI loader of this tree
 - `plan2001-rpi4.img`: MBR, partition 1 FAT32 (active; `config.txt`,
   `cmdline.txt`, firmware, DTB, kernels), partition 2 Plan 9 (`nvram`,
   `fs`: hjfs with the arm64 distribution)
@@ -116,32 +122,65 @@ changed in its setup menu (Device Manager → Raspberry Pi Configuration
 → Advanced Configuration). Its settings are kept in `RPI_EFI.fd` on the
 card.
 
-### Why `9pi4` does not run under the Plan2001 EFI loader yet
+`tools/rpi4/uefi-esp --base IMG --loader BOOTAA64.EFI --kernel 9pi4efi`
+makes the whole card for stage (c): a copy of `plan2001-rpi4.img` whose
+Plan 9 partition (the hjfs root) is kept and whose FAT partition is
+formatted again with the firmware above, `EFI/BOOT/BOOTAA64.EFI`,
+`9pi4efi` and `plan9.ini` (`bootfile=/9pi4efi`, `console=1`).
 
-These are properties of the frozen sources, to be resolved before stage
-(c):
+EDK2 settings the kernel needs, in its setup menu (Esc at boot; kept in
+`RPI_EFI.fd` on the card):
 
-1. **Fixed low physical layout.** `bcm64/mem.h` maps `KZERO`
-   (`0xffffffffc0000000`) to physical 0 and uses physical `0xd8` (CPU spin
-   table), `0x100` (boot arguments), `0x1c00` (reboot code), `0x3400`
-   (VideoCore mailbox buffer), and the kernel image, page tables and
-   `Mach` structures from `0x80000` down. Under EDK2, `RPI_EFI.fd` (TF-A
-   BL31 and the firmware volume) and the DTB occupy physical
-   `0x0`–`0x400000`, and TF-A stays resident at EL3. The kernel's low
-   memory and image would overwrite it.
-2. **Secondary CPUs.** `bcm64/main.c` starts CPUs 1–3 through the spin
-   table at `0xd8` that the VideoCore armstub provides. Under TF-A they are
-   held by PSCI and need `CPU_ON` (SMC); `bcm64` has no PSCI path.
-3. **Entry argument.** `bcm64/main.c` passes X0 to `bootargsinit()` as a
-   DTB pointer (`bcm/bootargs.c`). BootInfo v1 puts the BootInfo address
-   in X0, with the DTB as BootInfo's optional FDT section.
-4. **The shared loader's ARM64 platform.** `sys/src/boot/efi/archaa64.c`
-   assumes QEMU `virt`: RAM at `0x40000000`, an ELF kernel linked at
-   `0xffffffff80000000 + pa`, and a BootInfo window below 2 GB. The Pi 4's
-   RAM starts at 0 and `9pi4` is a raw (`-H6`) image linked at
-   `0xffffffffc0080000`.
+- Device Manager → Raspberry Pi Configuration → ACPI / Device Tree →
+  System Table Selection: **ACPI+Devicetree** (or Devicetree). The
+  default, ACPI only, gives the loader no device tree; `9pi4efi` then
+  stops with `no device tree in BootInfo`.
+- Advanced Configuration → Limit RAM to 3 GB: either. With the limit,
+  the kernel has 3 GB.
 
-Items 1–3 are `bcm64` changes (a relocatable kernel base, PSCI CPU start,
-a BootInfo entry that takes memory, command line and FDT from BootInfo);
-item 4 is a change to the shared loader and belongs to the ARM64/QEMU
-`virt` integration, not to a Pi 4 copy of it.
+### The UEFI kernel `9pi4efi`
+
+`CONF=pi4efi` is the `pi4` configuration built with `-DUEFI`
+(`sys/src/9/bcm64/uefi.c`, `patches/9front/bcm64-uefi-bootinfo.diff`).
+The stock `9pi4` stays the firmware-boot kernel; neither takes the
+other's entry.
+
+- **Layout.** `mem.h`'s `PHYSBASE` (`0x01000000`) moves the stock low
+  area up past TF-A and EDK2 (`0x0`–`0x400000`): spin table `+0xd8`,
+  boot arguments `+0x100`, reboot code `+0x1c00`, mailbox buffer
+  `+0x3400`, page tables and `Mach` structures below the text at
+  `+0x80000`. `KZERO` still maps physical 0, so `PADDR`, `KADDR` and DMA
+  bus addresses are those of the stock kernel.
+- **Loader contract.** The image is a 9front arm64 a.out (magic
+  `0x8c47`), entry `0xffffffffc1080000` = first text byte, loaded at
+  physical entry − `0xffffffffc0000000`, data at the next 64 KiB
+  boundary, then bss. The loader must claim `[PHYSBASE, end)` (image and
+  the area below it) as `EfiLoaderCode`/`EfiLoaderData`, put the BootInfo
+  blob and its device tree copy below 1 GiB outside that range, and
+  enter at EL2 or EL1 with interrupts off and caches cleaned, X0 =
+  BootInfo. `tools/rpi4/build` prints the range for the built image.
+- **Entry checks.** Before anything else the kernel checks X0 and the
+  blob and, on a mismatch, prints the reason on the PL011 and halts: X0 a
+  device tree (started by the Pi firmware), not BootInfo, version, other
+  architecture, above 1 GiB, kernel range not claimed by the loader,
+  blob over the kernel, no device tree, not a BCM2711 device tree. The
+  shared `port/bootinfo.c` then validates the whole blob (it halts
+  without a message).
+- **Configuration.** `plan9.ini` from BootInfo, after values taken from
+  the device tree: `*ncpu`, and the BCM2711 DMA windows `*emmc2bus`,
+  `*pciwin`, `*pcidmawin` that the stock kernel reads from the firmware
+  DTB. The device tree's `/chosen/bootargs` is not used.
+- **Memory** is BootInfo's map: `EfiConventionalMemory` and boot
+  services memory; loader, runtime, reserved and VideoCore memory are
+  left alone. The four largest banks are used.
+- **CPUs and reset.** CPUs 1–3 are started one by one with PSCI
+  `CPU_ON` through the conduit of the device tree's `/psci` (`smc` with
+  TF-A); without `/psci` the kernel runs on one CPU. `exit` turns
+  secondary CPUs off with `CPU_OFF` and resets with `SYSTEM_RESET`.
+  Loading another kernel through `#c/reboot` is refused under UEFI.
+
+`tools/rpi4/bootinfotest` loads `9pi4efi` and a BootInfo blob made on
+the host into QEMU's `raspi4b` and enters it as the loader would (EL2,
+X0): a valid blob reaches the banner and the memory banks from its map;
+the invalid cases stop with their messages. It runs no TF-A, EDK2 or
+loader and no PSCI.

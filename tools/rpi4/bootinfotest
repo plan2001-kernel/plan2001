@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""
+9pi4efi:n BootInfo-sisääntulon testi QEMU:n raspi4b-koneessa ilman
+firmwarea: tämä skripti tekee sen, minkä Plan2001:n EFI-loader tekee
+EDK2:n alla - lataa a.out-ytimen (teksti entry-KZERO, data 64 KiB:n
+rajalle), rakentaa BootInfo v1 -blobin (plan9.ini, muistikartta, FDT) ja
+hyppää ytimeen X0 = blob - ja tarkistaa ytimen sarjakonsolin (PL011).
+
+    tools/rpi4/bootinfotest [--dir HAK] [--case NIMI ...]
+
+Tapaukset: valid (ydin hyväksyy BootInfon, rakentaa muistin kartasta ja
+tulostaa bannerin), sekä virheet, joihin ytimen on pysähdyttävä
+ilmoittaen: dtb (X0 = laitepuu kuten Pi-firmwarella), arch, unclaimed
+(ytimen aluetta ei ole varattu), nofdt, high (blob yli 1 GiB:n),
+overlap (kartan rivit päällekkäin: yhteinen port/bootinfo.c pysähtyy).
+
+Tämä ei ole Pi4:n UEFI-käynnistys: ei TF-A:ta, EDK2:ta, loaderia eikä
+PSCI:tä (laitepuussa ei ole /psci:tä, ydin jää yhdelle ytimelle).
+QEMU:n raspi4b pysähtyy bannerin jälkeen GIC:hen (CBAR_EL1, docs/rpi4.md).
+"""
+
+import argparse
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+
+sys.dont_write_bytecode = True
+TAMA = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(TAMA), "native-amd64"))
+import vm9  # noqa: E402
+
+KZERO = 0xFFFFFFFFC0000000
+PHYSBASE = 0x01000000
+BLOB = 0x03000000
+YLA = 0x40000000
+
+# sys/include/bootinfo.h, arm64:n luonnollinen tasaus (7c)
+BOOTINFO_KOKO = 232
+MAGIC = 0x49423250
+ARCH_ARM64 = 2
+(RESERVED, LOADERCODE, LOADERDATA, BOOTCODE, BOOTDATA, RTCODE, RTDATA,
+ CONVENTIONAL) = range(8)
+
+
+def aout(polku):
+    d = open(polku, "rb").read()
+    magic, teksti, data, bss = struct.unpack(">4I", d[:16])
+    (entry,) = struct.unpack(">Q", d[32:40])
+    tpa = entry - KZERO
+    dpa = (tpa + teksti + 0xFFFF) & ~0xFFFF
+    loppu = (dpa + data + bss + 0xFFFF) & ~0xFFFF
+    return d[40:40 + teksti], d[40 + teksti:40 + teksti + data], tpa, dpa, loppu
+
+
+def blob(config, fdt, kartta, arch=ARCH_ARM64):
+    """BootInfo v1: otsake, plan9.ini, FDT, muistikartta; sivun tasaus."""
+    osat = bytearray(BOOTINFO_KOKO)
+    def lisaa(data, tasaus=8):
+        while len(osat) % tasaus:
+            osat.append(0)
+        off = len(osat)
+        osat.extend(data)
+        return off
+    coff = lisaa(config.encode() + b"\0")
+    foff = lisaa(fdt) if fdt else 0
+    mmap = b"".join(struct.pack("<QQII", b, l, t, 0) for b, l, t in kartta)
+    moff = lisaa(mmap)
+    while len(osat) % 4096:
+        osat.append(0)
+    h = struct.pack("<12I", MAGIC, 1, BOOTINFO_KOKO, len(osat), 0,
+                    coff, len(config) + 1, 0, 0, moff, len(kartta), 24)
+    osat[0:48] = h
+    struct.pack_into("<3I", osat, 192, arch, foff, len(fdt) if fdt else 0)
+    return bytes(osat)
+
+
+def kartta(loppu, bloblen, blob_pa=BLOB):
+    k = [(0, 0x400000, RESERVED),			# TF-A, RPI_EFI.fd, DTB
+         (0x400000, PHYSBASE - 0x400000, CONVENTIONAL),
+         (PHYSBASE, loppu - PHYSBASE, LOADERCODE),	# loaderin varaus
+         (loppu, blob_pa - loppu, CONVENTIONAL),
+         (blob_pa, bloblen, LOADERDATA),
+         (blob_pa + bloblen, 0x3B400000 - blob_pa - bloblen, CONVENTIONAL),
+         (0x3B400000, 0x04C00000, RESERVED),		# VideoCore
+         (0x40000000, 0x40000000, CONVENTIONAL)]
+    return [r for r in k if r[1] > 0]
+
+
+def trampoliini(x0, pc):
+    """
+    Firmwaren osa: PL011 päälle (EDK2 jättää sen päälle), EL3 -> EL2
+    (QEMU:n raspi4b alkaa EL3:sta ilman firmwarea; Pi4:n EDK2 hyppää
+    EL2:sta), X0 = blob ja hyppy ytimen tekstin alkuun.
+    """
+    k = [0x58000242,		# 0: ldr x2, lit2 (72)
+         0x52806023,		# movz w3, #0x301 (UARTEN|TXE|RXE)
+         0xB9000043,		# str w3, [x2]
+         0xD280A624,		# movz x4, #0x531 (SCR_EL3: RW|HCE|NS)
+         0xD51E1104,		# msr scr_el3, x4
+         0xD2807924,		# movz x4, #0x3c9 (EL2h, DAIF)
+         0xD51E4004,		# msr spsr_el3, x4
+         0x10000064,		# adr x4, 40
+         0xD51E4024,		# msr elr_el3, x4
+         0xD69F03E0,		# eret
+         0x58000080,		# 40: ldr x0, lit0 (56)
+         0x580000A1,		# ldr x1, lit1 (64)
+         0xD61F0020,		# br x1
+         0xD503201F]		# nop
+    return struct.pack("<14I", *k) + struct.pack("<QQQ", x0, pc, 0xFE201030)
+
+
+SEIS = struct.pack("<2I", 0xD503205F, 0x17FFFFFF)	# wfe; b .-4 (toissijaiset)
+
+TAPAUKSET = {
+    "valid": ([r"pi4efi: BootInfo v1 at 0x0+3000000", r"Plan 9",
+               r"pi4efi: BootInfo v1 0x3000000, \d+ memory map entries, device tree \d+ bytes",
+               r"pi4efi: memory 0x400000-0x1000000",
+               r"pi4efi: memory 0x40000000-0x80000000"], None),
+    "dtb": ([r"X0 is a device tree, not BootInfo"], "Plan 9"),
+    "arch": ([r"BootInfo made for another architecture: 0x0+1"], "Plan 9"),
+    "unclaimed": ([r"the loader did not claim the kernel's range from PHYSBASE 0x0+1000000"], "Plan 9"),
+    "nofdt": ([r"no device tree in BootInfo"], "Plan 9"),
+    "high": ([r"X0 is not a page-aligned address below 1 GiB: 0x0+48000000"], "Plan 9"),
+    "overlap": ([r"pi4efi: BootInfo v1 at 0x0+3000000"], "Plan 9|pi4efi: halted"),
+}
+
+
+def aja(tapaus, kansio, dtb, tyo):
+    teksti, data, tpa, dpa, loppu = aout(os.path.join(kansio, "9pi4efi"))
+    fdt = open(dtb, "rb").read()
+    conf = "console=1\n"
+    x0 = BLOB
+    if tapaus == "nofdt":
+        fdt = b""
+    b = blob(conf, fdt, [(0, 1, RESERVED)])
+    k = kartta(loppu, len(b))
+    if tapaus == "unclaimed":
+        k = [(s, l, CONVENTIONAL if t == LOADERCODE else t) for s, l, t in k]
+    if tapaus == "overlap":
+        k.append((0x400000, 0x2000, CONVENTIONAL))
+    b = blob(conf, fdt, k, arch=1 if tapaus == "arch" else ARCH_ARM64)
+    if tapaus == "high":
+        x0 = 0x48000000
+    lataa = [(teksti, tpa), (data, dpa), (SEIS, 0)]
+    lataa.append((fdt if tapaus == "dtb" else b, x0))
+    ylim = []
+    for i, (sis, osoite) in enumerate(lataa):
+        p = os.path.join(tyo, "%s-%d.bin" % (tapaus, i))
+        open(p, "wb").write(sis)
+        ylim += ["-device", "loader,file=%s,addr=%#x,force-raw=on" % (p, osoite)]
+    p = os.path.join(tyo, "%s-tramp.bin" % tapaus)
+    open(p, "wb").write(trampoliini(x0, tpa))
+    ylim += ["-device", "loader,file=%s,addr=0x2000,cpu-num=0,force-raw=on" % p]
+    return ylim
+
+
+class Pi4(vm9.Kone):
+    def __init__(self, ylim, loki):
+        super().__init__([], None, loki)
+        self.ylim = ylim
+
+    def komento(self):
+        return [os.environ.get("QEMU_AARCH64", "qemu-system-aarch64"), "-M", "raspi4b", "-m", "2G",
+                "-serial", "stdio", "-serial", "null", "-monitor", "none", "-display", "none",
+                "-no-reboot"] + self.ylim + os.environ.get("PLAN2001_QEMU_EXTRA", "").split()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--dir", default=os.environ.get("PLAN2001_RPI4_OUT",
+                                                    os.path.join(vm9.valimuisti(), "rpi4")))
+    ap.add_argument("--dtb")
+    ap.add_argument("--case", action="append", choices=sorted(TAPAUKSET))
+    a = ap.parse_args()
+    dtb = a.dtb or os.path.join(vm9.JUURI, "build", "release", "sys", "src", "boot", "bcm", "bcm2711-rpi-4-b.dtb")
+    if not os.path.exists(dtb):
+        subprocess.check_call([os.path.join(vm9.JUURI, "tools", "release")], stdout=subprocess.DEVNULL)
+    if not os.path.exists(os.path.join(a.dir, "9pi4efi")):
+        raise vm9.VirheVM("9pi4efi puuttuu (tools/rpi4/build)")
+    tulos = {}
+    with tempfile.TemporaryDirectory(prefix="p2bit-", dir=a.dir) as tyo:
+        for t in a.case or sorted(TAPAUKSET):
+            loki = os.path.join(a.dir, "bootinfotest-%s.log" % t)
+            if os.path.exists(loki):
+                os.unlink(loki)
+            odotettu, kielletty = TAPAUKSET[t]
+            vm = Pi4(aja(t, a.dir, dtb, tyo), loki)
+            vm.kaynnista()
+            try:
+                for malli in odotettu:
+                    vm.odota(malli, 60)
+                if kielletty:
+                    try:
+                        vm.odota(kielletty, 8)
+                        tulos[t] = "FAIL (%r tuli)" % kielletty
+                    except vm9.VirheVM:
+                        tulos[t] = "PASS"
+                else:
+                    tulos[t] = "PASS"
+            except vm9.VirheVM as e:
+                tulos[t] = "FAIL: %s" % str(e).splitlines()[0]
+            finally:
+                vm.tapa()
+    for t, v in tulos.items():
+        print("%-10s %s" % (t, v))
+    return all(v == "PASS" for v in tulos.values())
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(0 if main() else 1)
+    except vm9.VirheVM as e:
+        print("bootinfotest: %s" % e, file=sys.stderr)
+        sys.exit(1)

@@ -1,0 +1,360 @@
+--- a/sys/src/9/bcm64/fns.h
++++ b/sys/src/9/bcm64/fns.h
+@@ -1,3 +1,4 @@
++#include <bootinfo.h>
+ #include "../port/portfns.h"
+ 
+ /* l.s */
+@@ -179,6 +180,32 @@
+ extern void setconfenv(void);
+ extern void writeconf(void);
+ 
++/*
++ * UEFI kernel (-DUEFI, uefi.c): Plan2001 BootInfo v1 in X0, the shared
++ * ../port/bootinfo.c, PSCI.  The stock kernel does not link these.
++ */
++extern uintptr bootinfopa;
++extern BootInfo *bootinfo;
++extern uchar *bootblob;
++extern void bootinfoinit(void);
++extern void bootinforandinit(void);
++extern void bootinfoclock(void);
++extern BootMem *bootmem(int);
++extern int bootmemclass(u32int);
++extern char *bootconfig(void);
++extern uchar *bootfdt(ulong*);
++extern void *bootearlymap(uvlong, uvlong);
++extern void halt(void);
++enum { BootInfoArch = BootArchArm64 };
++enum { BootClassRAM, BootClassACPI, BootClassReserved };
++extern void smccall(Ureg*);
++extern void hvccall(Ureg*);
++extern void uefibootinit(void);
++extern void uefimeminit(void);
++extern void uefiprint(void);
++extern void uefimpinit(void);
++extern void uefiexit(void);
++
+ /* screen */
+ extern void screeninit(void);
+ 
+--- a/sys/src/9/bcm64/l.s
++++ b/sys/src/9/bcm64/l.s
+@@ -52,6 +52,12 @@
+ 	CMP	R1, R2
+ 	BNE	_zerobss
+ 
++#ifdef UEFI
++	/* X0 at entry: BootInfo v1's physical address (uefi.c); BSS is clear */
++	MOV	$bootinfopa-KZERO(SB), R1
++	MOV	R26, (R1)
++#endif
++
+ 	/* setup page tables */
+ 	MOV	$(L1BOT-KZERO), R0
+ 	BL	mmuidmap(SB)
+@@ -700,6 +706,41 @@
+ _vserrpatch:
+ 	B	_vserrpatch	// branch to vtrapX() patched in
+ 
++/*
++ * PSCI and other firmware calls (SMC Calling Convention): X0-X7 from
++ * the Ureg in, X0-X3 back into it.  The UEFI kernel's firmware is TF-A
++ * at EL3 (uefi.c); the device tree's /psci says which conduit.
++ */
++TEXT smccall(SB), 1, $32
++	MOVP	R26, R27, (RSP)
++	MOV	R0, R8
++	MOV	R8, 16(RSP)
++	MOVP	0(R8), R0, R1
++	MOVP	16(R8), R2, R3
++	MOVP	32(R8), R4, R5
++	MOVP	48(R8), R6, R7
++	SMC
++	MOV	16(RSP), R8
++	MOVP	R0, R1, 0(R8)
++	MOVP	R2, R3, 16(R8)
++	MOVP	(RSP), R26, R27
++	RETURN
++
++TEXT hvccall(SB), 1, $32
++	MOVP	R26, R27, (RSP)
++	MOV	R0, R8
++	MOV	R8, 16(RSP)
++	MOVP	0(R8), R0, R1
++	MOVP	16(R8), R2, R3
++	MOVP	32(R8), R4, R5
++	MOVP	48(R8), R6, R7
++	HVC
++	MOV	16(RSP), R8
++	MOVP	R0, R1, 0(R8)
++	MOVP	R2, R3, 16(R8)
++	MOVP	(RSP), R26, R27
++	RETURN
++
+ /* fault-proof memcpy */
+ TEXT peek(SB), 1, $-4
+ 	MOV	R0, R1
+--- a/sys/src/9/bcm64/main.c
++++ b/sys/src/9/bcm64/main.c
+@@ -133,6 +133,14 @@
+ 	active.machs[m->machno] = 1;
+ }
+ 
++#ifdef UEFI
++void
++mpinit(void)
++{
++	/* EDK2:n alla ei ole armstubin spin-taulua: PSCI (uefi.c) */
++	uefimpinit();
++}
++#else
+ void
+ mpinit(void)
+ {
+@@ -156,6 +164,7 @@
+ 	for(i = 0; i < MAXMACH; i++)
+ 		((uintptr*)SPINTABLE)[i] = 0;
+ }
++#endif
+ 
+ void
+ main(uintptr arg0)
+@@ -173,7 +182,12 @@
+ 		schedinit();
+ 	}
+ 	quotefmtinstall();
++#ifdef UEFI
++	USED(arg0);
++	uefibootinit();
++#else
+ 	bootargsinit(arg0);
++#endif
+ 	meminit();
+ 	confinit();
+ 	xinit();
+@@ -181,6 +195,9 @@
+ 	uartconsinit();
+ 	screeninit();
+ 	print("\nPlan 9\n");
++#ifdef UEFI
++	uefiprint();
++#endif
+ 
+ 	/* set clock rate to arm_freq from config.txt */
+ 	setclkrate(ClkArm, 0);
+@@ -191,6 +208,9 @@
+ 	clockinit();
+ 	cpuidprint();
+ 	timersinit();
++#ifdef UEFI
++	bootinfoclock();
++#endif
+ 	pageinit();
+ 	procinit0();
+ 	initseg();
+@@ -230,6 +250,14 @@
+ 	cpushutdown();
+ 	splfhi();
+ 
++#ifdef UEFI
++	/* PSCI: toissijainen CPU_OFF, ensisijainen SYSTEM_RESET (uefi.c) */
++	if(m->machno == 0){
++		zeroprivatepages();
++		poolreset(secrmem);
++	}
++	uefiexit();
++#endif
+ 	if(m->machno)
+ 		rebootjump(0, 0, 0);
+ 
+@@ -240,6 +268,14 @@
+ 	archreboot();
+ }
+ 
++#ifdef UEFI
++void
++reboot(void *, void *, ulong)
++{
++	/* uusi ydin tarvitsisi loaderin BootInfon; ei rebootcodea UEFI:ssa */
++	error("loading another kernel is not supported under UEFI");
++}
++#else
+ void
+ reboot(void *entry, void *code, ulong size)
+ {
+@@ -272,6 +308,7 @@
+ 	/* off we go - never to return */
+ 	rebootjump(entry, code, size);
+ }
++#endif
+ 
+ /*
+  * stub for ../omap/devether.c
+--- a/sys/src/9/bcm64/mem.c
++++ b/sys/src/9/bcm64/mem.c
+@@ -7,6 +7,12 @@
+ #define INITMAP	(ROUND((uintptr)end + BY2PG, PGLSZ(1))-KZERO)
+ 
+ /*
++ * Alkukartoitus, jonka ../arm64/mmu.c:n kmapram() olettaa olevan
++ * voimassa (sen INITMAP): koko KZERO-ikkuna (1 GiB).  Sitä ei pureta.
++ */
++#define KMAPINIT	((uintptr)-KZERO)
++
++/*
+  * Create initial identity map in top-level page table
+  * (L1BOT) for TTBR0. This page table is only used until
+  * mmu1init() loads m->mmutop.
+@@ -75,6 +81,14 @@
+ 		l1[PTL1X(va, 3)] = (uintptr)&l1[L1TABLEX(va, 2)] | PTEVALID | PTETABLE;
+ }
+ 
++#ifdef UEFI
++void
++meminit(void)
++{
++	/* muistikartta BootInfosta, ei firmwaren *maxmem:stä (uefi.c) */
++	uefimeminit();
++}
++#else
+ void
+ meminit(void)
+ {
+@@ -111,9 +125,10 @@
+ 	 * now we know the real memory regions, unmap
+ 	 * everything above INITMAP and map again with
+ 	 * the proper sizes.
++	 * (KMAPINIT: KZERO-ikkunan yläpuolelta; ikkunaa kmapram() ei toista.)
+ 	 */
+ 	coherence();
+-	for(va = INITMAP+KZERO; va != 0; va += PGLSZ(1))
++	for(va = KMAPINIT+KZERO; va != 0; va += PGLSZ(1))
+ 		((uintptr*)L1)[PTL1X(va, 1)] = 0;
+ 	flushtlb();
+ 
+@@ -143,3 +158,4 @@
+ 	for(i=0; i<nelem(conf.mem); i++)
+ 		conf.mem[i].npage = (conf.mem[i].limit - conf.mem[i].base)/BY2PG;
+ }
++#endif
+--- a/sys/src/9/bcm64/mem.h
++++ b/sys/src/9/bcm64/mem.h
+@@ -59,10 +59,25 @@
+ 
+ #define	KZERO		(0xFFFFFFFFC0000000ULL)	/* kernel address space */
+ 
+-#define SPINTABLE	(KZERO+0xd8)
+-#define CONFADDR	(KZERO+0x100)
+-#define	REBOOTADDR	(0x1c00)		/* reboot code - physical address */
+-#define	VCBUFFER	(KZERO+0x3400)		/* videocore mailbox buffer */
++/*
++ * PHYSBASE: where the kernel's low area and image start in physical
++ * memory.  The Raspberry Pi firmware boots the kernel at 0x80000 with
++ * the CPU spin table at 0xd8 (PHYSBASE 0).  The UEFI kernel (-DUEFI,
++ * CONF=pi4efi) is entered by the Plan2001 EFI loader under TF-A and
++ * EDK2, which keep 0 - 0x400000; it has the same layout PHYSBASE higher.
++ * KZERO still maps physical 0, so PADDR, KADDR and bus addresses are
++ * unchanged.  The loader claims [PHYSBASE, end) (uefi.c checks it).
++ */
++#ifdef UEFI
++#define	PHYSBASE	0x01000000ULL
++#else
++#define	PHYSBASE	0ULL
++#endif
++
++#define SPINTABLE	(KZERO+PHYSBASE+0xd8)
++#define CONFADDR	(KZERO+PHYSBASE+0x100)
++#define	REBOOTADDR	(PHYSBASE+0x1c00)	/* reboot code - physical address */
++#define	VCBUFFER	(KZERO+PHYSBASE+0x3400)	/* videocore mailbox buffer */
+ 
+ /* temporary identity map for TTBR0 (using only top-level) */
+ #define L1BOT		((L1-L1TOPSIZE)&-BY2PG)
+@@ -74,7 +89,7 @@
+ 
+ #define MACHADDR(n)	(KTZERO-((n)+1)*MACHSIZE)
+ 
+-#define	KTZERO		(KZERO+0x80000)		/* kernel text start */
++#define	KTZERO		(KZERO+PHYSBASE+0x80000)	/* kernel text start */
+ 
+ #define	UZERO		0ULL			/* user segment */
+ #define	UTZERO		(UZERO+0x10000)		/* user text start */
+--- a/sys/src/9/bcm64/mkfile
++++ b/sys/src/9/bcm64/mkfile
+@@ -1,11 +1,18 @@
+ CONF=pi3
+-CONFLIST=pi3 pi4
++CONFLIST=pi3 pi4 pi4efi
+ 
+-loadaddr=0xffffffffc0080000
++# pi4efi: Plan2001:n EFI-loaderin a.out-ydin TF-A:n ja EDK2:n alla
++# (-DUEFI: mem.h PHYSBASE, uefi.c).  Oliot ovat muodosta riippuvia:
++# mk clean ennen kuin vaihdetaan pi3/pi4:n ja pi4efi:n välillä.
++UEFI=`{if(~ $CONF *efi) echo -DUEFI}
++loadaddr=`{if(~ $CONF *efi) echo 0xffffffffc1080000; if not echo 0xffffffffc0080000}
++rebootaddr=`{if(~ $CONF *efi) echo 0x01001c00; if not echo 0x1c00}
+ 
+ objtype=arm64
+ </$objtype/mkfile
+ p=9
++CFLAGS=$CFLAGS $UEFI
++AFLAGS=$AFLAGS $UEFI
+ 
+ DEVS=`{rc ../port/mkdevlist $CONF}
+ 
+@@ -53,6 +60,7 @@
+ 	trap.$O\
+ 	$CONF.root.$O\
+ 	$CONF.rootc.$O\
++	`{if(~ $CONF *efi) echo bootinfo.$O uefi.$O}\
+ 	$DEVS\
+ 	$PORT\
+ 
+@@ -71,8 +79,15 @@
+ 9:V: $p$CONF s$p$CONF
+ 
+ $p$CONF:DQ:	$OBJ $CONF.$O $LIB
+-	echo '# linking raw kernel'	# H6: no headers, data segment aligned
+-	$LD -s -l -o $target -H6 -R0x10000 -T$loadaddr $prereq
++	if(~ $CONF *efi){
++		# a.out: the EFI loader loads text at entry-KZERO (uefi.c)
++		echo '# linking UEFI a.out kernel'
++		$LD -s -l -o $target -R0x10000 -T$loadaddr $prereq
++	}
++	if not {
++		echo '# linking raw kernel'	# H6: no headers, data segment aligned
++		$LD -s -l -o $target -H6 -R0x10000 -T$loadaddr $prereq
++	}
+ 
+ s$p$CONF:DQ:	$OBJ $CONF.$O $LIB
+ 	echo '# linking kernel with symbols'
+@@ -102,6 +117,11 @@
+ ^($REPCC)\.$O:R:	'../bcm/\1.c'
+ 	$CC $CFLAGS -I. -. ../bcm/$stem1.c
+ 
++# ../port/bootargs.c (BootInfo) and ../bcm/bootargs.c make the same
++# object by two metarules; this kernel's boot arguments are bcm's (DTB).
++bootargs.$O:	../bcm/bootargs.c
++	$CC $CFLAGS -I. -. ../bcm/bootargs.c
++
+ <../boot/bootmkfile
+ <../port/portmkfile
+ <|../port/mkbootrules $CONF
+@@ -109,7 +129,7 @@
+ arch.$O clock.$O fpiarm.$O main.$O mmu.$O screen.$O syscall.$O trap.$O: \
+ 	/$objtype/include/ureg.h
+ trap.$O main.$O: /sys/include/tos.h
+-l.$O cache.v8.$O mmu.$O mem.$O rebootcode.$O: mem.h
++l.$O cache.v8.$O mmu.$O mem.$O rebootcode.$O uefi.$O: mem.h
+ l.$O cache.v8.$O archbcm3.$O clock.$O fpu.$O trap.$O rebootcode.$O: ../arm64/sysreg.h
+ main.$O: rebootcode.i
+ pcibcm.$O: ../port/pci.h
+@@ -131,7 +151,7 @@
+ 	$LD -l -R1 -s -o $target $prereq
+ 
+ rebootcode.out:		rebootcode.$O cache.v8.$O
+-	$LD -l -H6 -R1 -T0x1c00 -s -o $target $prereq
++	$LD -l -H6 -R1 -T$rebootaddr -s -o $target $prereq
+ 
+ $CONF.clean:
+ 	rm -rf $p$CONF s$p$CONF errstr.h screen.h dwcotg.h $CONF.c boot$CONF.c
