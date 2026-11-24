@@ -29,16 +29,30 @@ fbe32(uchar *p)
 	return (ulong)p[0]<<24 | (ulong)p[1]<<16 | (ulong)p[2]<<8 | p[3];
 }
 
+/*
+ * The FDT helpers' literal arguments go through linkfix() (efi.c): in the
+ * relocated EFI image 7l may address a literal by its link-time address.
+ * linkfix() leaves stack and firmware pointers as they are.
+ */
 static int
 fcmp(char *a, char *b)
 {
+	b = linkfix(b);
 	return strlen(a)==strlen(b) && memcmp(a,b,strlen(a))==0;
 }
 
 static int
 fncmp(char *a, char *b, int n)
 {
+	b = linkfix(b);
 	return strlen(a)>=n && memcmp(a,b,n)==0;
+}
+
+/* n bytes at v are the literal lit */
+static int
+fmem(uchar *v, char *lit, int n)
+{
+	return memcmp(v, linkfix(lit), n)==0;
 }
 
 static int
@@ -46,6 +60,7 @@ fappend(char *dst, char *src)
 {
 	int n, m;
 
+	src=linkfix(src);
 	n=strlen(dst); m=strlen(src);
 	if(n+m>=256) return 0;
 	memmove(dst+n,src,m+1);
@@ -148,12 +163,12 @@ armfdtvalidate(void *vfdt, uvlong avail)
 				for(pos=0; pos<n;){
 					for(size=pos; size<n && v[size]!=0; size++) ;
 					if(size==n) return "firmware FDT compatible list is unterminated";
-					if(size-pos==12 && memcmp(v+pos,"brcm,bcm2711",12)==0) bcm=1;
+					if(size-pos==12 && fmem(v+pos,"brcm,bcm2711",12)) bcm=1;
 					pos=size+1;
 				}
 			}else if(fcmp(path,"/psci") && fcmp(name,"method")){
-				if(!((n==4 && memcmp(v,"smc\0",4)==0) ||
-				     (n==4 && memcmp(v,"hvc\0",4)==0)))
+				if(!((n==4 && fmem(v,"smc\0",4)) ||
+				     (n==4 && fmem(v,"hvc\0",4))))
 					return "firmware FDT has an invalid PSCI conduit";
 			}else if(fncmp(path,"/cpus/cpu@",10) && fcmp(name,"reg")){
 				if(n==4 || n==8) cpu=1;

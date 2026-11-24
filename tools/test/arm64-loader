@@ -244,7 +244,7 @@ static void actualfdt(char *path){
 /* another board's real tree (QEMU virt): refused as not a BCM2711 */
 static void wrongboard(char *path){
  long n;uchar *b=slurp(path,&n);
- check(armfdtvalidate(b,n)!=nil,"non-BCM2711 FDT refused");
+ {char *why=armfdtvalidate(b,n);check(why && strcmp(why,"firmware FDT does not describe the required BCM2711 board")==0,"non-BCM2711 FDT refused as the wrong board");}
  confaddr="efiplatform=rpi4\nefibootmap=0,0x40000000\nefiscratch=0x1000000,0x80000\n";
  fdtsrc=b;fdtsize=n;pmem();fdtmem(b,n,EfiBootServicesData);check(archinit()!=nil,"rpi4 platform with another board's FDT refused");
  free(b);
@@ -294,6 +294,21 @@ with tempfile.TemporaryDirectory(prefix='arm64-loader-') as td:
         if not dtb.exists():
             raise SystemExit('arm64-loader: pinned %s missing' % dtb)
         args.append('dtb=%s' % dtb)
+    # the device trees pftf's EDK2 forwards on a real Pi 4 (tools/rpi4/uefi-esp's pinned zip, if cached)
+    fwzip = pathlib.Path(os.environ.get('PLAN2001_CACHE', os.path.expanduser('~/.cache/plan2001'))) / 'rpi4-uefi/RPi4_UEFI_Firmware_v1.53.zip'
+    if fwzip.exists():
+        import hashlib, zipfile
+        if hashlib.sha256(fwzip.read_bytes()).hexdigest() != 'ca9973e2a7a546b3df871cfb7382e656829114b6dfa424f40dc67cc90a217d88':
+            raise SystemExit('arm64-loader: %s does not match its pinned SHA256' % fwzip)
+        with zipfile.ZipFile(fwzip) as z:
+            for name in z.namelist():
+                if name.startswith('bcm2711-') and name.endswith('.dtb'):
+                    out = pathlib.Path(td) / ('pftf-' + name)
+                    out.write_bytes(z.read(name))
+                    args.append('dtb=%s' % out)
+                    print('pftf v1.53: %s' % name)
+    else:
+        print('NOT RUN: pftf v1.53 device trees (%s not cached)' % fwzip)
     virt = pathlib.Path(td) / 'virt.dtb'
     if subprocess.run(['qemu-system-aarch64', '-machine', 'virt,dumpdtb=%s' % virt, '-nographic'],
                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 and virt.exists():
