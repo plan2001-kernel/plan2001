@@ -73,15 +73,15 @@ addToLibrary({
 
 	// async: in order with the other calls, and drawterm does not wait
 	js_netsend__proxy: 'async',
-	js_netsend__sig: 'vipi',
-	js_netsend: function(conn, p, n) {
-		Module.browserDrawterm.netsend(conn, HEAPU8.slice(p, p + n));
+	js_netsend__sig: 'viipi',
+	js_netsend: function(conn, gen, p, n) {
+		Module.browserDrawterm.netsend(conn, gen, HEAPU8.slice(p, p + n));
 		Module['_free'](p);
 	},
 
 	js_netclose__proxy: 'async',
-	js_netclose__sig: 'vi',
-	js_netclose: function(conn) {
-		Module.browserDrawterm.netclose(conn);
+	js_netclose__sig: 'vii',
+	js_netclose: function(conn, gen) {
+		Module.browserDrawterm.netclose(conn, gen);
 	},
 });

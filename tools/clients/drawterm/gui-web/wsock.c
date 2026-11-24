@@ -66,10 +66,16 @@ static Conn conns[Nconn];
 static pthread_mutex_t lk = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv = PTHREAD_COND_INITIALIZER;
 
+static int
+isourfd(int fd)
+{
+	return fd >= Fdbase && fd < Fdbase+Nconn;
+}
+
 static Conn*
 conn(int fd)
 {
-	if(fd < Fdbase || fd >= Fdbase+Nconn || conns[fd-Fdbase].state == Free)
+	if(!isourfd(fd) || conns[fd-Fdbase].state == Free)
 		return NULL;
 	return &conns[fd-Fdbase];
 }
@@ -97,6 +103,7 @@ mo_netdata(int i, int gen, unsigned char *p, int n)
 	c = &conns[i];
 	if(c->gen != gen || c->state == Free)
 		goto out;
+	gen = c->gen;
 	if(c->rp == c->wp)
 		c->rp = c->wp = 0;
 	need = c->wp - c->rp + n;
@@ -115,7 +122,7 @@ mo_netdata(int i, int gen, unsigned char *p, int n)
 			c->state = Closed;
 			pthread_cond_broadcast(&cv);
 			pthread_mutex_unlock(&lk);
-			js_netclose(i);
+			js_netclose(i, gen);
 			return;
 		}
 		c->buf = nb;
@@ -174,8 +181,12 @@ wsconnect(int fd, const struct sockaddr *a, socklen_t alen)
 	char *base, path[16], url[512];
 	int i, gen, ok, n;
 
-	if((c = conn(fd)) == NULL)
+	if(!isourfd(fd))
 		return connect(fd, a, alen);
+	if((c = conn(fd)) == NULL){
+		errno = EBADF;
+		return -1;
+	}
 	if(a->sa_family != AF_INET && a->sa_family != AF_INET6){
 		errno = EAFNOSUPPORT;
 		return -1;
@@ -212,7 +223,7 @@ wsconnect(int fd, const struct sockaddr *a, socklen_t alen)
 	ok = c->gen == gen && c->state == Open;
 	pthread_mutex_unlock(&lk);
 	if(!ok){
-		errno = ECONNREFUSED;
+		errno = c->err ? c->err : ECONNREFUSED;
 		return -1;
 	}
 	return 0;
@@ -225,24 +236,28 @@ wsrecv(int fd, void *p, size_t n, int flags)
 	size_t m;
 	int gen;
 
-	if((c = conn(fd)) == NULL)
+	if(!isourfd(fd))
 		return recv(fd, p, n, flags);
+	if((c = conn(fd)) == NULL){
+		errno = EBADF;
+		return -1;
+	}
 	pthread_mutex_lock(&lk);
 	gen = c->gen;
 	while(c->gen == gen && c->rp == c->wp && c->state == Open)
 		pthread_cond_wait(&cv, &lk);
 	m = 0;
-	if(c->gen == gen && c->err){
-		errno = c->err;
-		pthread_mutex_unlock(&lk);
-		return -1;
-	}
-	if(c->gen == gen){
+	if(c->gen == gen && c->rp < c->wp){
+		/* deliver bytes received before a close or an error */
 		m = c->wp - c->rp;
 		if(m > n)
 			m = n;
 		memcpy(p, c->buf + c->rp, m);
 		c->rp += m;
+	} else if(c->gen == gen && c->err){
+		errno = c->err;
+		pthread_mutex_unlock(&lk);
+		return -1;
 	}
 	pthread_mutex_unlock(&lk);
 	return m;	/* 0: closed */
@@ -255,8 +270,12 @@ wssend(int fd, const void *p, size_t n, int flags)
 	void *q;
 	int gen;
 
-	if((c = conn(fd)) == NULL)
+	if(!isourfd(fd))
 		return send(fd, p, n, flags);
+	if((c = conn(fd)) == NULL){
+		errno = EBADF;
+		return -1;
+	}
 	if(n == 0)
 		return 0;
 	if((q = malloc(n)) == NULL){
@@ -277,7 +296,7 @@ wssend(int fd, const void *p, size_t n, int flags)
 	}
 	c->sent += n;
 	/* in order with the other calls to the main thread, and with sent */
-	js_netsend(c - conns, q, n);
+	js_netsend(c - conns, gen, q, n);
 	pthread_mutex_unlock(&lk);
 	return n;
 }
@@ -286,15 +305,22 @@ int
 wsclose(int fd)
 {
 	Conn *c;
-	int i;
+	int i, gen;
 
-	if((c = conn(fd)) == NULL)
+	if(!isourfd(fd))
 		return close(fd);
+	if((c = conn(fd)) == NULL){
+		errno = EBADF;
+		return -1;
+	}
 	i = c - conns;
-	js_netclose(i);
 	pthread_mutex_lock(&lk);
+	gen = c->gen;
 	c->state = Free;
 	c->gen++;
+	pthread_mutex_unlock(&lk);
+	js_netclose(i, gen);
+	pthread_mutex_lock(&lk);
 	pthread_cond_broadcast(&cv);
 	pthread_mutex_unlock(&lk);
 	return 0;
@@ -303,8 +329,12 @@ wsclose(int fd)
 int
 wssetsockopt(int fd, int level, int name, const void *v, socklen_t len)
 {
-	if(conn(fd) == NULL)
+	if(!isourfd(fd))
 		return setsockopt(fd, level, name, v, len);
+	if(conn(fd) == NULL){
+		errno = EBADF;
+		return -1;
+	}
 	return 0;
 }
 
@@ -327,8 +357,12 @@ wsgetsockname(int fd, struct sockaddr *a, socklen_t *alen)
 {
 	Conn *c;
 
-	if((c = conn(fd)) == NULL)
+	if(!isourfd(fd))
 		return getsockname(fd, a, alen);
+	if((c = conn(fd)) == NULL){
+		errno = EBADF;
+		return -1;
+	}
 	return fakeaddr(c, a, alen, 0);
 }
 
@@ -337,7 +371,11 @@ wsgetpeername(int fd, struct sockaddr *a, socklen_t *alen)
 {
 	Conn *c;
 
-	if((c = conn(fd)) == NULL)
+	if(!isourfd(fd))
 		return getpeername(fd, a, alen);
+	if((c = conn(fd)) == NULL){
+		errno = EBADF;
+		return -1;
+	}
 	return fakeaddr(c, a, alen, c->port);
 }

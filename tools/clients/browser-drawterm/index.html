@@ -10,7 +10,6 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); c
 body { display: flex; flex-direction: column; }
 #box { flex: 1; min-height: 0; overflow: hidden; }
 #screen { display: block; outline: none; touch-action: none; }
-#out { margin: 0; padding: 16px; white-space: pre-wrap; word-break: break-all; height: 100%; overflow: auto; box-sizing: border-box; }
 #status { position: fixed; left: 0; top: 0; padding: 4px 12px; color: var(--dim); background: rgba(0,0,0,.6); pointer-events: none; }
 #status:empty { display: none; }
 #bar { display: none; gap: 6px; padding: 6px; background: var(--bar); touch-action: none; user-select: none; -webkit-user-select: none; }
@@ -20,65 +19,64 @@ body { display: flex; flex-direction: column; }
 #kbd { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; resize: none; }
 .hidden { display: none !important; }
 #login { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg); padding: 16px; }
-#login form { display: flex; flex-direction: column; gap: 10px; width: min(320px, 100%); }
+#login form { display: flex; flex-direction: column; gap: 10px; width: min(360px, 100%); }
 #login input, #login button { font: 16px monospace; padding: 10px; border-radius: 6px; border: 1px solid var(--key); background: var(--bar); color: var(--fg); }
 #login button { background: var(--on); color: #000; border: 0; }
+#login button:disabled { background: var(--key); color: var(--dim); }
 #login h1 { font: 20px monospace; margin: 0 0 6px; }
+#login .dest { color: var(--dim); font-size: 13px; line-height: 1.6; }
+#login .dest b { color: var(--fg); font-weight: normal; }
 </style>
 </head>
 <body>
-<div id="box"><canvas id="screen" tabindex="0" class="hidden"></canvas><pre id="out" class="hidden"></pre></div>
+<div id="box"><canvas id="screen" tabindex="0" class="hidden"></canvas></div>
 <div id="bar">
 	<button data-b="1" class="on">1</button><button data-b="2">2</button><button data-b="4">3</button>
 	<button id="esc">Esc</button><button id="showkbd">kbd</button>
 </div>
 <textarea id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
-<div id="login" class="hidden"><form>
+<div id="login"><form>
 	<h1>Drawterm</h1>
-	<input id="user" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="user">
+	<div class="dest">
+		CPU <b id="cpu">-</b><br>
+		Auth <b id="auth">-</b><br>
+		<span>configured by this gateway</span>
+	</div>
+	<input id="user" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="user" value="glenda">
 	<input id="pass" type="password" autocomplete="current-password" placeholder="password">
-	<button>Connect</button>
+	<button disabled>Connect</button>
 </form></div>
-<div id="status">loading drawterm...</div>
+<div id="status">loading gateway configuration...</div>
 <script src="page.js"></script>
 <script>
-// Browser Drawterm.  Query: ?cpu=HOST&auth=HOST&user=NAME, or repeated
-// ?a=flag&a=value for arbitrary drawterm arguments.  The password is read
-// from #pass=... (never sent in a request) or the login form.  ?start=1
-// starts without one (drawterm then prompts for what it needs).
+// Browser Drawterm.  CPU and auth destinations come from the gateway's
+// allowlist (/drawterm.json), never from the URL.  The user and password are
+// entered here; the password is handed to drawterm's environment and is not
+// put in the URL, history, WebSocket or logs.
 (() => {
-const q = new URLSearchParams(location.search);
-const frag = new URLSearchParams(location.hash.slice(1));
-let pass = frag.get('pass') || null;
-let user = q.get('user') || 'glenda';
-if (location.hash)
-	history.replaceState(null, '', location.pathname + location.search);
-const args = q.getAll('a').length ? q.getAll('a') : (() => {
-	const cpu = q.get('cpu') || '127.0.0.1';
-	const auth = q.get('auth') || cpu;
-	return ['-h', cpu, '-a', auth.includes('!') ? auth : `tcp!${auth}!567`, '-u', user];
-})();
-for (let i = 0; i + 1 < args.length; i++)
-	if (args[i] === '-u')
-		user = args[i + 1];
-const textonly = args.includes('-G');
-const touchui = q.has('touch') ? q.get('touch') !== '0' : matchMedia('(pointer: coarse)').matches;
-const auto = q.get('start') === '1' || pass !== null;
+const touchui = matchMedia('(pointer: coarse)').matches;
 const box = document.getElementById('box');
 const canvas = document.getElementById('screen');
-const out = document.getElementById('out');
 const bar = document.getElementById('bar');
 const kbd = document.getElementById('kbd');
 const status = document.getElementById('status');
-(textonly ? out : canvas).classList.remove('hidden');
-if (touchui && !textonly)
+const login = document.getElementById('login');
+const form = login.querySelector('form');
+const uin = document.getElementById('user');
+const pin = document.getElementById('pass');
+const connect = form.querySelector('button');
+const cpuel = document.getElementById('cpu');
+const authel = document.getElementById('auth');
+canvas.classList.remove('hidden');
+if (touchui)
 	bar.classList.add('show');
 
 function setstatus(t) {
 	status.textContent = t;
 	if (t) console.log('drawterm: ' + t);
 }
-function show(t) { out.textContent += t + '\n'; console.log(t); }
+const logs = [];
+function show(t) { logs.push(String(t)); console.log(t); }
 function push(type, a, b, c) { mo.input(type, a, b, c); }
 const Evmouse = 1, Evkey = 2, Evresize = 3;
 
@@ -202,37 +200,86 @@ function resized() {
 window.addEventListener('resize', resized);
 new ResizeObserver(resized).observe(box);
 
-const ws = q.get('ws') || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+const ws = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 const mo = BrowserDrawterm({
 	canvas,
 	size,
 	dpr: () => dpr,
-	log: t => console.log('drawterm: ' + t),
-	onready: () => setstatus(textonly ? 'drawterm ' + args.join(' ') : 'connecting...'),
+	log: t => { logs.push(String(t)); console.log('drawterm: ' + t); },
+	onready: () => setstatus('connecting to ' + dest.cpu + '...'),
 	onflush: n => {
 		if (n !== 1) return;
 		setstatus('');
 		console.log('DRAWTERM-FLUSH first');
-		if (!touchui && !textonly) canvas.focus();
+		if (!touchui) canvas.focus();
 	},
 });
+let config = null, dest = { cpu: '-', auth: '-' };
+let args = [], secret = null, started = false;
+
 // test hooks: a browser test can check the page side without guessing internals
 window.drawterm = {
 	push,
-	args,
+	get args() { return args; },
+	get config() { return config; },
+	get started() { return started; },
 	get flushes() { return mo.flushes; },
+	get resizes() { return mo.resizes; },
 	get inputs() { return mo.inputs; },
 	get lastInput() { return mo.lastInput; },
 	get connections() { return mo.connections; },
+	get logs() { return logs; },
 	size,
 };
 
+function portok(n) { return Number.isInteger(n) && n >= 1 && n <= 65535; }
+function validService(s) {
+	return s && typeof s.host === 'string' && s.host.length > 0 &&
+		portok(s.port) && portok(s.logical);
+}
+function serviceLabel(s) {
+	const t = `${s.host}:${s.port}`;
+	return s.logical === s.port ? t : `${t} (gateway :${s.logical})`;
+}
+function makeArgs(user) {
+	return [
+		'-h', `tcp!${config.cpu.host}!${config.cpu.logical}`,
+		'-a', `tcp!${config.auth.host}!${config.auth.logical}`,
+		'-u', user,
+	];
+}
+
+async function loadconfig() {
+	let r;
+	try {
+		r = await fetch('drawterm.json', { cache: 'no-store', credentials: 'same-origin' });
+	} catch (e) {
+		throw new Error('could not fetch gateway configuration');
+	}
+	if (!r.ok)
+		throw new Error('gateway configuration unavailable (' + r.status + ')');
+	const c = await r.json();
+	if (!c || !validService(c.cpu) || !validService(c.auth))
+		throw new Error('gateway configuration is incomplete');
+	config = c;
+	dest.cpu = serviceLabel(c.cpu);
+	dest.auth = serviceLabel(c.auth);
+	cpuel.textContent = dest.cpu;
+	authel.textContent = dest.auth;
+	connect.disabled = false;
+	setstatus('');
+	uin.focus();
+}
+
 window.Module = {
 	browserDrawterm: mo,
-	arguments: args,
+	arguments: [],
 	preRun: [m => {
-		if (pass) m.ENV.PASS = pass;
-		m.ENV.USER = user;
+		if (secret !== null) {
+			m.ENV.PASS = secret;
+			secret = null;
+		}
+		m.ENV.USER = uin.value.trim() || 'glenda';
 		m.ENV.DRAWTERM_WS = ws;
 	}],
 	print: show,
@@ -240,36 +287,40 @@ window.Module = {
 	onExit: code => { setstatus('drawterm exited (' + code + ')'); console.log('DRAWTERM-EXIT ' + code); },
 };
 
-// drawterm.js is fetched by the page (and then by Emscripten's workers)
+// drawterm.js is fetched only after the login form is submitted (and then by
+// Emscripten's workers)
 function start() {
+	if (started)
+		return;
+	started = true;
+	Module.arguments = args;
 	const sc = document.createElement('script');
 	sc.src = 'drawterm.js';
 	sc.onerror = () => setstatus('could not load drawterm.js');
 	document.body.appendChild(sc);
 }
 
-if (auto) {
+form.addEventListener('submit', e => {
+	e.preventDefault();
+	if (!config || !pin.value)
+		return;
+	const user = uin.value.trim() || 'glenda';
+	if (/[\x00-\x1f\x7f]/.test(user)) {
+		setstatus('invalid user name');
+		return;
+	}
+	args = makeArgs(user);
+	secret = pin.value;
+	pin.value = '';
+	login.classList.add('hidden');
+	setstatus('loading drawterm...');
 	start();
-} else {
-	const login = document.getElementById('login');
-	const uin = document.getElementById('user'), pin = document.getElementById('pass');
-	uin.value = user;
-	login.classList.remove('hidden');
-	setstatus('');
-	(user ? pin : uin).focus();
-	login.querySelector('form').addEventListener('submit', e => {
-		e.preventDefault();
-		if (!pin.value) return;
-		user = uin.value || 'glenda';
-		pass = pin.value;
-		pin.value = '';
-		if (!q.getAll('a').length)
-			args[args.indexOf('-u') + 1] = user;
-		login.classList.add('hidden');
-		setstatus('loading drawterm...');
-		start();
-	});
-}
+});
+
+loadconfig().catch(e => {
+	setstatus(e.message);
+	connect.disabled = true;
+});
 
 if (!crossOriginIsolated)
 	setstatus('not cross-origin isolated: serve with the bundled gateway on localhost or HTTPS');

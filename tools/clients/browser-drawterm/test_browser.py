@@ -1,16 +1,23 @@
 #!/usr/bin/env python3
-"""Drive the built page in headless Chromium through the DevTools protocol."""
-import json
+"""Drive the built page in headless Chromium and report its harness results.
+
+Chromium's DevTools page target does not navigate reliably in this
+environment, and `--dump-dom` never returns while the page holds a live
+WebSocket.  Testisivu lähettää siksi tuloksensa POST-pyyntönä paikalliseen
+vastaanottimeen, ja Chromium lopetetaan tuloksen saavuttua.  Set DRAWTERM_TEST_TLS=1 to run the gateway as HTTPS/WSS
+with a temporary self-signed certificate (Chromium runs with
+--ignore-certificate-errors for the local test only).
+"""
+import http.server
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-import urllib.request
-
-from wsclient import WSClient
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FAILS = 0
@@ -46,34 +53,73 @@ def wait_port(port, timeout=10):
     return False
 
 
-def http_json(url):
-    with urllib.request.urlopen(url, timeout=5) as r:
-        return json.load(r)
+def make_cert(tmp):
+    key = os.path.join(tmp, "key.pem")
+    cert = os.path.join(tmp, "cert.pem")
+    subprocess.check_call([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", key, "-out", cert, "-days", "1", "-subj", "/CN=127.0.0.1",
+        "-addext", "subjectAltName=IP:127.0.0.1",
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return cert, key
 
 
-class CDP:
-    def __init__(self, url):
-        self.ws = WSClient(url, origin="http://127.0.0.1")
-        self.n = 0
+class Hold(threading.Thread):
+    """Accept CPU/auth connections and never speak rcpu."""
 
-    def cmd(self, method, **params):
-        self.n += 1
-        want = self.n
-        self.ws.send(json.dumps({"id": want, "method": method, "params": params}))
-        while True:
-            op, payload = self.ws.recv()
-            if op != 0x1:
+    def __init__(self, port):
+        super().__init__(daemon=True)
+        self.s = socket.socket()
+        self.s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.s.bind(("127.0.0.1", port))
+        self.s.listen()
+        self.s.settimeout(0.2)
+        self.clients = []
+        self.stop = False
+
+    def run(self):
+        while not self.stop:
+            try:
+                c, _ = self.s.accept()
+                self.clients.append(c)
+            except OSError:
                 continue
-            m = json.loads(payload)
-            if m.get("id") == want:
-                if "error" in m:
-                    raise RuntimeError(m["error"])
-                return m.get("result", {})
 
-    def eval(self, expr):
-        r = self.cmd("Runtime.evaluate", expression=expr, returnByValue=True,
-                     awaitPromise=True)
-        return r.get("result", {}).get("value")
+    def close(self):
+        self.stop = True
+        for c in self.clients:
+            try:
+                c.close()
+            except OSError:
+                pass
+        self.s.close()
+
+
+class Result(http.server.BaseHTTPRequestHandler):
+    """Ottaa vastaan testisivun POST-tuloksen (CORS ja CORP, koska sivu on COEP)."""
+
+    results = []
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Cross-Origin-Resource-Policy", "cross-origin")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length", "0"))
+        Result.results.append(self.rfile.read(n).decode("utf-8", "replace"))
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
+
+    def log_message(self, *a):
+        pass
 
 
 def main():
@@ -87,173 +133,92 @@ def main():
         print("test_browser: build/site/drawterm.wasm is missing (run build.sh)",
               file=sys.stderr)
         return 1
+    tls = os.environ.get("DRAWTERM_TEST_TLS") == "1"
     tcp_port = freeport()
     srv_port = freeport()
-    cdp_port = freeport()
+    res_port = freeport()
     tmp = tempfile.mkdtemp(prefix="drawterm-browser-")
+    harness = os.path.join(site, "__test_harness.html")
+    scheme = "https" if tls else "http"
+    cert = key = None
+    if tls:
+        cert, key = make_cert(tmp)
 
-    # a server that accepts the CPU/auth connection and never speaks rcpu
-    hold = socket.socket()
-    hold.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    hold.bind(("127.0.0.1", tcp_port))
-    hold.listen()
-    hold.settimeout(0.2)
-    stop = False
+    hold = Hold(tcp_port)
+    hold.start()
+    # Tulosvastaanotin on aina loopbackin HTTP:tä; https-sivulta se on
+    # sallittu, koska 127.0.0.1 on potentiaalisesti luotettu alkuperä.
+    Result.results = []
+    res = http.server.ThreadingHTTPServer(("127.0.0.1", res_port), Result)
+    threading.Thread(target=res.serve_forever, daemon=True).start()
 
-    srv = subprocess.Popen([
+    with open(os.path.join(HERE, "test_harness.html"), "rb") as f:
+        harness_body = f.read()
+    with open(harness, "wb") as f:
+        f.write(harness_body)
+
+    srvargs = [
         sys.executable, os.path.join(HERE, "serve.py"),
         "--port", str(srv_port),
         "--allow", f"17019=127.0.0.1:{tcp_port}",
         "--allow", f"567=127.0.0.1:{tcp_port}",
-    ])
-    url = (f"http://127.0.0.1:{srv_port}/?start=1"
-           "&a=-h&a=127.0.0.1&a=-a&a=tcp%21127.0.0.1%21567&a=-u&a=glenda")
-    proc = subprocess.Popen([
-        chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
-        "--disable-dev-shm-usage", f"--remote-debugging-port={cdp_port}",
-        "--remote-allow-origins=*",
-        f"--user-data-dir={tmp}", "--window-size=1024,768", url,
-    ], start_new_session=True)
+    ]
+    if tls:
+        srvargs += ["--cert", cert, "--key", key,
+                    "--origin", f"https://127.0.0.1:{srv_port}"]
+    srv = subprocess.Popen(srvargs, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+    res_url = f"http://127.0.0.1:{res_port}/result"
+    url = f"{scheme}://127.0.0.1:{srv_port}/__test_harness.html?result={res_url}"
+    ch = None
     try:
         if not wait_port(srv_port):
             bad("gateway did not start")
             return 1
-        if not wait_port(cdp_port, 20):
-            bad("Chromium DevTools did not start")
-            return 1
-        target = None
-        for _ in range(100):
-            try:
-                tabs = http_json(f"http://127.0.0.1:{cdp_port}/json/list")
-            except OSError:
-                time.sleep(0.1)
-                continue
-            for t in tabs:
-                if t.get("type") == "page" and t.get("url", "").startswith(url[:40]):
-                    target = t
-                    break
-            if target:
-                break
-            time.sleep(0.1)
-        if not target:
-            bad("no page target")
-            return 1
-        cdp = CDP(target["webSocketDebuggerUrl"])
-        cdp.cmd("Runtime.enable")
-
-        deadline = time.time() + 40
-        ready = None
-        while time.time() < deadline:
-            try:
-                ready = cdp.eval("window.drawterm ? {flushes:drawterm.flushes, "
-                                 "isolated:crossOriginIsolated, "
-                                 "w:document.getElementById('screen').width, "
-                                 "h:document.getElementById('screen').height} : null")
-            except (RuntimeError, OSError):
-                ready = None
-            if ready and ready.get("flushes", 0) > 0:
-                break
+        ch = subprocess.Popen([
+            chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+            "--disable-dev-shm-usage", "--ignore-certificate-errors",
+            "--window-size=1024,768", url,
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        end = time.time() + 120
+        while time.time() < end and not Result.results and ch.poll() is None:
             time.sleep(0.2)
-        if not ready or ready.get("flushes", 0) < 1:
-            bad("drawterm.wasm did not draw to the canvas")
+        if not Result.results:
+            bad("harness produced no result")
             return 1
-        ok("drawterm.wasm starts and flushes the canvas")
-        if ready.get("isolated"):
-            ok("page is cross-origin isolated")
-        else:
-            bad("page is not cross-origin isolated")
-        if ready.get("w", 0) > 0 and ready.get("h", 0) > 0:
-            ok(f"canvas is {ready['w']}x{ready['h']}")
-        else:
-            bad("canvas has no size")
-
-        pixels = cdp.eval("""(() => {
-            const c = document.getElementById('screen');
-            const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-            let n = 0;
-            for (let i = 0; i < d.length; i += 4)
-                if (d[i] || d[i+1] || d[i+2])
-                    n++;
-            return n;
-        })()""")
-        if pixels and pixels > 1000:
-            ok(f"canvas contains {pixels} non-black pixels")
-        else:
-            bad("canvas is blank")
-
-        beforeflush = cdp.eval("window.drawterm.flushes") or 0
-        cdp.cmd("Emulation.setDeviceMetricsOverride", width=900, height=700,
-                deviceScaleFactor=1, mobile=False)
-        deadline = time.time() + 5
-        resized = False
-        while time.time() < deadline:
-            li = cdp.eval("window.drawterm.lastInput")
-            if li and li[0] == 3:
-                resized = True
-                break
-            time.sleep(0.1)
-        if resized:
-            ok("viewport resize reaches drawterm as an input event")
-        else:
-            bad("resize did not reach drawterm")
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            if (cdp.eval("window.drawterm.flushes") or 0) > beforeflush:
-                break
-            time.sleep(0.1)
-        if (cdp.eval("window.drawterm.flushes") or 0) > beforeflush:
-            ok("resize causes another framebuffer flush")
-        else:
-            bad("resize did not flush the framebuffer")
-
-        before = cdp.eval("window.drawterm.inputs") or 0
-        cdp.eval("""(() => {
-            const c = document.getElementById('screen');
-            const r = c.getBoundingClientRect();
-            const ev = (t, x, y, b) => c.dispatchEvent(new PointerEvent(t, {
-                bubbles: true, clientX: r.left + x, clientY: r.top + y,
-                pointerId: 1, pointerType: 'mouse', buttons: b }));
-            ev('pointermove', 20, 20, 0);
-            ev('pointerdown', 20, 20, 1);
-            ev('pointerup', 20, 20, 1);
-            c.dispatchEvent(new KeyboardEvent('keydown', {key: 'a', bubbles: true}));
-            c.dispatchEvent(new KeyboardEvent('keyup', {key: 'a', bubbles: true}));
-        })()""")
-        deadline = time.time() + 5
-        after = before
-        while time.time() < deadline:
-            after = cdp.eval("window.drawterm.inputs") or 0
-            if after >= before + 5:
-                break
-            time.sleep(0.1)
-        if after >= before + 5:
-            ok(f"mouse and keyboard reach drawterm ({after - before} events)")
-        else:
-            bad(f"input events did not reach drawterm ({after - before})")
-
-        if (cdp.eval("window.drawterm.connections") or 0) >= 1:
-            ok("page opened the allowlisted WebSocket")
-        else:
-            bad("page did not open the WebSocket")
-        cdp.ws.close()
+        result = Result.results[0].strip()
+        for line in result.splitlines():
+            if line.startswith("ok: "):
+                ok(line[4:])
+            elif line.startswith("FAIL: "):
+                bad(line[6:])
+            elif line not in ("PENDING", "HARNESS-DONE", ""):
+                print(line)
+        if "HARNESS-DONE" not in result:
+            bad("harness did not finish")
     finally:
-        try:
-            os.killpg(proc.pid, 15)
-        except OSError:
-            pass
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        if ch is not None:
             try:
-                os.killpg(proc.pid, 9)
-            except OSError:
-                pass
+                os.killpg(ch.pid, signal.SIGTERM)
+                ch.wait(timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(ch.pid, signal.SIGKILL)
+                except OSError:
+                    pass
         srv.terminate()
         try:
             srv.wait(timeout=5)
         except subprocess.TimeoutExpired:
             srv.kill()
+        res.shutdown()
+        res.server_close()
         hold.close()
+        try:
+            os.unlink(harness)
+        except OSError:
+            pass
         shutil.rmtree(tmp, ignore_errors=True)
     return 1 if FAILS else 0
 

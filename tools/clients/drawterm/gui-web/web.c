@@ -26,6 +26,8 @@ static char *snarfbuf;
 void
 guimain(void)
 {
+	/* initialise the canvas before any remote /dev/draw attach */
+	screeninit();
 	cpubody();
 }
 

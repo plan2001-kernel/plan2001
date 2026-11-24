@@ -24,8 +24,8 @@ void	js_resize(int w, int h);
 void	js_flush(void *base, int stride, int x0, int y0, int x1, int y1);	/* XBGR32 */
 void	js_cursor(unsigned char *rgba, int hx, int hy);	/* 16x16 */
 void	js_netopen(int conn, int gen, char *url);	/* a WebSocket */
-void	js_netsend(int conn, void *p, int n);	/* frees p */
-void	js_netclose(int conn);
+void	js_netsend(int conn, int gen, void *p, int n);	/* frees p */
+void	js_netclose(int conn, int gen);
 
 /* exports: from the page */
 void	mo_input(int type, int a, int b, int c);
