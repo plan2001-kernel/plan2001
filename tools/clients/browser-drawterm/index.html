@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=overlays-content">
+<title>Drawterm</title>
+<style>
+:root { --bg: #000; --fg: #d8d8d8; --dim: #888; --bar: #1c1c1c; --key: #333; --on: #4a9a9a; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font: 14px/1.4 monospace; }
+body { display: flex; flex-direction: column; }
+#box { flex: 1; min-height: 0; overflow: hidden; }
+#screen { display: block; outline: none; touch-action: none; }
+#out { margin: 0; padding: 16px; white-space: pre-wrap; word-break: break-all; height: 100%; overflow: auto; box-sizing: border-box; }
+#status { position: fixed; left: 0; top: 0; padding: 4px 12px; color: var(--dim); background: rgba(0,0,0,.6); pointer-events: none; }
+#status:empty { display: none; }
+#bar { display: none; gap: 6px; padding: 6px; background: var(--bar); touch-action: none; user-select: none; -webkit-user-select: none; }
+#bar.show { display: flex; }
+#bar button { flex: 1; min-width: 0; height: 40px; border: 0; border-radius: 6px; background: var(--key); color: var(--fg); font: 16px monospace; }
+#bar button.on { background: var(--on); color: #000; }
+#kbd { position: fixed; left: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; padding: 0; font-size: 16px; resize: none; }
+.hidden { display: none !important; }
+#login { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: var(--bg); padding: 16px; }
+#login form { display: flex; flex-direction: column; gap: 10px; width: min(320px, 100%); }
+#login input, #login button { font: 16px monospace; padding: 10px; border-radius: 6px; border: 1px solid var(--key); background: var(--bar); color: var(--fg); }
+#login button { background: var(--on); color: #000; border: 0; }
+#login h1 { font: 20px monospace; margin: 0 0 6px; }
+</style>
+</head>
+<body>
+<div id="box"><canvas id="screen" tabindex="0" class="hidden"></canvas><pre id="out" class="hidden"></pre></div>
+<div id="bar">
+	<button data-b="1" class="on">1</button><button data-b="2">2</button><button data-b="4">3</button>
+	<button id="esc">Esc</button><button id="showkbd">kbd</button>
+</div>
+<textarea id="kbd" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+<div id="login" class="hidden"><form>
+	<h1>Drawterm</h1>
+	<input id="user" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="user">
+	<input id="pass" type="password" autocomplete="current-password" placeholder="password">
+	<button>Connect</button>
+</form></div>
+<div id="status">loading drawterm...</div>
+<script src="page.js"></script>
+<script>
+// Browser Drawterm.  Query: ?cpu=HOST&auth=HOST&user=NAME, or repeated
+// ?a=flag&a=value for arbitrary drawterm arguments.  The password is read
+// from #pass=... (never sent in a request) or the login form.  ?start=1
+// starts without one (drawterm then prompts for what it needs).
+(() => {
+const q = new URLSearchParams(location.search);
+const frag = new URLSearchParams(location.hash.slice(1));
+let pass = frag.get('pass') || null;
+let user = q.get('user') || 'glenda';
+if (location.hash)
+	history.replaceState(null, '', location.pathname + location.search);
+const args = q.getAll('a').length ? q.getAll('a') : (() => {
+	const cpu = q.get('cpu') || '127.0.0.1';
+	const auth = q.get('auth') || cpu;
+	return ['-h', cpu, '-a', auth.includes('!') ? auth : `tcp!${auth}!567`, '-u', user];
+})();
+for (let i = 0; i + 1 < args.length; i++)
+	if (args[i] === '-u')
+		user = args[i + 1];
+const textonly = args.includes('-G');
+const touchui = q.has('touch') ? q.get('touch') !== '0' : matchMedia('(pointer: coarse)').matches;
+const auto = q.get('start') === '1' || pass !== null;
+const box = document.getElementById('box');
+const canvas = document.getElementById('screen');
+const out = document.getElementById('out');
+const bar = document.getElementById('bar');
+const kbd = document.getElementById('kbd');
+const status = document.getElementById('status');
+(textonly ? out : canvas).classList.remove('hidden');
+if (touchui && !textonly)
+	bar.classList.add('show');
+
+function setstatus(t) {
+	status.textContent = t;
+	if (t) console.log('drawterm: ' + t);
+}
+function show(t) { out.textContent += t + '\n'; console.log(t); }
+function push(type, a, b, c) { mo.input(type, a, b, c); }
+const Evmouse = 1, Evkey = 2, Evresize = 3;
+
+let dpr = window.devicePixelRatio || 1;
+function size() {
+	dpr = window.devicePixelRatio || 1;
+	return [Math.max(64, Math.floor(box.clientWidth * dpr)),
+		Math.max(64, Math.floor(box.clientHeight * dpr))];
+}
+
+// DOM buttons 1 left, 2 right, 4 middle; Plan 9 1 left, 2 middle, 4 right,
+// 8 and 16 the wheel.  A touch is the button chosen in the bar, for one touch.
+let buttons = 0, mx = 0, my = 0, touchb = 1;
+function p9buttons(b) { return (b & 1) | (b & 4 ? 2 : 0) | (b & 2 ? 4 : 0); }
+function mouse(e) {
+	const r = canvas.getBoundingClientRect();
+	mx = Math.round((e.clientX - r.left) * canvas.width / Math.max(1, r.width));
+	my = Math.round((e.clientY - r.top) * canvas.height / Math.max(1, r.height));
+	buttons = e.pointerType === 'touch' ? (e.buttons ? touchb : 0) : p9buttons(e.buttons);
+	push(Evmouse, mx, my, buttons);
+}
+function choose(b) {
+	touchb = b;
+	for (const x of bar.querySelectorAll('[data-b]'))
+		x.classList.toggle('on', +x.dataset.b === b);
+}
+canvas.addEventListener('pointermove', mouse);
+canvas.addEventListener('pointerdown', e => {
+	if (e.pointerType !== 'touch')
+		canvas.focus();
+	canvas.setPointerCapture(e.pointerId);
+	mouse(e);
+	e.preventDefault();
+});
+canvas.addEventListener('pointerup', e => {
+	mouse(e);
+	if (e.pointerType === 'touch')
+		choose(1);
+	e.preventDefault();
+});
+canvas.addEventListener('pointercancel', () => { push(Evmouse, mx, my, buttons = 0); choose(1); });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('wheel', e => {
+	const w = e.deltaY < 0 ? 8 : 16;
+	push(Evmouse, mx, my, buttons | w);
+	push(Evmouse, mx, my, buttons);
+	e.preventDefault();
+}, { passive: false });
+
+// KeyboardEvent.key to Plan 9 runes (keyboard.h)
+const KF = 0xF000, Spec = 0xF800;
+const special = {
+	Enter: 10, Backspace: 8, Tab: 9, Escape: 0x1b, Delete: 0x7f,
+	ArrowUp: KF|0x0E, ArrowDown: Spec|0x00, ArrowLeft: KF|0x11, ArrowRight: KF|0x12,
+	Home: KF|0x0D, End: KF|0x18, PageUp: KF|0x0F, PageDown: KF|0x13, Insert: KF|0x14,
+	PrintScreen: KF|0x10, ScrollLock: KF|0x19, Pause: Spec|0x61,
+	Shift: KF|0x16, Control: KF|0x17, Alt: KF|0x15, AltGraph: Spec|0x67,
+	CapsLock: Spec|0x64, NumLock: Spec|0x65, Meta: Spec|0x68,
+};
+for (let i = 1; i <= 12; i++) special['F' + i] = KF | i;
+function rune(e) {
+	if (e.key in special) return special[e.key];
+	if ([...e.key].length !== 1) return 0;
+	let r = e.key.codePointAt(0);
+	if (e.ctrlKey && !e.altKey && r >= 0x40 && r < 0x80) r &= 0x1f;
+	return r;
+}
+function tap(r) { push(Evkey, r, 1, 0); push(Evkey, r, 0, 0); }
+function key(e, down) {
+	const r = rune(e);
+	if (!r) return;
+	push(Evkey, r, down ? 1 : 0, 0);
+	e.preventDefault();
+}
+canvas.addEventListener('keydown', e => key(e, true));
+canvas.addEventListener('keyup', e => key(e, false));
+
+// on-screen keyboard: a hidden textarea; phone keyboards send no usable key
+// events, so what they type is read from its value, reset to one space
+const SENT = ' ';
+let composing = false;
+function kbdreset() { kbd.value = SENT; kbd.setSelectionRange(SENT.length, SENT.length); }
+function kbdread() {
+	const v = kbd.value;
+	if (v.length < SENT.length)
+		for (let i = v.length; i < SENT.length; i++) tap(8);
+	else
+		for (const c of v.startsWith(SENT) ? v.slice(SENT.length) : v) tap(c.codePointAt(0));
+	kbdreset();
+}
+kbd.addEventListener('input', () => { if (!composing) kbdread(); });
+kbd.addEventListener('compositionstart', () => { composing = true; });
+kbd.addEventListener('compositionend', () => { composing = false; kbdread(); });
+kbd.addEventListener('keydown', e => {
+	if (e.key === 'Unidentified' || e.key === 'Backspace' || e.key === 'Enter' || e.isComposing)
+		return;
+	if (e.key in special || e.ctrlKey) {
+		const r = rune(e);
+		if (r) { tap(r); e.preventDefault(); }
+	}
+});
+kbdreset();
+for (const b of bar.querySelectorAll('button'))
+	b.addEventListener('pointerdown', e => e.preventDefault());
+bar.addEventListener('click', e => {
+	const b = e.target.closest('button');
+	if (!b) return;
+	if (b.dataset.b) choose(+b.dataset.b === touchb ? 1 : +b.dataset.b);
+	else if (b.id === 'esc') tap(0x1b);
+	else if (b.id === 'showkbd') {
+		if (document.activeElement === kbd) kbd.blur();
+		else { kbdreset(); kbd.focus(); }
+	}
+});
+
+let resizing;
+function resized() {
+	clearTimeout(resizing);
+	resizing = setTimeout(() => { const [w, h] = size(); push(Evresize, w, h, 0); }, 150);
+}
+window.addEventListener('resize', resized);
+new ResizeObserver(resized).observe(box);
+
+const ws = q.get('ws') || `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
+const mo = BrowserDrawterm({
+	canvas,
+	size,
+	dpr: () => dpr,
+	log: t => console.log('drawterm: ' + t),
+	onready: () => setstatus(textonly ? 'drawterm ' + args.join(' ') : 'connecting...'),
+	onflush: n => {
+		if (n !== 1) return;
+		setstatus('');
+		console.log('DRAWTERM-FLUSH first');
+		if (!touchui && !textonly) canvas.focus();
+	},
+});
+// test hooks: a browser test can check the page side without guessing internals
+window.drawterm = {
+	push,
+	args,
+	get flushes() { return mo.flushes; },
+	get inputs() { return mo.inputs; },
+	get lastInput() { return mo.lastInput; },
+	get connections() { return mo.connections; },
+	size,
+};
+
+window.Module = {
+	browserDrawterm: mo,
+	arguments: args,
+	preRun: [m => {
+		if (pass) m.ENV.PASS = pass;
+		m.ENV.USER = user;
+		m.ENV.DRAWTERM_WS = ws;
+	}],
+	print: show,
+	printErr: show,
+	onExit: code => { setstatus('drawterm exited (' + code + ')'); console.log('DRAWTERM-EXIT ' + code); },
+};
+
+// drawterm.js is fetched by the page (and then by Emscripten's workers)
+function start() {
+	const sc = document.createElement('script');
+	sc.src = 'drawterm.js';
+	sc.onerror = () => setstatus('could not load drawterm.js');
+	document.body.appendChild(sc);
+}
+
+if (auto) {
+	start();
+} else {
+	const login = document.getElementById('login');
+	const uin = document.getElementById('user'), pin = document.getElementById('pass');
+	uin.value = user;
+	login.classList.remove('hidden');
+	setstatus('');
+	(user ? pin : uin).focus();
+	login.querySelector('form').addEventListener('submit', e => {
+		e.preventDefault();
+		if (!pin.value) return;
+		user = uin.value || 'glenda';
+		pass = pin.value;
+		pin.value = '';
+		if (!q.getAll('a').length)
+			args[args.indexOf('-u') + 1] = user;
+		login.classList.add('hidden');
+		setstatus('loading drawterm...');
+		start();
+	});
+}
+
+if (!crossOriginIsolated)
+	setstatus('not cross-origin isolated: serve with the bundled gateway on localhost or HTTPS');
+})();
+</script>
+</body>
+</html>
