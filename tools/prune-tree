@@ -390,8 +390,23 @@ def main(root):
         lookman.write_text("".join(line for line in lookman.read_text().splitlines(keepends=True)
                                    if not any(line.endswith("/" + name + "\n") for name in
                                               ("pcc", "gs", "eqn", "grap", "pic", "spin", "lp", "ps2pdf", "troff2png"))))
-    for obj in ("386", "68020", "arm", "mips", "power", "sparc"):
+    for obj in ("386", "68020", "arm", "mips", "power", "power64", "sparc", "sparc64"):
         remove(root / "sys/lib/acid" / obj)
+    for obj in ("386", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"):
+        remove(root / "sys/lib/dist/usr/glenda/bin" / obj)
+    rootstub = root / "sys/lib/rootstub"
+    old_dirs = {"386", "68000", "68020", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"}
+
+    def stub_kept(line):
+        parts = line.split()[-1].split("/") if line.startswith("mkdir -p ") else []
+        if not parts:
+            return True
+        if parts[0] in old_dirs or parts[:2] == ["acme", "bin"] and parts[-1] in old_dirs:
+            return False
+        return not ("ape" in parts[1:] or "bitsy" in parts[1:])
+
+    rootstub.write_text("".join(line for line in rootstub.read_text().splitlines(keepends=True)
+                                if stub_kept(line)))
     for obj in ("amd64", "arm64", "wasm32"):
         for part in ("include/ape", "lib/ape", "bin/ape", "bin/gs"):
             remove(root / obj / part)
@@ -461,6 +476,10 @@ def main(root):
             remove(src / lib / arch)
     for arch in ("386", "arm", "mips", "power", "power64"):
         remove(src / "libthread" / (arch + ".c"))
+    threadmk = src / "libthread/mkfile"
+    for arch in ("386", "arm", "mips", "power"):
+        replace(threadmk, f"\t{arch}.c\\\n", "")
+    replace(threadmk, "spim.$O:\tmips.c\n\t$CC $CFLAGS -o $target mips.c\n\n", "")
     prune_libmach(src / "libmach")
     prune_page(src / "cmd/page.c")
     cmdmk = src / "cmd/mkfile"
