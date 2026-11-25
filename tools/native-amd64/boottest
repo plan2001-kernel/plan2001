@@ -21,7 +21,9 @@ Kopio käynnistetään kolmesti:
      ohjaukset, pitkä syöte ja tuloste, stdin/EOF, stderr, status,
      aikaraja, siirtovirheen luokittelu), sitten BootInfo/asetukset,
      tallennus- ja laitelista, IPv4/IPv6/ARP erillisellä testikortilla
-     (ohjausyhteys ei muutu), 6c/6l-käännös ja ajo sekä kirjoitus juureen.
+     (ohjausyhteys ei muutu), 6c/6l-käännös ja ajo, natiivit PostScript-
+     työkalut (tr2post, text2post, p9bitpost; lähteiden käännös) sekä
+     kirjoitus juureen.
      Kirjoitetaan pysyvyysmerkki ja käynnistyskiinnike /cfg/$sysname/termrc.
   3. offline: ei verkkoa eikä sarjasyötettä: kiinnike tulostaa
      käynnistyksessä merkin ja laitteet sarjakonsoliin, ja testi vertaa
@@ -290,6 +292,34 @@ def asennettu(e):
           "echo 'void main(void){ print(\"p2-userland-%d bootinfo-%d\\n\", 6*7, sizeof(BootInfo)); exits(nil); }'} >p2.c && "
           "6c p2.c && 6l -o p2 p2.6 && ./p2",
           lambda t: t.status == "" and "p2-userland-42 bootinfo-232" in t.stdout, aikaraja=120)
+    postscript(e)
+
+
+def postscript(e):
+    """APE:sta riippumattomat PostScript-työkalut säilyvät, pcc:llä käännetyt eivät."""
+    e.aja("verkko: natiivit PostScript-työkalut ja resurssit asennettu, APE:n download ei",
+          "ls /amd64/bin/aux/^(tr2post text2post p9bitpost g3p9bit cropmarks grabit hardcopy) "
+          "/rc/bin/^(dpost printfont postscript/psencoding) "
+          "/sys/lib/postscript/prologues/^(dpost.ps pjw.char.ps UTF.enc) >/dev/null && "
+          "! test -e /amd64/bin/aux/download && ! test -e /sys/src/cmd/postscript/download && echo P2PS",
+          lambda t: t.status == "" and t.stdout == "P2PS\n")
+    e.aja("verkko: troff | dpost (aux/tr2post) tuottaa PostScriptiä",
+          "echo p2-troff | troff | dpost >/tmp/p2tr.ps && sed 1q /tmp/p2tr.ps && "
+          "test `{wc -c </tmp/p2tr.ps} -gt 1000 && echo P2TR",
+          lambda t: t.status == "" and t.stdout.startswith("%!PS") and t.stdout.endswith("P2TR\n"),
+          aikaraja=120)
+    e.aja("verkko: aux/text2post ja aux/p9bitpost tuottavat PostScriptiä",
+          "echo p2-text | aux/text2post >/tmp/p2t.ps && aux/p9bitpost /lib/bunny.bit >/tmp/p2b.ps && "
+          "sed 1q /tmp/p2t.ps && sed 1q /tmp/p2b.ps",
+          lambda t: t.status == "" and t.stdout.count("%!PS") == 2)
+    e.aja("verkko: dpost -f kertoo, ettei APE:n aux/downloadia ole",
+          "echo p2 | troff | dpost -f >/dev/null",
+          lambda t: "unsupported" in t.status and "aux/download" in t.stderr)
+    e.aja("verkko: palautetut PostScript-lähteet kääntyvät 6c:llä (mk all)",
+          "rm -rf /tmp/p2ps && mkdir /tmp/p2ps && dircp /sys/src/cmd/postscript /tmp/p2ps && "
+          "cd /tmp/p2ps && mk all >/tmp/p2ps.log >[2=1] && "
+          "ls (tr2post text2post p9bitpost g3p9bit)^/6.out cropmarks/cropmarks psencoding/psencoding",
+          lambda t: t.status == "" and t.stdout.count("6.out") == 4, aikaraja=300)
 
 
 def vaihe_verkko(kuva, loki, tyo, tk):
