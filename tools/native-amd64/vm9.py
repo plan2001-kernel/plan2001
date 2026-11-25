@@ -57,13 +57,20 @@ class Ovmf:
 
 class Kone:
     """
-    Yksi QEMU-kone: q35, OVMF, AHCI-levyt (9front: sdE0, sdE1, ...),
-    sarjakonsoli stdin/stdoutiin, ei verkkoa.  levyt on lista
-    (polku, muoto, vain_luku, laji) -nelikkoja; laji on "hd" tai "cd".
+    Yksi QEMU-kone: q35 (tai kone="pc", i440FX), OVMF, AHCI-levyt (9front:
+    sdE0, sdE1, ...), sarjakonsoli stdin/stdoutiin, ei verkkoa.  levyt on
+    lista (polku, muoto, vain_luku, laji) -nelikkoja; laji on "hd" tai
+    "cd" (AHCI-portti = levyn indeksi), "vblk" tai "vblk10" (virtio-blk,
+    legacy+moderni tai vain VirtIO 1.0) tai "vscsi:OHJAIN:TARGET:LUN" /
+    "vscsi10:OHJAIN:TARGET:LUN" (scsi-hd nimettyyn virtio-scsi-ohjaimeen,
+    joka luodaan ensimmäisellä käytöllä).  Firmware käynnistää
+    ensimmäisen levyn.
     """
 
-    def __init__(self, levyt, ovmf, loki, muisti="2048", cpu="2", nayttö=False, ylim=None, qmp=False):
+    def __init__(self, levyt, ovmf, loki, muisti="2048", cpu="2", nayttö=False, ylim=None, qmp=False,
+                 kone="q35"):
         self.levyt = levyt
+        self.kone = kone
         self.ovmf = ovmf
         self.lokipolku = loki
         self.muisti = muisti
@@ -83,7 +90,7 @@ class Kone:
         shutil.copyfile(self.ovmf.muuttujat, muuttujat)
         k = [
             os.environ.get("QEMU", "qemu-system-x86_64"),
-            "-machine", "q35,accel=kvm:tcg",
+            "-machine", self.kone + ",accel=kvm:tcg",
             "-m", self.muisti, "-smp", self.cpu,
             "-drive", "if=pflash,format=raw,readonly=on,file=" + self.ovmf.koodi,
             "-drive", "if=pflash,format=raw,file=" + muuttujat,
@@ -96,11 +103,25 @@ class Kone:
             k += ["-display", "none"]
         if self.qmppolku:
             k += ["-qmp", "unix:%s,server=on,wait=off" % self.qmppolku]
+        ohjaimet = set()
+        # transitional-laite (legacy-portit ja VirtIO 1.0) tai vain VirtIO 1.0
+        virtio = {"": "disable-legacy=off,disable-modern=off", "10": "disable-legacy=on,disable-modern=off"}
         for i, (polku, muoto, vainluku, laji) in enumerate(self.levyt):
             ro = ",readonly=on" if vainluku else ""
             # firmware käynnistää ensimmäisen levyn, ei esim. liitettyä ISO:a
             bi = ",bootindex=0" if i == 0 else ""
-            if laji == "cd":
+            if laji.startswith("vscsi"):
+                tyyppi, ohjain, target, lun = laji.split(":")
+                if ohjain not in ohjaimet:
+                    ohjaimet.add(ohjain)
+                    k += ["-device", "virtio-scsi-pci,id=%s,%s" % (ohjain, virtio[tyyppi[5:]])]
+                k += ["-drive", "file=%s,format=%s,if=none,id=d%d%s" % (polku, muoto, i, ro),
+                      "-device", "scsi-hd,drive=d%d,bus=%s.0,channel=0,scsi-id=%s,lun=%s%s"
+                      % (i, ohjain, target, lun, bi)]
+            elif laji in ("vblk", "vblk10"):
+                k += ["-drive", "file=%s,format=%s,if=none,id=d%d%s" % (polku, muoto, i, ro),
+                      "-device", "virtio-blk-pci,drive=d%d,%s%s" % (i, virtio[laji[4:]], bi)]
+            elif laji == "cd":
                 k += ["-drive", "file=%s,format=%s,if=none,media=cdrom,id=d%d%s" % (polku, muoto, i, ro),
                       "-device", "ide-cd,drive=d%d,bus=ahci.%d%s" % (i, i, bi)]
             else:

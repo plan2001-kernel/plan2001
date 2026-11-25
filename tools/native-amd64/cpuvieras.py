@@ -218,7 +218,8 @@ class CpuVieras:
     liitetään tyhjään QEMU-hubiin (ei yhteyttä minnekään).
     """
 
-    def __init__(self, levy, tyohak, loki, muoto="raw", testi_nicit=(), muisti="2048", cpu="2"):
+    def __init__(self, levy, tyohak, loki, muoto="raw", testi_nicit=(), muisti="2048", cpu="2",
+                 laji="hd", kone="q35", provisiointi=("hd", "sdE1"), lisalevyt=()):
         self.tyohak = tyohak
         self.cpuportti = vapaa_portti()
         self.authportti = vapaa_portti()
@@ -242,8 +243,13 @@ class CpuVieras:
         for i, mac in enumerate(testi_nicit):
             verkko += ["-netdev", "hubport,id=t%d,hubid=%d" % (i, 10 + i),
                        "-device", "virtio-net-pci,netdev=t%d,mac=%s" % (i, mac)]
-        self.vm = vm9.Kone([(levy, muoto, False, "hd"), (self.kiinnike, "raw", False, "hd")],
-                           vm9.Ovmf.etsi(), loki, muisti=muisti, cpu=cpu, ylim=verkko, qmp=True)
+        # provisiointi: (vm9.Kone-laji, levyn nimi vieraassa); oletus AHCI-portti 1 (sdE1)
+        self.provisiointilaji, self.provisiointilevy = provisiointi
+        # lisalevyt: vm9.Kone-levyt provisiointilevyn jälkeen (esim. virtio-testilevyt)
+        self.vm = vm9.Kone([(levy, muoto, False, laji), (self.kiinnike, "raw", False, self.provisiointilaji)]
+                           + list(lisalevyt),
+                           vm9.Ovmf.etsi(), loki, muisti=muisti, cpu=cpu, ylim=verkko, qmp=True,
+                           kone=kone)
         self.pterm = Pterm(etsi_9pterm(), self.cpuportti, self.authportti, "glenda",
                            self.salasanatiedosto)
 
@@ -258,7 +264,7 @@ class CpuVieras:
         kaiku ei vastaa riviä, sarjaportti vääristi sen: Siirtovirhe.
         Skriptin virhe tai jumi vieraassa on VirheVM.  Ei uusintayritystä.
         """
-        rivi = "rc /dev/sdE1/data"
+        rivi = "rc /dev/%s/data" % self.provisiointilevy
         self.vm.laheta(rivi + "\n")
         try:
             # rc kaiuttaa rivin: vääristynyt kaiku on sarjasiirron virhe
@@ -270,7 +276,7 @@ class CpuVieras:
             raise Siirtovirhe("sarjaportti vääristi provisiointirivin: %r" % kaiku)
         i, m = self.vm.odota_jokin([r"P2CPU-VALMIS " + self.tunnus,
                                     r"P2CPU-VIRHE " + self.tunnus + r" ([^\r\n]*)\r?\n",
-                                    r"/dev/sdE1/data:[^\r\n]*\r?\n"], aikaraja)
+                                    r"/dev/%s/data:[^\r\n]*\r?\n" % self.provisiointilevy], aikaraja)
         if i != 0:
             raise vm9.VirheVM("provisiointi epäonnistui vieraassa: %s"
                               % m.group(1 if i == 1 else 0).decode("latin-1").strip())
