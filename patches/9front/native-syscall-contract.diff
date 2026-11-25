@@ -51,7 +51,7 @@
 -
 -int nsyscall = (sizeof systab/sizeof systab[0]);
 -!
-+# One architecture-aware number selection, shared with libc and APE.
++# One architecture-aware number selection, shared with libc.
 +rc /sys/src/libc/9syscall/syscalls $objtype /sys/src/libc/9syscall/sys.h defines |
 +awk '
 +/^#define/ {

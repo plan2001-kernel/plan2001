@@ -1,18 +1,43 @@
 --- a/rc/bin/inst/bootsetup
 +++ b/rc/bin/inst/bootsetup
-@@ -56,7 +56,7 @@
- 				echo -n $"i'='
- 				cat $i
- 				echo
+@@ -59 +59 @@
 -			} | grep -v '^(\*acpi=0x|\*bootscreen=|\*e820=|apm0=|bootfile=|bootargs=|cdboot=|nvram=|mouseport=|monitor=|vgasize=)'
 +			} | grep -v '^(\*acpi=0x|\*bootscreen=|\*e820=|\*sdW[0-9]+=|init=|apm0=|bootfile=|bootargs=|cdboot=|iso=|nvram=|mouseport=|monitor=|vgasize=)'
- 		} >/tmp/plan9.ini
- 	}
- 
-@@ -119,6 +119,13 @@
- 		logprog cp /$cputype/$bootfile /n/9fat/$bootfile
- 	}
- 
+@@ -64 +64 @@
+-	rm -f /tmp/oldplan9.ini /tmp/pbs.bak
++	rm -f /tmp/oldplan9.ini
+@@ -82,18 +82,3 @@
+-	# always make backup of old bootsector
+-	logprog dd -bs 512 -count 1 -if $9fat -of /tmp/pbs.bak
+-
+-	if (! test -f /386/pbs) {
+-		if(~ $need9fatformat yes){
+-			log Initializing Plan 9 FAT partition.
+-			logprog disk/format -r 2 -d -l PLAN9 $9fat
+-		}
+-	}
+-	if not {
+-		if(~ $need9fatformat yes){
+-			log Initializing Plan 9 FAT partition.
+-			logprog disk/format -r 2 -d -b /386/pbs -l PLAN9 $9fat
+-		}
+-		if not {
+-			log Updating bootsector.
+-			logprog disk/format -b /386/pbs $9fat
+-		}
++	if(~ $need9fatformat yes){
++		log Initializing Plan 9 FAT partition.
++		logprog disk/format -r 2 -d -l PLAN9 $9fat
+@@ -104,8 +88,0 @@
+-	if(test -f /386/9bootfat) {
+-		logprog rm -f /n/9fat/9bootfat
+-		logprog cp /386/9bootfat /n/9fat/9bootfat
+-
+-		# make file continous on disk
+-		logprog chmod +al /n/9fat/9bootfat
+-	}
+-
+@@ -121,0 +99,7 @@
 +	# copy the machine's other boot files (wasm32: its kernel's boot
 +	# file system and the page that is its firmware)
 +	for(i in /$cputype/9fat/*){
@@ -20,6 +45,10 @@
 +			logprog cp $i /n/9fat/
 +	}
 +
- 	# copy efi bootloader
- 	for(i in /386/*.efi){
- 		if(test -f $i) {
+@@ -123 +107 @@
+-	for(i in /386/*.efi){
++	for(i in /$cputype/*.efi){
+@@ -133,3 +116,0 @@
+-	if(test -f /tmp/pbs.bak)
+-		logprog cp /tmp/pbs.bak /n/9fat
+-

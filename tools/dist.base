@@ -19,6 +19,6 @@ rio plumb plumber stats clock acme sam
 ip/ipconfig ip/ping ndb/cs ndb/dns ndb/query
 exportfs tlsclient tlssrv webcookies webfs
 # the tools: the compilers, mk, what the source's build runs (yacc, lex,
-# mpc: libsec's and libauthsrv's .mp; APE's pcc and cpp), and git
-3a 3c 3l ar cpp lex mk mpc patch pcc size strip yacc
+# mpc: libsec's and libauthsrv's .mp; and git
+3a 3c 3l ar cpp lex mk mpc patch size strip yacc
 git/

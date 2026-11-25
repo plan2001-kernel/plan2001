@@ -307,6 +307,7 @@ def kaynnista_9front(vm, aikaraja=300):
         r"\n[a-z0-9]+# $",                              # 5
         r"root is from \([^)]*\) *\[[^\]]*\]:? *$",   # 6
         r"panic: ",                                     # 7
+        r"\n> *$",                                      # 8: firmware boot menu
     ]
     loppu = time.time() + aikaraja
     while True:
@@ -329,6 +330,8 @@ def kaynnista_9front(vm, aikaraja=300):
         elif i == 7:
             vm.odota(r"\n", 5)
             raise VirheVM("ydin panikoi:\n" + vm.kaikki[-3000:].decode("latin-1"))
+        elif i == 8:
+            vm.laheta("\n")
 
 
 # --- yhteiset polut ja tiedostot (build, mkimage, boottest) ---
@@ -351,27 +354,6 @@ JAETUT = [
     "sys/src/9/port/bootargs.c",
     "sys/src/9/port/bootfb.c",
 ]
-
-# AMD64 ja yhteiset ytimen lähteet samasta 9front-overlaysta.
-OVERLAY = ["sys/src/9/pc64", "sys/src/9/pc", "sys/src/9/port", "sys/src/9/ip", "sys/src/boot/efi", "sys/src/cmd/rc", "sys/src/cmd/aux/kbdfs", "sys/src/9/boot", "sys/man/8", "sys/src/libc/9syscall", "sys/src/ape/lib/ap/syscall"]
-
-
-def overlay_jasenet(jaettu):
-    """Sama lähdeoverlay käännöskoneeseen ja asennetulle levylle."""
-    jasenet = []
-    for hak in OVERLAY:
-        lahde = os.path.join(JUURI, hak)
-        if not os.path.isdir(lahde):
-            raise VirheVM("overlay puuttuu: %s" % lahde)
-        jasenet.append(("ov/" + hak, lahde))
-    jasenet.append(("ov/sys/include/libc.h", os.path.join(JUURI, "sys/include/libc.h")))
-    for p in JAETUT:
-        lahde = os.path.join(jaettu, p)
-        if not os.path.isfile(lahde):
-            raise VirheVM("yhteinen BootInfo v1 puuttuu: %s" % lahde)
-        jasenet.append(("ov/" + p, lahde))
-    return jasenet
-
 
 def valimuisti():
     return os.environ.get("PLAN2001_CACHE", os.path.expanduser("~/.cache/plan2001"))

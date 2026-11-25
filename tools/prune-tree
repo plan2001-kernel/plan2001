@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+"""Apply Plan2001's supported-target source selection to an assembled 9front root."""
+
+import pathlib
+import re
+import shutil
+import sys
+
+
+def remove(path):
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def replace(path, old, new):
+    data = path.read_text()
+    if old not in data:
+        raise SystemExit(f"prune-tree: expected {old!r} in {path}")
+    path.write_text(data.replace(old, new))
+
+
+def config_sources(directory, configs, extra=()):
+    names = set(extra)
+    for config in configs:
+        section = ""
+        for line in (directory / config).read_text().splitlines():
+            if not line or line.startswith("#"):
+                continue
+            if line[0] not in " \t":
+                section = line.split()[0]
+                continue
+            if section not in {"dev", "link", "misc", "ip"}:
+                continue
+            words = line.split()
+            if not words:
+                continue
+            if section == "dev":
+                names.add("dev" + words[0])
+            else:
+                names.add(words[0])
+            names.update(w for w in words[1:] if not w.startswith(("+", "-", "=")))
+    return names
+
+
+def move_shared(src, dst, names):
+    dst.mkdir(exist_ok=True)
+    for file in src.iterdir():
+        if file.suffix == ".c" and file.stem in names:
+            shutil.move(str(file), dst / file.name)
+        elif file.suffix in {".h", ".i", ".fw", ".n"}:
+            shutil.move(str(file), dst / file.name)
+    remove(src)
+
+
+def prune_libmach(directory):
+    keep = {"executable", "map", "obj", "swap", "sym", "access", "machdata",
+            "setmach", "6", "7", "7db", "8db", "6obj", "7obj"}
+    for file in directory.iterdir():
+        if file.suffix == ".c" and file.stem not in keep:
+            remove(file)
+    remove(directory / "mips2ureg.h")
+    mk = directory / "mkfile"
+    data = mk.read_text()
+    start = data.index("OFILES=\\\n")
+    end = data.index("\n\nHFILES=", start)
+    data = data[:start] + "OFILES=\\\n" + "".join(f"\t{name}.$O\\\n" for name in sorted(keep)) + data[end:]
+    data = re.sub(r"(?m)^(?:2obj|5obj|8obj|kobj|qobj|vobj)\.\$O:.*\n", "", data)
+    mk.write_text(data)
+
+    obj = directory / "obj.c"
+    data = obj.read_text()
+    start = data.index("int\t_is2(char*)")
+    end = data.index("\n\ntypedef struct Obj", start)
+    data = data[:start] + "int\t_is6(char*), _is7(char*),\n\t_read6(Biobuf*, Prog*), _read7(Biobuf*, Prog*);" + data[end:]
+    start = data.index("static Obj\tobj[] =")
+    end = data.index("\n\nstruct\tSymtab", start)
+    data = data[:start] + "static Obj\tobj[] =\n{\n\t[ObjAmd64]\t\"amd64 .6\", _is6, _read6,\n\t[ObjArm64]\t\"arm64 .7\", _is7, _read7,\n\t[Maxobjtype]\t0, 0\n};" + data[end:]
+    obj.write_text(data)
+
+    setmach = directory / "setmach.c"
+    data = setmach.read_text()
+    start = data.index("extern\tMach\t")
+    end = data.index("\n/*\n *\tmachine selection table", start)
+    data = data[:start] + "extern Mach mamd64, marm64;\nextern Machdata i386mach, arm64mach;\n" + data[end:]
+    start = data.index("Machtab\tmachines[] =")
+    end = data.index("\n\n/*\n *\tselect a machine", start)
+    entries = re.findall(r"\t\{[^}]*\},", data[start:end], re.S)
+    selected = [e for e in entries if '"amd64"' in e or '"arm64"' in e]
+    if len(selected) != 2:
+        raise SystemExit("prune-tree: libmach machine table changed")
+    data = data[:start] + "Machtab\tmachines[] =\n{\n" + "\n".join(selected) + "\n\t{ 0 },\n};" + data[end:]
+    data = data.replace("asstype = AMIPS;\n\t\tmachdata = &mipsmach;\n\t\tmach = &mmips;",
+                        "asstype = AAMD64;\n\t\tmachdata = &i386mach;\n\t\tmach = &mamd64;")
+    setmach.write_text(data)
+
+    machdata = directory / "machdata.c"
+    data = machdata.read_text().replace("extern\tMachdata\tmipsmach;\n", "")
+    data = data.replace("int\tasstype = AMIPS;", "int\tasstype = AAMD64;")
+    machdata.write_text(data)
+
+    exe = directory / "executable.c"
+    data = exe.read_text()
+    start = data.index("extern\tMach\tmmips;")
+    end = data.index("\nExecTable exectab[] =", start)
+    data = data[:start] + "extern Mach mamd64, marm64;\n" + data[end:]
+    start = data.index("ExecTable exectab[] =")
+    end = data.index("\n\nMach\t*mach", start)
+    entries = re.findall(r"\t\{[^}]*\},", data[start:end], re.S)
+    selected = [e.replace("&mi386", "&mamd64") for e in entries
+                if "&mamd64" in e or "&marm64" in e or "ELF_MAG" in e]
+    if len(selected) != 3:
+        raise SystemExit("prune-tree: libmach executable table changed")
+    data = data[:start] + "ExecTable exectab[] =\n{\n" + "\n".join(selected) + "\n\t{ 0 },\n};" + data[end:]
+    data = data.replace("Mach\t*mach = &mi386;", "Mach\t*mach = &mamd64;")
+    data = data.replace("\tcase E_MAGIC:\n\t\tthumbpctab(fd, fp);\n\t\tbreak;\n", "")
+    data = data.replace("\t/* arm needs to check for both arm and thumb */\n\tif(fp->type == FARM && (fp->entry & mthumb.ktmask))\n\t\tgoto FTHUM;\n", "")
+    start = data.index("\tswitch(fp->type) {", data.index("commonboot(Fhdr *fp)"))
+    end = data.index("\n\tfp->hdrsz = 0;", start)
+    data = data[:start] + '''\tswitch(fp->type) {
+\tcase FARM64:
+\t\tfp->type = FARM64B;
+\t\tfp->txtaddr = fp->entry;
+\t\tfp->name = "arm64 plan 9 boot image";
+\t\tfp->dataddr = _round(fp->txtaddr+fp->txtsz, mach->pgsize);
+\t\tbreak;
+\tcase FAMD64:
+\t\tfp->type = FAMD64B;
+\t\tfp->txtaddr = fp->entry;
+\t\tfp->name = "amd64 plan 9 boot image";
+\t\tfp->dataddr = _round(fp->txtaddr+fp->txtsz, 4096);
+\t\tbreak;
+\tdefault:
+\t\treturn;
+\t}''' + data[end:]
+    arch_switch = "switch(ep->machine) {"
+    start = data.index(arch_switch)
+    end = data.index("\n\tif(ep->phentsize", start)
+    data = data[:start] + '''switch(ep->machine) {
+\tcase AMD64:
+\t\tmach = &mamd64;
+\t\tfp->type = FAMD64;
+\t\tfp->name = "amd64 ELF64 executable";
+\t\tbreak;
+\tdefault:
+\t\treturn 0;
+\t}
+''' + data[end:]
+    start = data.index(arch_switch, start + len(arch_switch))
+    end = data.index("\n\tif(ep->phentsize", start)
+    data = data[:start] + '''switch(ep->machine) {
+\tcase AMD64:
+\t\tmach = &mamd64;
+\t\tfp->type = FAMD64;
+\t\tfp->name = "amd64 ELF32 executable";
+\t\tbreak;
+\tdefault:
+\t\treturn 0;
+\t}
+''' + data[end:]
+    exe.write_text(data)
+
+
+# PostScript programs built with pcc (APE) from sys/src/cmd/postscript.
+# tr2post, text2post, p9bitpost, g3p9bit and the rc/PostScript tools
+# (cropmarks, grabit, hardcopy, printfont, psencoding) are native and stay.
+POSTSCRIPT_APE = ("download", "postgif", "postprint", "postreverse", "posttek", "tcpostio")
+
+
+def prune_postscript(root):
+    ps = root / "sys/src/cmd/postscript"
+    # common/ stays for the native programs' headers and tr2post's
+    # common.c; only its pcc library com.a goes with the APE programs.
+    for name in ("mkfile", "bbox.c", "getopt.c", "glob.c", "misc.c",
+                 "request.c", "request.h", "tempnam.c", "gen.h"):
+        remove(ps / "common" / name)
+    # unbuilt UNIX remnants that link the same pcc library
+    for name in POSTSCRIPT_APE + ("picpack", "postbgi", "postdaisy", "postdmd", "postmd", "postio"):
+        remove(ps / name)
+    mk = ps / "mkfile"
+    data = mk.read_text()
+    data = data.replace("TARGETS=common\\\n\t", "TARGETS=", 1)
+    for name in POSTSCRIPT_APE:
+        old = f"\t{name}\\\n"
+        if data.count(old) != 1:
+            raise SystemExit(f"prune-tree: {name} not a target in {mk}")
+        data = data.replace(old, "")
+    for name in ("picpack", "postbgi", "postdaisy", "postdmd", "postmd", "postio"):
+        data = re.sub(rf"(?m)^#\t{name}\\?\n", "", data)
+    mk.write_text(data)
+    # dpost -f adds fonts with aux/download, which needs APE.
+    replace(root / "rc/bin/dpost", "\taux/tr2post $* | addpsfonts\n",
+            "\techo 'dpost: -f needs aux/download, which is unavailable' >[1=2]\n\texit unsupported\n")
+
+
+def prune_syscall_stubs(path):
+    """Keep only the supported targets' system call stubs (wasm32 has its own)."""
+    data = path.read_text()
+    start = data.index("\t\t{switch($objtype){\n") + len("\t\t{switch($objtype){\n")
+    end = data.index("\t\t}} > $i.s\n", start)
+    blocks = re.split(r"(?m)^(?=\t\tcase )", data[start:end])
+    if blocks[0]:
+        raise SystemExit(f"prune-tree: unexpected system call switch in {path}")
+    kept = [b for b in blocks[1:] if b.split("\n", 1)[0].split()[1:] in (["amd64"], ["arm64"])]
+    if len(kept) != 2:
+        raise SystemExit(f"prune-tree: amd64/arm64 system call stubs changed in {path}")
+    path.write_text(data[:start] + "".join(kept) + data[end:])
+
+
+def prune_page(path):
+    data = path.read_text()
+    start = data.index("typedef struct Ghost Ghost;")
+    end = data.index("int\ninfernobithdr(", start)
+    data = data[:start] + data[end:]
+    start = data.index("int\npopengs(")
+    end = data.index("int\nfiletype(", start)
+    data = data[:start] + data[end:]
+    data = "\n".join(line for line in data.split("\n") if "popengs," not in line)
+    data = data.replace("int ppi = 100;\n", "")
+    data = data.replace(" [ -p ppi ]", "")
+    data = data.replace("\tcase 'p':\n\t\tppi = atoi(EARGF(usage()));\n\t\tbreak;\n", "")
+    path.write_text(data)
+
+
+def prune_distproto(path):
+    unsupported = {"386", "68000", "68020", "arm", "power", "power64",
+                   "sparc", "sparc64", "mips", "spim"}
+    kept = []
+    section = ""
+    for line in path.read_text().splitlines(keepends=True):
+        if line and line[0] not in " \t#\n":
+            section = line.split()[0]
+        if section in unsupported:
+            continue
+        name = line.strip().split()[0] if line.strip() else ""
+        if name in {"ape", "bitsy"} or (section == "acme" and name in unsupported):
+            continue
+        kept.append(line)
+    path.write_text("".join(kept))
+
+
+def prune_dist_mkfile(path):
+    data = path.read_text()
+    header = data[:data.index("cd:V:")]
+    gzip = data[data.index("%.gz:D:"):data.index("%.386.iso:")]
+    pi3 = data[data.index("%.pi3.img:"):data.index("%.zynq.img:D:")]
+    disk = data[data.index("%.disk:D:"):data.index("binds:V:")]
+    old = "if(~ $target *.pi.img.* *.pi3.img.*){"
+    if disk.count(old) != 1:
+        raise SystemExit(f"prune-tree: Pi3 image rule changed in {path}")
+    disk = disk.replace(old, "if(~ $target *.pi3.img.*){")
+    start = disk.index("\tif not if(~ $target *.reform.img.*")
+    end = disk.index("\thjfs -f $d/fs", start)
+    disk = disk[:start] + disk[end:]
+    path.write_text(header + gzip + pi3 + disk + data[data.index("binds:V:"):])
+
+
+def prune_authproto(path, old_compilers):
+    obsolete = set(old_compilers) | {"pcc", "gs", "compress", "eqn", "grap", "pic",
+                                     "spin", "vi", "lp", "lpdaemon", "lpdsend",
+                                     "lpsend", "antiword", "8prefix", "apm", "dpost",
+                                     *POSTSCRIPT_APE, "flacdec", "flacenc", "mp3enc",
+                                     "oggdec", "oggenc"}
+    old_arch = {"386", "68000", "68020", "arm", "mips", "power", "power64",
+                "sparc", "sparc64", "spim"}
+    kept = []
+    section = ""
+    skip_indent = None
+    for line in path.read_text().splitlines(keepends=True):
+        indent = len(line) - len(line.lstrip(" \t"))
+        name = line.strip().split()[0] if line.strip() else ""
+        if line and line[0] not in " \t#\n":
+            section = name
+        if section in old_arch:
+            continue
+        if skip_indent is not None:
+            if indent > skip_indent:
+                continue
+            skip_indent = None
+        if name == "bitsy" or (section == "sys" and name == "lp"):
+            skip_indent = indent
+            continue
+        if section == "rc" and name in {"fax", "lp"}:
+            continue
+        if section == "$cputype" and name in obsolete:
+            continue
+        kept.append(line)
+    path.write_text("".join(kept))
+
+
+def prune_audio_man(path):
+    data = path.read_text()
+    start = data.index(".SS\n.I Pcmconv\n")
+    end = data.index(".SH EXAMPLE\n", start)
+    path.write_text(""".TH AUDIO 1
+.SH NAME
+mp3dec, wavdec, sundec, pcmconv, mixfs \\- decode and process audio
+.SH SYNOPSIS
+.B audio/mp3dec
+[
+.B -d
+] [
+.B -s
+.I seconds
+]
+.br
+.B audio/wavdec
+.br
+.B audio/sundec
+.PP
+.B audio/pcmconv
+[
+.B -i
+.I fmt
+] [
+.B -o
+.I fmt
+] [
+.B -l
+.I length
+]
+.PP
+.B audio/mixfs
+[
+.B -D
+] [
+.B -s
+.I srvname
+] [
+.B -m
+.I mtpt
+] [
+/dev/audio
+]
+.SH DESCRIPTION
+The decoders read audio from standard input and write 16-bit stereo PCM
+to standard output at 44.1 kHz.
+.I Mp3dec
+decodes MPEG audio; its
+.B -d
+option enables diagnostic output and
+.B -s
+seeks to a position in seconds.
+.I Wavdec
+decodes RIFF wave and
+.I sundec
+decodes Sun audio.
+""" + data[start:end] + """.SH EXAMPLE
+.EX
+audio/mp3dec <foo.mp3 >/dev/audio
+.EE
+.SH SOURCE
+.B /sys/src/cmd/audio
+.SH "SEE ALSO"
+.IR play (1),
+.IR zuke (1)
+.SH HISTORY
+.I Pcmconv
+first appeared in 9front (December, 2012).
+.I Mixfs
+first appeared in 9front (December, 2013).
+""")
+
+
+def prune_page_man(path):
+    data = path.read_text()
+    start = data.index(".SH NAME\n")
+    end = data.index(".SH SYNOPSIS\n", start)
+    data = data[:start] + ".SH NAME\npage \\- view image files\n" + data[end:]
+    data = data.replace("] [\n.B -p\n.I ppi\n", "")
+    start = data.index(".SH DESCRIPTION\n")
+    end = data.index(".PP\nBy default", start)
+    data = data[:start] + (".SH DESCRIPTION\n.I Page\ndisplays image files in sequence, "
+                           "including Plan 9 and Inferno bitmaps and common raster formats.\n"
+                           "Without named files it reads one from standard input.\n") + data[end:]
+    start = data.index(".PP\nThe \n.B -p ")
+    end = data.index(".PP\nWhen viewing images", start)
+    data = data[:start] + data[end:]
+    start = data.index(".I Page\ncalls\n.IR gs (1)")
+    end = data.index(".SH EXAMPLES\n", start)
+    data = data[:start] + (".I Page\nuses image conversion programs such as those "
+                           "described in\n.IR jpg (1)\nfor raster graphics formats.\n") + data[end:]
+    start = data.index(".SH EXAMPLES\n")
+    end = data.index('.SH "SEE ALSO\n', start)
+    data = data[:start] + (".SH EXAMPLES\n.TP\n.L\n"
+                           "page /usr/inferno/icons/*.bit\n"
+                           "Browse the Inferno bitmap library.\n") + data[end:]
+    start = data.index('.SH "SEE ALSO\n')
+    end = data.index(".SH SOURCE\n", start)
+    data = data[:start] + '.SH "SEE ALSO\n.IR jpg (1)\n' + data[end:]
+    path.write_text(data)
+
+
+def main(root):
+    src = root / "sys/src"
+    old_compilers = ("1a", "1c", "1l", "2a", "2c", "2l", "5a", "5c", "5e", "5i", "5l",
+                     "8a", "8c", "8l", "9a", "9c", "9l", "ka", "kc", "ki", "kl",
+                     "qa", "qc", "qi", "ql", "va", "vc", "vl", "tc", "tl")
+    shutil.copyfile(root / "386/include/ureg.h", root / "sys/include/realmode.h")
+    for name in ("386", "68000", "68020", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"):
+        remove(root / name)
+    for path in ("sys/src/ape", "sys/include/ape", "sys/lib/ghostscript",
+                 "sys/src/cmd/gs", "sys/src/cmd/pcc.c", "sys/man/1/gs",
+                 "sys/man/1/pc", "sys/man/1/pcc", "sys/man/1/2a",
+                 "sys/man/1/2c", "sys/man/1/2l", "rc/bin/ape", "rc/lib/ape",
+                 "sys/lib/dist/usr/glenda/bin/386", "sys/lib/sysconfig/proto/armpaqproto",
+                 "sys/lib/sysconfig/proto/standalone",
+                 "rc/bin/pdf2ps",
+                 "rc/bin/ps2pdf", "rc/bin/ps2gif", "rc/bin/psfax",
+                 "rc/bin/troff2gif", "rc/bin/troff2png", "rc/bin/fax",
+                 "sys/lib/lp/process/pdfgs", "sys/lib/lp/process/pdfgsijs",
+                 "sys/lib/lp/process/gspipe", "sys/lib/lp/process/gspipeijs",
+                 "sys/lib/lp/process/pdfpost", "sys/man/1/ps2pdf",
+                 "sys/man/1/troff2png", "sys/src/cmd/eqn", "sys/src/cmd/grap",
+                 "sys/src/cmd/pic", "sys/src/cmd/spin", "sys/src/cmd/compress",
+                 "sys/src/cmd/lp", "sys/src/cmd/aux/antiword",
+                 "sys/src/cmd/vi", "sys/src/cmd/aux/apm.c",
+                 "sys/lib/lp", "sys/lib/antiword",
+                 "rc/bin/lp", "rc/bin/doc2ps", "rc/bin/service/!tcp515",
+                 "rc/bin/uncompress", "rc/bin/addpsfonts",
+                 "sys/src/cmd/bzip2/bzip2recover.c"):
+        remove(root / path)
+    remove(src / "cmd/aux/8prefix.c")
+    for path in ("sys/doc/ape.ms", "sys/doc/ape.ps", "sys/doc/ape.pdf",
+                 "sys/doc/spin.ms", "sys/doc/spin.ps", "sys/doc/spin.pdf",
+                 "sys/man/1/eqn", "sys/man/1/grap",
+                 "sys/man/1/pic", "sys/man/1/spin", "sys/man/1/lp",
+                 "sys/man/8/lp"):
+        remove(root / path)
+    lookman = root / "sys/lib/man/lookman/index"
+    if lookman.exists():
+        lookman.write_text("".join(line for line in lookman.read_text().splitlines(keepends=True)
+                                   if not any(line.endswith("/" + name + "\n") for name in
+                                              ("pcc", "gs", "eqn", "grap", "pic", "spin", "lp", "ps2pdf", "troff2png"))))
+    for obj in ("386", "68020", "arm", "mips", "power", "power64", "sparc", "sparc64"):
+        remove(root / "sys/lib/acid" / obj)
+    for obj in ("386", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"):
+        remove(root / "sys/lib/dist/usr/glenda/bin" / obj)
+    rootstub = root / "sys/lib/rootstub"
+    old_dirs = {"386", "68000", "68020", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"}
+
+    def stub_kept(line):
+        parts = line.split()[-1].split("/") if line.startswith("mkdir -p ") else []
+        if not parts:
+            return True
+        if parts[0] in old_dirs or parts[:2] == ["acme", "bin"] and parts[-1] in old_dirs:
+            return False
+        return not ("ape" in parts[1:] or "bitsy" in parts[1:])
+
+    rootstub.write_text("".join(line for line in rootstub.read_text().splitlines(keepends=True)
+                                if stub_kept(line)))
+    for obj in ("amd64", "arm64", "wasm32"):
+        for part in ("include/ape", "lib/ape", "bin/ape", "bin/gs"):
+            remove(root / obj / part)
+        remove(root / obj / "bin/bitsy")
+        for program in old_compilers:
+            remove(root / obj / "bin" / program)
+        for program in ("pcc", "compress", "eqn", "grap", "pic", "spin", "vi"):
+            remove(root / obj / "bin" / program)
+        for program in ("8prefix", "apm", "antiword", "lpdaemon", "lpdsend", "lpsend",
+                        *POSTSCRIPT_APE):
+            remove(root / obj / "bin/aux" / program)
+        for program in ("flacdec", "flacenc", "mp3enc", "oggdec", "oggenc"):
+            remove(root / obj / "bin/audio" / program)
+    for obj in ("386", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"):
+        remove(root / "acme/bin" / obj)
+    for path in ("sys/src/boot/efi/ia32.s", "wasm32/include/ape"):
+        remove(root / path)
+    bootplan9 = root / "rc/bin/inst/bootplan9"
+    data = bootplan9.read_text()
+    start = data.index("if(test -f /386/mbr){")
+    end = data.index("prompt 'Mark the Plan 9 partition active'", start)
+    bootplan9.write_text(data[:start] + data[end:])
+    remove(root / "sys/lib/sysconfig/proto/pcproto")
+    proto = root / "sys/lib/sysconfig/proto/portproto"
+    if proto.exists():
+        proto.write_text("\n".join(line for line in proto.read_text().splitlines()
+                                   if line.strip() not in {"ape", "ghostscript", "apeselect",
+                                                           "lp"}) + "\n")
+
+    pc64 = src / "9/pc64"
+    pc = src / "9/pc"
+    pcm = pc64 / "mkfile"
+    pc_names = config_sources(pc64, ("pc64",),
+                              ("cga", "i8253", "i8259", "irq", "memory", "screen", "init9"))
+    move_shared(pc, pc64 / "shared", pc_names)
+    replace(pc64 / "shared/sd53c8xx.c", '"../pc/sd53c8xx.i"', '"shared/sd53c8xx.i"')
+    replace(pcm, "../pc/", "shared/")
+    replace(pcm, "../pc}", "shared}")
+    replace(pcm, "cd ../pc", "cd shared")
+    replace(pcm, "/386/include/ureg.h", "/amd64/include/ureg.h")
+    replace(pc64 / "shared/vgavesa.c", '"/386/include/ureg.h"', '<realmode.h>')
+    replace(src / "cmd/aux/vga/vesa.c", '</386/include/ureg.h>', '<realmode.h>')
+    for name in ("main.c", "loadcom.c"):
+        replace(src / "cmd/aux/realemu" / name, '"/386/include/ureg.h"', '<realmode.h>')
+
+    bcm64 = src / "9/bcm64"
+    bcm = src / "9/bcm"
+    bcmm = bcm64 / "mkfile"
+    bcm_names = config_sources(bcm64, ("pi3", "pi4", "pi4efi"), ("bootargs",))
+    move_shared(bcm, bcm64 / "shared", bcm_names)
+    replace(bcmm, "../bcm/", "shared/")
+    replace(bcmm, "../bcm |", "shared |")
+    replace(bcm64 / "io.h", "../bcm/io.h", "shared/io.h")
+
+    for board in (src / "9").iterdir():
+        if board.is_dir() and board.name not in {"arm64", "bcm64", "boot", "ip", "pc64", "port", "wasm32"}:
+            remove(board)
+    for boot in (src / "boot").iterdir():
+        if boot.is_dir() and boot.name not in {"bcm", "efi"}:
+            remove(boot)
+
+    # The numbered 3/6/7 compilers and cc's common backend stay available.
+    for name in old_compilers:
+        remove(src / "cmd" / name)
+    for arch in ("386", "68000", "68020", "arm", "mips", "power", "power64", "sparc", "spim"):
+        remove(src / "libc" / arch)
+    for lib in ("libmp", "libsec"):
+        for arch in ("386", "arm", "mips", "power", "power64", "spim"):
+            remove(src / lib / arch)
+    for arch in ("386", "arm", "mips", "power", "power64"):
+        remove(src / "libthread" / (arch + ".c"))
+    threadmk = src / "libthread/mkfile"
+    for arch in ("386", "arm", "mips", "power"):
+        replace(threadmk, f"\t{arch}.c\\\n", "")
+    replace(threadmk, "spim.$O:\tmips.c\n\t$CC $CFLAGS -o $target mips.c\n\n", "")
+    prune_libmach(src / "libmach")
+    prune_page(src / "cmd/page.c")
+    prune_syscall_stubs(src / "libc/9syscall/mkfile")
+    mkdevc = src / "9/port/mkdevc"
+    replace(mkdevc, 'objtype ~ "(386|alpha|amd64)"', 'objtype == "amd64"')
+    replace(mkdevc, 'objtype ~ "(386|amd64)"', 'objtype == "amd64"')
+    prune_postscript(root)
+    cmdmk = src / "cmd/mkfile"
+    cmdmk.write_text(cmdmk.read_text() + "\n$O.page: page.$O /$objtype/lib/libgeometry.a\n\t$LD -o $target $prereq\n")
+    authproto = root / "sys/lib/sysconfig/auth/authproto"
+    prune_authproto(authproto, old_compilers)
+    authmk = root / "sys/lib/sysconfig/auth/mkfile"
+    authdata = authmk.read_text()
+    authmk.write_text(authdata[authdata.index("ream:\n"):])
+    replace(root / "rc/bin/inst/partdisk", "disk/mbr -m /386/mbr", "disk/mbr")
+    prune_distproto(root / "sys/lib/sysconfig/proto/distproto")
+    prune_dist_mkfile(root / "sys/lib/dist/mkfile")
+    bootproto = root / "sys/lib/sysconfig/proto/9bootproto"
+    bootproto.write_text("uid=sys\ngid=sys\ncfg\td775\n\tplan9.ini\t664\n")
+
+    replace(src / "cmd/aux/mkfile", "\tantiword\\\n", "")
+    replace(src / "cmd/aux/mkfile", "\t8prefix\\\n", "")
+    replace(src / "cmd/aux/mkfile", "\tapm\\\n", "")
+    dbsetup = src / "cmd/db/setup.c"
+    replace(dbsetup, "extern Mach mi386;", "extern Mach mamd64;")
+    replace(dbsetup, "mach = &mi386;", "mach = &mamd64;")
+    replace(src / "cmd/db/main.c", '"/386/9pc"', '"/amd64/9pc64"')
+    replace(src / "cmd/rdbfs.c", '"/386/9pc"', '"/amd64/9pc64"')
+    vmx9p = src / "cmd/vmx/9p.c"
+    replace(vmx9p, "extern Mach mi386, mamd64;", "extern Mach mamd64;")
+    replace(vmx9p, "mach = sizeof(uintptr) == 8 ? &mamd64 : &mi386;", "mach = &mamd64;")
+    audio = src / "cmd/audio/mkfile"
+    replace(audio, "LIBS=libogg libvorbis libFLAC libtags",
+            "LIBS=libtags")
+    replace(audio, "PROGS=pcmconv oggdec oggenc mp3dec mp3enc flacdec flacenc wavdec sundec mixfs readtags zuke scream",
+            "PROGS=pcmconv mp3dec wavdec sundec mixfs readtags zuke scream")
+    for name in ("libogg", "libvorbis", "libFLAC", "oggdec", "oggenc", "mp3enc", "flacdec", "flacenc"):
+        remove(src / "cmd/audio" / name)
+    bzip = src / "cmd/bzip2/mkfile"
+    replace(bzip, "bzip2recover.$O: bzip2recover.c\n\tpcc -D_POSIX_SOURCE -D_BSD_EXTENSION -c bzip2recover.c\n\n", "")
+    prune_audio_man(root / "sys/man/1/audio")
+    prune_page_man(root / "sys/man/1/page")
+    play = root / "rc/bin/play"
+    for old in ("\t\tcase *ogg* *vorbis*\n\t\t\taudio/oggdec\n",
+                "\t\tcase *flac*\n\t\t\taudio/flacdec\n",
+                "\t\t\tcase *.ogg *.OGG\n\t\t\t\taudio/oggdec\n",
+                "\t\t\tcase *.flac *.FLAC\n\t\t\t\taudio/flacdec\n"):
+        replace(play, old, "")
+    man = root / "rc/bin/man"
+    for old in ("\t\tif(~ $x *grap*)\n\t\t\tpreproc=($preproc grap)\n",
+                "\t\tif(~ $x *pic*)\n\t\t\tpreproc=($preproc pic)\n",
+                "\tif(~ $x *eqn*)\n\t\tpreproc=($preproc eqn)\n"):
+        replace(man, old, "")
+    replace(root / "rc/bin/hget",
+            "\t\tcase *compress*\n\t\t\t~ `{cat $d/contenttype >[2]/dev/null} *compress* || exec uncompress\n",
+            "\t\tcase *compress*\n\t\t\techo 'hget: compress content encoding is unavailable' >[1=2]\n\t\t\texit unsupported\n")
+    remove(src / "cmd/bitsy")
+    remove(src / "cmd/aux/multi")
+    remove(src / "games/gba/rom")
+    replace(src / "cmd/abaco/mkfile", "8c -a $CFLAGS", "$CC -a $CFLAGS")
+    replace(src / "cmd/abaco/mkfile", "8c -aa", "$CC -aa")
+
+    proto = src / "mkfile.proto"
+    replace(proto, "OS=056789qvt", "OS=367")
+    replace(proto, "CPUS=spim arm arm64 amd64 386 power power64 mips", "CPUS=amd64 arm64 wasm32")
+    replace(src / "cmd/cc/mkfile", "CURCC=6c 8c qc vc\nOTHERCC=1c 2c 5c 7c kc", "CURCC=6c 7c 3c\nOTHERCC=")
+    replace(src / "libc/mkfile", "OLDCPUS=68000 68020 sparc", "OLDCPUS=")
+    replace(src / "libmp/mkfile", "for(objtype in 386)@{", "for(objtype in $CPUS)@{")
+    replace(src / "libmp/mkfile", "objtype=arm; mk; mk 5.test 5.bigtest\n\tobjtype=amd64; mk; mk 6.test 6.bigtest\n\tobjtype=386; mk; mk 8.test 8.bigtest", "objtype=amd64; mk; mk 6.test 6.bigtest\n\tobjtype=arm64; mk; mk 7.test 7.bigtest\n\tobjtype=wasm32; mk; mk 3.test 3.bigtest")
+    replace(src / "libmp/mkfile", "rm -f [568].* *.[568]", "rm -f [367].* *.[367]")
+
+    mk = src / "mkfile"
+    replace(mk, "SUBSYS=ape\\\n\t/acme\\\n", "SUBSYS=/acme\\\n")
+    replace(mk, "\trm -f /$objtype/lib/ape/*.a\n", "")
+    mk = src / "9/mkfile"
+    data = mk.read_text()
+    start = data.index("ARCH=\\\n")
+    end = data.index("\n\nall:V:", start)
+    mk.write_text(data[:start] + "ARCH=\\\n\tarm64\\\n\tbcm64\\\n\tpc64\\\n\twasm32\\\n" + data[end:])
+    mk = src / "boot/mkfile"
+    data = mk.read_text()
+    start = data.index("ARCH=\\\n")
+    end = data.index("\n\n", start)
+    mk.write_text(data[:start] + "ARCH=bcm efi" + data[end:])
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        raise SystemExit("usage: tools/prune-tree ASSEMBLED_ROOT")
+    main(pathlib.Path(sys.argv[1]).resolve())

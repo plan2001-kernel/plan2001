@@ -19,9 +19,8 @@ A binary base, the tools, and the whole source with its git:
   for wasm32 only the base system and the tools (`tools/dist.base`: the
   file servers, rc and the commands the live system, termrc, rio and
   inst/start run, the network, an editor; 3c/3a/3l, mk, yacc, lex, ar,
-  pcc, git), the libraries (APE's too: /wasm32/lib/ape) and the boot
-  materials, the directories mk install puts the rest in (/wasm32/bin/ape,
-  games ...) - and in
+  git), the libraries and the boot materials, the directories mk install
+  puts the rest in (/wasm32/bin/games ...) - and in
   `/dist/9front/.git` the branch, its work tree the root, as 9front's
   ISO has its repository.  `tools/dist` builds the whole
   release here too (`build/dist/failed`: what does not build yet): a
@@ -48,7 +47,7 @@ an isolated test network without Internet access:
     cd / && git/pull            # the configured distribution source remote
     cd /sys/src/cmd
     for(i in cc 3c 3a 3l cpp mk) @{cd $i && mk install}
-    mk pcc.install yacc.install # the tools first
+    mk yacc.install             # the tools first
     cd /sys/src && mk install
 
 Rebuild the compilers before the rest of the system when the overlay
@@ -207,7 +206,7 @@ For SMP, pass the same `--cpus N` (1–16) to `mkimage` and `boottest`;
 the test checks the guest CPU count before exercising storage and networking.
 `build` accepts `--out`, `--iso` and `--buildvm`; `--loader-only` rebuilds
 just `bootaa64.efi` for loader development. Native builds consume the
-verified `tools/tree` source assembly and build libc and APE with the
+verified `tools/tree` source assembly and build libc with the
 architecture-aware syscall selector.
 
 The target command uses `virt,gic-version=3,highmem=off`, a Cortex-A72,

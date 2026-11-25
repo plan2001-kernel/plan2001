@@ -588,7 +588,7 @@ addlib(char *name)
 
 	/*
 	 * $O is the object's letter, $M the machine's name, as Plan 9's
-	 * loaders read them (cc.h: ../cc/cc.a$O; APE's: /$M/lib/ape/libap.a)
+	 * loaders read them (cc.h: ../cc/cc.a$O)
 	 */
 	for(d = buf; *name && d < buf+sizeof buf-8; name++)
 		if(name[0] == '$' && name[1] == 'O') {

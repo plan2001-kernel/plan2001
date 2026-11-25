@@ -4,7 +4,8 @@
 # tools/release; not its history: 9front's own is github.com/9front/9front)
 # and this tree's files over it (the files patches/9front makes, and the
 # new ones: git ls-files of main's HEAD, as tools/tree takes them),
-# without 9front's off-topic files (tools/dist.deny).  Its root is the
+# without unsupported targets (tools/prune-tree) or 9front's off-topic
+# files (tools/dist.deny).  Its root is the
 # machine's /: the installer copies it with /dist/9front/.git, and
 # bind -ac /dist/9front / makes / its work tree, as on 9front.  A commit
 # a run when the source has changed, onto the branch's last (the first
@@ -27,18 +28,22 @@ trap 'git worktree remove --force "$wt" 2>/dev/null || true' EXIT
 # this tree's files over 9front's, as tools/tree lays them
 files=$(git ls-tree -r --name-only HEAD | grep -E '^(sys|rc|wasm32)/')
 git archive HEAD -- $files | tar -x -C "$wt"
-# the patched files are among them: each must be its patch applied to 9front's
+# the patched files are among them: each must be its patches applied to
+# 9front's in order, as tools/tree applies them (one file may have several)
 tmp=$(mktemp -d)
 for p in patches/9front/*.diff; do
 	for f in $(sed -n 's|^+++ b/\([^	 ]*\).*|\1|p' "$p"); do
-		mkdir -p "$tmp/$(dirname "$f")"; git show "$base:$f" >"$tmp/$f"
+		[ -e "$tmp/$f" ] || { mkdir -p "$tmp/$(dirname "$f")"; git show "$base:$f" >"$tmp/$f"; }
 	done
 	patch -s -p1 -d "$tmp" <"$p" || { echo "treebranch: $(basename "$p") does not apply to 9front's" >&2; exit 1; }
+done
+for p in patches/9front/*.diff; do
 	for f in $(sed -n 's|^+++ b/\([^	 ]*\).*|\1|p' "$p"); do
 		cmp -s "$tmp/$f" "$wt/$f" || { echo "treebranch: $f is not $(basename "$p") applied to 9front's" >&2; exit 1; }
 	done
 done
 rm -rf "$tmp"
+"$here/prune-tree" "$wt"
 # 9front's off-topic files
 (cd "$wt" && git ls-files) | python3 -I -c '
 import re, sys
