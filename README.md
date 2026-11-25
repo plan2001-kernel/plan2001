@@ -1,6 +1,6 @@
 # Plan2001
 
-**Plan2001 is 9front, ported to AMD64, ARM64, RISC-V64 and WASM32 while preserving the original 9front operating system, source tree and interfaces as far as practical.**
+**Plan2001 is 9front, ported to AMD64, ARM64 and WASM32 while preserving the original 9front operating system, source tree and interfaces as far as practical.** RISC-V64 is a future target, without an implementation in the current source tree.
 
 This README is the project's authoritative software specification and list of goals. It describes intended behavior, not a claim that every target is already implemented.
 
@@ -24,7 +24,9 @@ Keep 9front's original directory layout and its native abstractions. Architectur
 
 **Port boundaries:** share the `sys/include/bootinfo.h` ABI and `sys/src/9/port/bootinfo.c` validation/runtime logic. Keep CPU entry, early physical mappings, framebuffer mapping and device access in architecture-specific code. Import native boot functionality selectively from `kernel/main`: `boot/efi/`, the necessary AMD64 early-boot routines, BootInfo integration, boot-argument handling and framebuffer progress markings. Do not bulk-copy the GE/O-modified `kernel/core`, `userland` or unrelated experiments. For AMD64, **start from the unmodified 9front-11952 `pc64` driver configuration** (plus narrowly necessary BootInfo and UEFI integration), preserving 9front's device model and its `#l`, `#I`, `#W`, IPv4/IPv6, ARP, networking, storage and userland services. The `kernel/main/kernel/amd64/pc64` configuration is GE/O **"O-only"** and explicitly deletes the 9front network stack; it is **not** an approved driver-pruning source for this migration. Defer any 9front-compatible driver pruning to a separate owner-approved change. Do not copy that configuration or indiscriminately delete drivers.
 
-Native targets are AMD64, ARM64 and RISC-V64. WASM32 is another **native 9front architecture**: its 9front user-space applications are compiled to and execute as WebAssembly. It is **not** a Linux userland, a Linux syscall compatibility layer, a container, or a Linux-like userspace port. The target list must not be confused with an assertion of present feature parity.
+Current native targets are AMD64 and ARM64. WASM32 is another **native 9front architecture**: its 9front user-space applications are compiled to and execute as WebAssembly. It is **not** a Linux userland, a Linux syscall compatibility layer, a container, or a Linux-like userspace port. The target list must not be confused with an assertion of present feature parity.
+
+**Approved source reduction:** the assembled OS source tree, target builds and installed distribution exclude Ghostscript (`sys/src/cmd/gs` and its exclusive resources), APE (its headers, libraries, wrappers and tests), and CPU targets other than AMD64, ARM64 (including bcm64/Pi4) and WASM32. RISC-V64 remains a documented future target only. Keep the verified 9front-11952 input intact in the cache and isolated build VM; apply this reduction deterministically when assembling Plan2001. Keep required shared compiler/linker code, native libc and C preprocessor, architecture transition assembly, supported-target drivers and host-native auxiliary tools. Ghostscript-dependent PDF/PostScript viewing, conversion and printing may be removed; keep image viewing and other independent functions. Programs that require APE may also be removed; retain APE-independent programs from the same source directories and preserve their build paths. Preserve all other software and functionality. Do not restore removed components as an incidental compatibility fix.
 
 ### One boot contract, minimal platform-specific loaders
 
@@ -75,7 +77,7 @@ The user chooses what to start. Opening a URL starts that URL's system; selectin
 - The initial native AMD64 path is accepted only when UEFI firmware -> Plan2001 EFI loader -> valid BootInfo v1 -> **9front AMD64 kernel -> 9front init -> usable 9front userland** works, including an installed offline UEFI/ESP boot. Loader messages or coloured framebuffer marks alone do not meet acceptance.
 - The existing WASM32 build and browser boot must remain functional, including its existing UI, process execution, Rio input/touch semantics, OPFS and ISO/live workflow.
 - Run targeted builds and smoke/integration tests **locally**. For QEMU KVM with TCG fallback use `-machine accel=kvm:tcg` (or `-accel kvm -accel tcg` where supported), **not** `-accel kvm:tcg`. Include OVMF for AMD64 UEFI tests and Chromium for browser tests. Do not commit diagnostic artifacts. CI stays disabled.
-- ARM64 and RISC-V64 are separate later milestones, with explicit build/boot acceptance on their chosen QEMU platforms. Neither is a blocker for AMD64/WASM32 consolidation.
+- ARM64 is a current target: validate QEMU virt boot and bcm64/Pi4 builds locally. RISC-V64 remains a later milestone with its own build and boot acceptance.
 
 ## Continuous integration policy
 

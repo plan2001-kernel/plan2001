@@ -6,7 +6,7 @@
 #	sdE1	pinnattu 9front-11952.amd64.iso: lähteet, otsakkeet,
 #		työkalut, laiteohjelmisto (/sys/src/boot/bcm) ja jakelun
 #		muut tiedostot; ei koneen omaa /sys/src:tä
-#	sdE2	sisään: tämä skripti ja tämän puun overlay (ov/...) tar-
+#	sdE2	sisään: tämä skripti ja karsittu 9front-puu (root/...) tar-
 #		muodossa, purettu hakemistoon /tmp/p2 ennen tätä
 #	sdE3	ulos: ytimet ja tarkistustiedot tar-muodossa
 #	sdE4	ulos: 9frontin oma pi3.img-levykuva (pi3 + pi4) raakana
@@ -36,12 +36,11 @@ mkdir -p $w/src $w/include $w/arm64 $w/acme $w/rc
 # tools/rpi4/buildissa luotu d775:nä, joten sen alta kopioitu puu, siinä
 # käännetyt ohjelmat ja bootfs saavat julkaisun oikeudet.
 chmod 775 $w/src $w/include $w/arm64 $w/acme $w/rc
-dircp $p2/src $w/src || die 'assembled sys/src copy'
-dircp $p2/include $w/include || die 'assembled sys/include copy'
-dircp /n/dist/arm64 $w/arm64 || die 'arm64 kopio'
-dircp /n/dist/acme $w/acme || die 'acme kopio'
-dircp /n/dist/rc $w/rc || die 'rc kopio'
-test -d $p2/ov/rc && dircp $p2/ov/rc $w/rc
+dircp $p2/root/sys/src $w/src || die 'assembled sys/src copy'
+dircp $p2/root/sys/include $w/include || die 'assembled sys/include copy'
+dircp $p2/root/arm64 $w/arm64 || die 'arm64 kopio'
+dircp $p2/root/acme $w/acme || die 'acme kopio'
+dircp $p2/root/rc $w/rc || die 'rc kopio'
 
 # isännän (amd64) työkalut julkaisusta, kohteen tiedostot kopioista
 bind -b /n/dist/amd64/bin /bin
@@ -93,17 +92,17 @@ if(! ~ $1 noimg){
 	echo '--- levykuva: /sys/lib/dist/mkfile %.pi3.img (pi3 + pi4)'
 	# /n/src9 = jakelun juuri, jonka arm64-binäärit, acme, rc ja
 	# lähteet tulevat tästä käännöksestä (vrt. 9frontin julkaisuprosessi)
-	bind /n/dist /n/src9
+	bind $p2/root /n/src9
 	bind $w/arm64 /n/src9/arm64
 	bind $w/acme /n/src9/acme
 	bind $w/rc /n/src9/rc
 	# jakelun /sys/src ilman olioita: julkaisu + overlay
 	mkdir -p $w/distsrc
-	dircp $p2/src $w/distsrc || die 'assembled distribution sources'
+	dircp $w/src $w/distsrc || die 'assembled distribution sources'
 	bind $w/distsrc /n/src9/sys/src
 	bind $w/include /n/src9/sys/include
 	mkdir -p $w/dist
-	dircp /n/dist/sys/lib/dist $w/dist || die 'dist-mkfile'
+	dircp $p2/root/sys/lib/dist $w/dist || die 'dist-mkfile'
 	cd $w/dist
 	objtype=arm64 mk plan2001.pi3.img >[2=1] || die 'levykuvan teko'
 	ls -l plan2001.pi3.img

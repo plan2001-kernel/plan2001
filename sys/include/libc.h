@@ -725,7 +725,6 @@ struct Dir {
 	char	*muid;	/* last modifier name */
 } Dir;
 
-/* keep /sys/src/ape/lib/ap/plan9/sys9.h in sync with this -rsc */
 typedef
 struct Waitmsg
 {

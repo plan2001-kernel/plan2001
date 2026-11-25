@@ -28,7 +28,7 @@ libs=$(cd "$tree/sys/src" && ls -d lib* | grep -v '^libc$')
 # on past what fails (9front's mkfiles loop over a directory's directories with rc -e: the
 # first failure ends the loop)
 TREE=$tree "$here/native" >"$d/build.log" 2>&1 || { tail -20 "$d/build.log"; echo "dist: the boot file system's programs failed (build/dist/build.log)" >&2; exit 1; }
-TREE=$tree MKFLAGS=-k "$here/native" libc $libs ape cmd games 9/wasm32 >>"$d/build.log" 2>&1 || true
+TREE=$tree MKFLAGS=-k "$here/native" libc $libs cmd games 9/wasm32 >>"$d/build.log" 2>&1 || true
 # aux's and ip's own programs (aux/listen, aux/timesync ...): their install waits for their
 # directories' (installdirs), whose rc loop ends at the first that fails; each, as mkmany installs it
 for dd in cmd/aux cmd/ip; do
@@ -70,7 +70,7 @@ git -C "$root" archive tree | tar -x -C "$out"
 rel=$("$here/release")
 git -C "$root" ls-tree -r --name-only refs/9front/front | python3 -I -c '
 import os, re, shutil, sys
-rel, out, deny = sys.argv[1:]
+rel, tree, out, deny = sys.argv[1:]
 tracked = set(l.rstrip("\n") for l in sys.stdin)
 skip = re.compile(r"^((386|68000|68020|amd64|arm|arm64|mips|power|power64|sparc|sparc64|spim)/(?!include/|mkfile$)|sys/src/|acme/bin/amd64/|dist/|tmp/)")
 deny = [re.compile(l.strip()) for l in open(deny) if l.strip() and not l.startswith("#")]
@@ -78,19 +78,22 @@ for dp, dn, fn in os.walk(rel):
 	dn.sort()
 	r = os.path.relpath(dp, rel)
 	r = "" if r == "." else r + "/"
+	if r and not os.path.isdir(os.path.join(tree, r)):
+		dn[:] = []
+		continue
 	if not fn and not dn and r and not skip.match(r):
 		os.makedirs(os.path.join(out, r), exist_ok=True)
 	for n in fn:
 		f = r + n
-		if f in tracked or skip.match(f) or any(d.search("/" + f) for d in deny):
+		if f in tracked or skip.match(f) or not os.path.exists(os.path.join(tree, f)) or any(d.search("/" + f) for d in deny):
 			continue
 		os.makedirs(os.path.join(out, r), exist_ok=True)
 		shutil.copy2(os.path.join(rel, f), os.path.join(out, f))
-' "$rel" "$out" "$here/dist.deny"
+' "$rel" "$tree" "$out" "$here/dist.deny"
 mkdir -p "$out/tmp" "$out/dist/9front" "$out/usr/glenda/bin/wasm32" "$out/wasm32/bin"
-# /$objtype's directories as 9front's ISO has them for amd64 (bin/ape, bin/games, lib/ape ...),
+# /$objtype's directories as the pruned tree has them for amd64 (bin/games, bin/aux ...),
 # and acme's: where the machine's mk install puts what it builds
-(cd "$rel/amd64" && find bin lib -mindepth 1 -type d) | while read -r b; do mkdir -p "$out/wasm32/$b"; done
+(cd "$tree/amd64" && find bin lib -mindepth 1 -type d) | while read -r b; do mkdir -p "$out/wasm32/$b"; done
 mkdir -p "$out/acme/bin/wasm32"
 python3 -I - "$here/dist.base" "$tree/wasm32/bin" "$out/wasm32/bin" <<'PY'
 import os, shutil, sys
@@ -117,7 +120,7 @@ cp -a "$fat" "$out/wasm32/"
 # yet known (git/walk looks at the file)
 g=$out/dist/9front/.git
 git init -q --template= "$out/dist/9front"
-git -C "$out/dist/9front" fetch -q --no-tags "$root" +refs/heads/tree:refs/remotes/origin/tree
+git -C "$out/dist/9front" fetch -q --depth=1 --no-tags "$root" +refs/heads/tree:refs/remotes/origin/tree
 git -C "$out/dist/9front" repack -q -a -d
 c=$(git -C "$out/dist/9front" rev-parse refs/remotes/origin/tree)
 rm -rf "$g/logs" "$g/FETCH_HEAD" "$g/index" "$g/description" "$g/info" "$g/hooks" "$g/packed-refs" "$g/refs/tags"

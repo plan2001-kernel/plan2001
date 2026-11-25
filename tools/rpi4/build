@@ -45,12 +45,11 @@ ALKUKARTTA = 1 << 30	# l.s:n KZERO-ikkuna, BootInfon on oltava sen alla
 
 def jasenet(tyo):
     """The verified pinned release assembled with its patches and overlay."""
-    tiedostot = subprocess.check_output(["git", "-C", vm9.JUURI, "ls-files", "rc"],
-                                        text=True).split()
+    tree = os.path.join(tyo, "source")
+    subprocess.check_call([os.path.join(vm9.JUURI, "tools", "tree"), tree])
     return [("build.rc", os.path.join(TAMA, "build.rc")),
-            ("native-rules.rc", os.path.join(vm9.JUURI, "tools/test/native-rules.rc"))] + \
-           vm9.source_jasenet(tyo) + \
-           [("ov/" + t, os.path.join(vm9.JUURI, t)) for t in tiedostot]
+            ("native-rules.rc", os.path.join(vm9.JUURI, "tools/test/native-rules.rc")),
+            ("root", tree)]
 
 
 def tarkista_puu():

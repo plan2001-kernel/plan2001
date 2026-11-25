@@ -9,9 +9,9 @@ PEFLAGS=$CFLAGS '-DIMAGEBASE='$IMAGEBASE
 # and its 32-bit (ia32) loader, are not Plan2001's.
 all:V: $TARG
 
-# 9frontin inst/bootsetup kopioi /386/*.efi ESP:lle tai 9fatille
+# inst/bootsetup kopioi /$cputype/*.efi ESP:lle tai 9fatille
 install:V: bootx64.efi
-	cp bootx64.efi /386
+	cp bootx64.efi /amd64
 
 %.6:	%.s
 	6a $PEFLAGS $stem.s

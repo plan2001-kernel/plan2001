@@ -5,7 +5,7 @@
 # Levyt (AHCI, katso vm9.py):
 #	sdE1	pinnattu 9front-11952.amd64.iso: lähteet, otsakkeet, kirjastot
 #		ja työkalut, ei koneen omaa (mahdollisesti muutettua) /sys/src:tä
-#	sdE2	sisään: tämä skripti ja overlay (ov/sys/...) tar-muodossa,
+#	sdE2	sisään: tämä skripti ja koottu lähde (src, include) tar-muodossa,
 #		purettu hakemistoon /tmp/p2 ennen tätä
 #	sdE3	ulos: 9pc64, bootx64.efi (ja bootaa64.efi) tar-muodossa
 #
@@ -27,12 +27,13 @@ bind -b /n/dist/amd64/bin /bin
 bind /n/dist/rc /rc
 bind /n/dist/lib /lib
 # Writable target libraries, with compiler programs from the pinned ISO.
-mkdir -p $p2/amd64/include $p2/amd64/lib/ape $p2/amd64/bin
+mkdir -p $p2/amd64/include $p2/amd64/lib $p2/amd64/bin
 # Bootfs inherits directory permissions from the target tree.
 chmod 775 $p2/amd64 $p2/amd64/bin $p2/amd64/lib $p2/amd64/include
 cp /n/dist/amd64/mkfile $p2/amd64/mkfile
 dircp /n/dist/amd64/include $p2/amd64/include || die headers
 dircp /n/dist/amd64/lib $p2/amd64/lib || die libraries
+rm -rf $p2/amd64/include/ape $p2/amd64/lib/ape
 bind $p2/amd64 /amd64
 bind /n/dist/amd64/bin /amd64/bin
 bind $p2/include /sys/include
@@ -40,8 +41,6 @@ bind $p2/src /sys/src
 objtype=amd64
 cd /sys/src/libc
 mk install >[2=1] || die libc
-cd /sys/src/ape
-mk lib.install >[2=1] || die APE
 
 # Ytimen bootfs ottaa ohjelmat nimiavaruuden /amd64/bin:stä: korjattu
 # kbdfs (sarjakonsolin syöte, patches/9front/kbdfs-*.diff)
@@ -65,14 +64,6 @@ ls -l /n/p2boot/rc/bin/bootrc /n/p2boot/amd64/bin/rc
 cmp /n/p2boot/amd64/bin/aux/kbdfs /sys/src/cmd/aux/kbdfs/6.out || die 'bootfs:n kbdfs ei ole korjattu'
 
 
-# Jaetut pc-tiedostot kuuluvat myös 386-porttiin. Tarkista ne sen
-# omalla mkfilellä ja 8c:llä, muuttamatta pc:n käynnistysreittiä.
-for(arg in $*) if(~ $arg checkpc){
-	echo '--- pc/386: jaetut memory.c ja screen.c'
-	cd /sys/src/9/pc || die pc
-	mk memory.8 screen.8 >[2=1] || die 'pc/386-yhteensopivuus'
-}
-
 echo '--- UEFI-loader: /sys/src/boot/efi'
 cd /sys/src/boot/efi || die efi
 mk bootx64.efi >[2=1] || die 'bootx64.efi:n käännös'
@@ -95,9 +86,8 @@ cp /sys/src/cmd/rc/6.out $p2/out/rc || die 'rc kopio'
 cp /sys/src/cmd/aux/kbdfs/6.out $p2/out/kbdfs || die 'kbdfs kopio'
 if(! ~ $#aa64 0)
 	cp /sys/src/boot/efi/bootaa64.efi $p2/out
-nm /amd64/lib/libc.a /amd64/lib/ape/libap.a | grep -e ' [Tt] (spawn|_SPAWN)$' && die 'native spawn interface leaked'
+nm /amd64/lib/libc.a | grep -e ' [Tt] spawn$' && die 'native spawn interface leaked'
 cp /amd64/lib/libc.a $p2/out/libc.a || die libc-output
-cp /amd64/lib/ape/libap.a $p2/out/libap.a || die ape-output
 cd $p2/out
 nm /sys/src/9/pc64/9pc64 | grep -e ' _efi64$' -e ' T main$' >entry.txt
 ls -l
