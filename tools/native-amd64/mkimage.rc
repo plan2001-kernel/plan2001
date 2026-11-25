@@ -130,6 +130,12 @@ dircp $p2/rcroot /n/newfs/rc || die 'rc-kopio'
 rm -f /n/newfs/sys/man/1/gs
 rm -rf /n/newfs/amd64/include/ape /n/newfs/amd64/lib/ape /n/newfs/amd64/bin/ape
 rm -f /n/newfs/amd64/bin/gs /n/newfs/amd64/bin/pcc
+for(p in compress eqn grap pic spin)
+	rm -f /n/newfs/amd64/bin/$p
+for(p in antiword lpdaemon lpdsend lpsend cropmarks download g3p9bit grabit hardcopy p9bitpost postgif postprint postreverse posttek tcpostio text2post tr2post)
+	rm -f /n/newfs/amd64/bin/aux/$p
+for(p in flacdec flacenc mp3enc oggdec oggenc)
+	rm -f /n/newfs/amd64/bin/audio/$p
 rm -rf /n/newfs/386 /n/newfs/68000 /n/newfs/68020 /n/newfs/arm /n/newfs/mips /n/newfs/power /n/newfs/power64 /n/newfs/sparc /n/newfs/sparc64 /n/newfs/spim
 rm -rf /n/newfs/acme/bin/386 /n/newfs/acme/bin/arm /n/newfs/acme/bin/mips /n/newfs/acme/bin/power /n/newfs/acme/bin/power64 /n/newfs/acme/bin/sparc /n/newfs/acme/bin/sparc64 /n/newfs/acme/bin/spim
 test -f /n/newfs/sys/include/bootinfo.h || die 'BootInfo-otsake puuttuu'

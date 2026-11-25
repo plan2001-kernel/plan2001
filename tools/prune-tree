@@ -177,20 +177,6 @@ def prune_page(path):
     path.write_text(data)
 
 
-def prune_lp(path):
-    data = path.read_text()
-    data, nested = re.subn(r"(?ms)^\t\tcase \*gs[^\n]*\n.*?(?=^\t\tcase |^\t\t\})", "", data)
-    if nested != 2:
-        raise SystemExit(f"prune-tree: expected 2 nested Ghostscript printer cases in {path}, got {nested}")
-    data, count = re.subn(r"(?ms)^\tcase \*gs[^\n]*\n.*?(?=^\tcase |^\t\})", "", data)
-    if count != 23:
-        raise SystemExit(f"prune-tree: expected 23 Ghostscript printer cases in {path}, got {count}")
-    replace_line = "\tcase *post*\n\t\t$proc/pdfpost $temp\n"
-    if data.count(replace_line) != 1:
-        raise SystemExit(f"prune-tree: expected PDF to PostScript printer case in {path}")
-    path.write_text(data.replace(replace_line, ""))
-
-
 def main(root):
     src = root / "sys/src"
     for name in ("386", "68000", "68020", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"):
@@ -205,13 +191,37 @@ def main(root):
                  "sys/lib/lp/process/pdfgs", "sys/lib/lp/process/pdfgsijs",
                  "sys/lib/lp/process/gspipe", "sys/lib/lp/process/gspipeijs",
                  "sys/lib/lp/process/pdfpost", "sys/man/1/ps2pdf",
-                 "sys/man/1/troff2png"):
+                 "sys/man/1/troff2png", "sys/src/cmd/eqn", "sys/src/cmd/grap",
+                 "sys/src/cmd/pic", "sys/src/cmd/spin", "sys/src/cmd/compress",
+                 "sys/src/cmd/postscript", "sys/src/cmd/lp", "sys/src/cmd/aux/antiword",
+                 "sys/lib/lp", "sys/lib/postscript", "rc/bin/lp", "rc/bin/doc2ps",
+                 "rc/bin/uncompress", "rc/bin/addpsfonts", "rc/bin/printfont",
+                 "rc/bin/dpost", "rc/bin/postscript", "sys/src/cmd/bzip2/bzip2recover.c"):
         remove(root / path)
+    for path in ("sys/doc/ape.ms", "sys/doc/ape.ps", "sys/doc/spin.ms",
+                 "sys/doc/spin.ps", "sys/man/1/eqn", "sys/man/1/grap",
+                 "sys/man/1/pic", "sys/man/1/spin", "sys/man/1/lp",
+                 "sys/man/8/lp"):
+        remove(root / path)
+    lookman = root / "sys/lib/man/lookman/index"
+    if lookman.exists():
+        lookman.write_text("".join(line for line in lookman.read_text().splitlines(keepends=True)
+                                   if not any(line.endswith("/" + name + "\n") for name in
+                                              ("pcc", "gs", "eqn", "grap", "pic", "spin", "lp", "ps2pdf", "troff2png"))))
     for obj in ("386", "68020", "arm", "mips", "power", "sparc"):
         remove(root / "sys/lib/acid" / obj)
     for obj in ("amd64", "arm64", "wasm32"):
         for part in ("include/ape", "lib/ape", "bin/ape", "bin/gs"):
             remove(root / obj / part)
+        for program in ("pcc", "compress", "eqn", "grap", "pic", "spin"):
+            remove(root / obj / "bin" / program)
+        for program in ("antiword", "lpdaemon", "lpdsend", "lpsend", "cropmarks",
+                        "download", "g3p9bit", "grabit", "hardcopy", "p9bitpost",
+                        "postgif", "postprint", "postreverse", "posttek", "tcpostio",
+                        "text2post", "tr2post"):
+            remove(root / obj / "bin/aux" / program)
+        for program in ("flacdec", "flacenc", "mp3enc", "oggdec", "oggenc"):
+            remove(root / obj / "bin/audio" / program)
     for obj in ("386", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"):
         remove(root / "acme/bin" / obj)
     for path in ("sys/src/boot/efi/ia32.s", "wasm32/include/ape"):
@@ -221,7 +231,8 @@ def main(root):
     proto = root / "sys/lib/sysconfig/proto/portproto"
     if proto.exists():
         proto.write_text("\n".join(line for line in proto.read_text().splitlines()
-                                   if line.strip() not in {"ape", "ghostscript", "apeselect"}) + "\n")
+                                   if line.strip() not in {"ape", "ghostscript", "apeselect",
+                                                           "lp", "postscript"}) + "\n")
 
     pc64 = src / "9/pc64"
     pc = src / "9/pc"
@@ -268,9 +279,25 @@ def main(root):
     prune_page(src / "cmd/page.c")
     cmdmk = src / "cmd/mkfile"
     cmdmk.write_text(cmdmk.read_text() + "\n$O.page: page.$O /$objtype/lib/libgeometry.a\n\t$LD -o $target $prereq\n")
-    prune_lp(root / "sys/lib/lp/process/generic")
     authproto = root / "sys/lib/sysconfig/auth/authproto"
     authproto.write_text(authproto.read_text().replace("\t\tgs\t\t775 sys sys\n", ""))
+
+    replace(src / "cmd/aux/mkfile", "\tantiword\\\n", "")
+    audio = src / "cmd/audio/mkfile"
+    replace(audio, "LIBS=libogg libvorbis libFLAC libtags",
+            "LIBS=libtags")
+    replace(audio, "PROGS=pcmconv oggdec oggenc mp3dec mp3enc flacdec flacenc wavdec sundec mixfs readtags zuke scream",
+            "PROGS=pcmconv mp3dec wavdec sundec mixfs readtags zuke scream")
+    for name in ("libogg", "libvorbis", "libFLAC", "oggdec", "oggenc", "mp3enc", "flacdec", "flacenc"):
+        remove(src / "cmd/audio" / name)
+    bzip = src / "cmd/bzip2/mkfile"
+    replace(bzip, "bzip2recover.$O: bzip2recover.c\n\tpcc -D_POSIX_SOURCE -D_BSD_EXTENSION -c bzip2recover.c\n\n", "")
+    play = root / "rc/bin/play"
+    for old in ("\t\tcase *ogg* *vorbis*\n\t\t\taudio/oggdec\n",
+                "\t\tcase *flac*\n\t\t\taudio/flacdec\n",
+                "\t\t\tcase *.ogg *.OGG\n\t\t\t\taudio/oggdec\n",
+                "\t\t\tcase *.flac *.FLAC\n\t\t\t\taudio/flacdec\n"):
+        replace(play, old, "")
     remove(src / "cmd/bitsy")
     remove(src / "cmd/aux/multi")
     remove(src / "games/gba/rom")
