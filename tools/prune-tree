@@ -426,7 +426,11 @@ def main(root):
         remove(root / "acme/bin" / obj)
     for path in ("sys/src/boot/efi/ia32.s", "wasm32/include/ape"):
         remove(root / path)
-    remove(root / "rc/bin/inst/bootplan9")
+    bootplan9 = root / "rc/bin/inst/bootplan9"
+    data = bootplan9.read_text()
+    start = data.index("if(test -f /386/mbr){")
+    end = data.index("prompt 'Mark the Plan 9 partition active'", start)
+    bootplan9.write_text(data[:start] + data[end:])
     remove(root / "sys/lib/sysconfig/proto/pcproto")
     proto = root / "sys/lib/sysconfig/proto/portproto"
     if proto.exists():
