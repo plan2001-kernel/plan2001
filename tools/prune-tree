@@ -177,6 +177,23 @@ def prune_page(path):
     path.write_text(data)
 
 
+def prune_distproto(path):
+    unsupported = {"386", "68000", "68020", "arm", "power", "power64",
+                   "sparc", "sparc64", "mips", "spim"}
+    kept = []
+    section = ""
+    for line in path.read_text().splitlines(keepends=True):
+        if line and line[0] not in " \t#\n":
+            section = line.split()[0]
+        if section in unsupported:
+            continue
+        name = line.strip().split()[0] if line.strip() else ""
+        if name == "ape" or (section == "acme" and name in unsupported):
+            continue
+        kept.append(line)
+    path.write_text("".join(kept))
+
+
 def main(root):
     src = root / "sys/src"
     shutil.copyfile(root / "386/include/ureg.h", root / "sys/include/realmode.h")
@@ -186,7 +203,8 @@ def main(root):
                  "sys/src/cmd/gs", "sys/src/cmd/pcc.c", "sys/man/1/gs",
                  "sys/man/1/pc", "sys/man/1/pcc", "sys/man/1/2a",
                  "sys/man/1/2c", "sys/man/1/2l", "rc/bin/ape", "rc/lib/ape",
-                 "sys/lib/dist/usr/glenda/bin/386", "rc/bin/pdf2ps",
+                 "sys/lib/dist/usr/glenda/bin/386", "sys/lib/sysconfig/proto/armpaqproto",
+                 "rc/bin/pdf2ps",
                  "rc/bin/ps2pdf", "rc/bin/ps2gif", "rc/bin/psfax",
                  "rc/bin/troff2gif", "rc/bin/troff2png", "rc/bin/fax",
                  "sys/lib/lp/process/pdfgs", "sys/lib/lp/process/pdfgsijs",
@@ -290,6 +308,9 @@ def main(root):
     cmdmk.write_text(cmdmk.read_text() + "\n$O.page: page.$O /$objtype/lib/libgeometry.a\n\t$LD -o $target $prereq\n")
     authproto = root / "sys/lib/sysconfig/auth/authproto"
     authproto.write_text(authproto.read_text().replace("\t\tgs\t\t775 sys sys\n", ""))
+    prune_distproto(root / "sys/lib/sysconfig/proto/distproto")
+    bootproto = root / "sys/lib/sysconfig/proto/9bootproto"
+    bootproto.write_text("uid=sys\ngid=sys\ncfg\td775\n\tplan9.ini\t664\n")
 
     replace(src / "cmd/aux/mkfile", "\tantiword\\\n", "")
     replace(src / "cmd/aux/mkfile", "\t8prefix\\\n", "")
