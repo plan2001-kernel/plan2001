@@ -162,6 +162,35 @@ def prune_libmach(directory):
     exe.write_text(data)
 
 
+def prune_page(path):
+    data = path.read_text()
+    start = data.index("typedef struct Ghost Ghost;")
+    end = data.index("int\ninfernobithdr(", start)
+    data = data[:start] + data[end:]
+    start = data.index("int\npopengs(")
+    end = data.index("int\nfiletype(", start)
+    data = data[:start] + data[end:]
+    data = "\n".join(line for line in data.split("\n") if "popengs," not in line)
+    data = data.replace("int ppi = 100;\n", "")
+    data = data.replace(" [ -p ppi ]", "")
+    data = data.replace("\tcase 'p':\n\t\tppi = atoi(EARGF(usage()));\n\t\tbreak;\n", "")
+    path.write_text(data)
+
+
+def prune_lp(path):
+    data = path.read_text()
+    data, nested = re.subn(r"(?ms)^\t\tcase \*gs[^\n]*\n.*?(?=^\t\tcase |^\t\t\})", "", data)
+    if nested != 2:
+        raise SystemExit(f"prune-tree: expected 2 nested Ghostscript printer cases in {path}, got {nested}")
+    data, count = re.subn(r"(?ms)^\tcase \*gs[^\n]*\n.*?(?=^\tcase |^\t\})", "", data)
+    if count != 23:
+        raise SystemExit(f"prune-tree: expected 23 Ghostscript printer cases in {path}, got {count}")
+    replace_line = "\tcase *post*\n\t\t$proc/pdfpost $temp\n"
+    if data.count(replace_line) != 1:
+        raise SystemExit(f"prune-tree: expected PDF to PostScript printer case in {path}")
+    path.write_text(data.replace(replace_line, ""))
+
+
 def main(root):
     src = root / "sys/src"
     for name in ("386", "68000", "68020", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"):
@@ -170,7 +199,13 @@ def main(root):
                  "sys/src/cmd/gs", "sys/src/cmd/pcc.c", "sys/man/1/gs",
                  "sys/man/1/pc", "sys/man/1/pcc", "sys/man/1/2a",
                  "sys/man/1/2c", "sys/man/1/2l", "rc/bin/ape", "rc/lib/ape",
-                 "sys/lib/dist/usr/glenda/bin/386"):
+                 "sys/lib/dist/usr/glenda/bin/386", "rc/bin/pdf2ps",
+                 "rc/bin/ps2pdf", "rc/bin/ps2gif", "rc/bin/psfax",
+                 "rc/bin/troff2gif", "rc/bin/troff2png", "rc/bin/fax",
+                 "sys/lib/lp/process/pdfgs", "sys/lib/lp/process/pdfgsijs",
+                 "sys/lib/lp/process/gspipe", "sys/lib/lp/process/gspipeijs",
+                 "sys/lib/lp/process/pdfpost", "sys/man/1/ps2pdf",
+                 "sys/man/1/troff2png"):
         remove(root / path)
     for obj in ("386", "68020", "arm", "mips", "power", "sparc"):
         remove(root / "sys/lib/acid" / obj)
@@ -230,6 +265,12 @@ def main(root):
     for arch in ("386", "arm", "mips", "power", "power64"):
         remove(src / "libthread" / (arch + ".c"))
     prune_libmach(src / "libmach")
+    prune_page(src / "cmd/page.c")
+    cmdmk = src / "cmd/mkfile"
+    cmdmk.write_text(cmdmk.read_text() + "\n$O.page: page.$O /$objtype/lib/libgeometry.a\n\t$LD -o $target $prereq\n")
+    prune_lp(root / "sys/lib/lp/process/generic")
+    authproto = root / "sys/lib/sysconfig/auth/authproto"
+    authproto.write_text(authproto.read_text().replace("\t\tgs\t\t775 sys sys\n", ""))
     remove(src / "cmd/bitsy")
     remove(src / "cmd/aux/multi")
     remove(src / "games/gba/rom")
