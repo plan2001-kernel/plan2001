@@ -1,0 +1,174 @@
+--- a/sys/src/cmd/aux/kbdfs/kbdfs.c
++++ b/sys/src/cmd/aux/kbdfs/kbdfs.c
+@@ -112,6 +112,7 @@
+ int killfd = -1;
+ 
+ int kbdopen;
++int serialcons;	/* -c: the serial line is a console of its own */
+ int consctlopen;
+ int quiet = 0;
+ char *sname = nil;
+@@ -130,6 +131,7 @@
+ 
+ Channel *rawchan;	/* chan(Rune) */
+ Channel *runechan;	/* chan(Rune) */
++Channel *serialchan;	/* chan(Rune): runes from consfd */
+ 
+ Channel *conschan;	/* chan(char*) */
+ Channel *kbdchan;	/* chan(char*) */
+@@ -747,7 +749,7 @@
+ 			}
+ 			if(cr = (r == '\r'))
+ 				r = '\n';
+-			send(runechan, &r);
++			send(serialchan, &r);
+ 		}
+ 		if(n < 0) n = 0;
+ 		p = buf + n;
+@@ -1096,11 +1098,11 @@
+ ctlproc(void *)
+ {
+ 	Channel *cook, *aconsr[2], *akbdr[2];
+-	enum { ACTL, ARUNE, AEND };
++	enum { ACTL, ARUNE, ASERIAL, ASEND, AEND };
+ 	Alt a[AEND+1];
+ 	Rune r;
+-	int c, raw;
+-	char *s;
++	int c, i, raw;
++	char *s, *sp;
+ 
+ 	threadsetname("ctlproc");
+ 
+@@ -1111,7 +1113,7 @@
+ 	if(scanfd >= 0)
+ 		proccreate(scanproc, nil, STACK);	/* scanfd -> keychan */
+ 	if(consfd >= 0)
+-		proccreate(consproc, nil, STACK);	/* consfd -> runechan */
++		proccreate(consproc, nil, STACK);	/* consfd -> serialchan */
+ 	if(notefd >= 0)
+ 		proccreate(intrproc, nil, STACK);	/* intchan -> notefd */
+ 
+@@ -1139,10 +1141,20 @@
+ 	a[ARUNE].v = &r;
+ 	a[ARUNE].op = CHANRCV;
+ 
++	a[ASERIAL].c = serialchan;
++	a[ASERIAL].v = &r;
++
++	/* a raw rune from consfd waiting for a reader of cons */
++	sp = nil;
++	a[ASEND].c = conschan;
++	a[ASEND].v = &sp;
++
+ 	a[AEND].op = CHANEND;
+ 
+ 	for(;;){
+-		switch(alt(a)){
++		a[ASERIAL].op = serialchan != nil && sp == nil ? CHANRCV : CHANNOP;
++		a[ASEND].op = sp != nil ? CHANSND : CHANNOP;
++		switch(i = alt(a)){
+ 		case ACTL:
+ 			switch(c){
+ 			case Rawoff:
+@@ -1154,7 +1166,12 @@
+ 			}
+ 			break;
+ 		case ARUNE:
+-			if(kbdopen){
++		case ASERIAL:
++			/*
++			 * with -c, the serial line's runes stay on cons
++			 * even while a window system reads kbd
++			 */
++			if(kbdopen && (i == ARUNE || !serialcons)){
+ 				s = emalloc9p(UTFmax+2);
+ 				s[0] = 'c';
+ 				s[1+runetochar(s+1, &r)] = 0;
+@@ -1165,6 +1182,17 @@
+ 			if(raw){
+ 				s = emalloc9p(UTFmax+1);
+ 				s[runetochar(s, &r)] = 0;
++				/*
++				 * conschan holds 128 runes: a paste on the
++				 * line outran its reader and nbsendp dropped
++				 * the rest.  Hold consfd's rune (and stop
++				 * reading consfd) until a reader takes it,
++				 * still taking ctlchan's messages meanwhile.
++				 */
++				if(i == ASERIAL){
++					sp = s;
++					break;
++				}
+ 				if(nbsendp(conschan, s) <= 0)
+ 					free(s);
+ 				break;
+@@ -1179,6 +1207,9 @@
+ 			 */
+ 			send(cook, &r);
+ 			break;
++		case ASEND:
++			sp = nil;
++			break;
+ 		}
+ 	}
+ }
+@@ -1639,7 +1670,7 @@
+ void
+ usage(void)
+ {
+-	fprint(2, "usage: %s [ -qdD ] [ -s sname ] [ -m mntpnt ] [ file ]\n", argv0);
++	fprint(2, "usage: %s [ -qdDc ] [ -s sname ] [ -m mntpnt ] [ file ]\n", argv0);
+ 	exits("usage");
+ }
+ 
+@@ -1656,6 +1687,9 @@
+ 	case 's':
+ 		sname = EARGF(usage());
+ 		break;
++	case 'c':
++		serialcons++;
++		break;
+ 	case 'm':
+ 		mntpt = EARGF(usage());
+ 		break;
+@@ -1687,6 +1721,8 @@
+ 	ctlchan = chancreate(sizeof(int), 0);
+ 	rawchan = chancreate(sizeof(Rune), 0);
+ 	runechan = chancreate(sizeof(Rune), 256);
++	if(consfd >= 0)
++		serialchan = chancreate(sizeof(Rune), 256);
+ 	conschan = chancreate(sizeof(char*), 128);
+ 	kbdchan = chancreate(sizeof(char*), 128);
+ 	intchan = chancreate(sizeof(int), 0);
+--- a/sys/man/8/kbdfs
++++ b/sys/man/8/kbdfs
+@@ -4,7 +4,7 @@
+ .SH SYNOPSIS
+ .B aux/kbdfs
+ [
+-.B -Dd
++.B -Ddc
+ ] [
+ .B -s
+ .I srv
+@@ -88,6 +88,19 @@
+ .B /dev
+ (the default).
+ .PP
++With the
++.B -c
++flag, characters read from
++.I consfile
++always go to
++.BR cons ,
++even while
++.B kbd
++is open; otherwise they are given to the reader of
++.B kbd
++(the window system) as the keyboard's are.
++Ctl-H, ctl-U, ctl-W and DEL apply to them as to typed ones.
++.PP
+ The
+ .B console
+ command executes

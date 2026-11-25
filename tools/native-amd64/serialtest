@@ -1,0 +1,563 @@
+#!/usr/bin/env python3
+"""
+Plan2001 AMD64: sarjakonsolin syötteen ja tulosteen eheys QEMU:ssa ilman
+verkkoa.  Konsoli on 9frontin oma: i8250 (#t/eia0) -> aux/kbdfs (rivin-
+muokkaus, kaiku, raw-tila) -> rc.  Bulkkiautomaatio kuuluu 9ptermille
+(boottest); tämä testi tarkistaa ihmisen ja palautustilan konsolin.
+
+    tools/native-amd64/serialtest [--image KUVA] [--disk sdE0]
+        [--bus ahci|vscsi|vblk] [--machine q35|pc] [--memory MiB] [--cpu N]
+        [--transport stdio|pty|socket] [--boots N] [--quick] [--keep]
+
+Kuvasta (tools/native-amd64/mkimage) tehdään harva kertakäyttökopio, jonka
+ESP:n plan9.ini:stä poistetaan nobootprompt ja johon lisätään console=0,
+ellei konsoliriviä ole.  Jokainen käynnistys:
+
+  1. bootrc kysyy bootargsia sarjakonsolissa: !rc avaa palautus-rc:n ennen
+     juuren liittämistä (komennot ja tulosteet tarkistetaan), exit palaa
+     kysymykseen ja bootargs kirjoitetaan kokonaan sarjaportista.
+  2. rc-kehote: numeroidut rivit r00001\\n... (2016 ja 20048 tavua: rivin
+     ensimmäinen tavu heti edellisen rivinvaihdon perään) eri tahdeilla
+     cooked-tilan cat-tyyppiselle lukijalle (sed) ja raw-tilan lukijalle
+     (read -c), LF-, CR- ja CRLF-rivinvaihdot, kaiku, askelpalautin, ^U,
+     ^W, DEL, rc:n uudelleenohjaukset ja lainaukset sekä tuloste.  Jokainen
+     tiedosto luetaan takaisin xd:llä ja verrataan tavu tavulta; i8250:n
+     laskurit (framing, overruns, berr, serr) eivät saa kasvaa.
+
+Tahti on (tavua kerralla, tauko): 1/10 ms on tasaista kirjoitusta, 16/20 ms
+liitettä, "purske" kirjoittaa kaiken kerralla (isäntä -> QEMU -> 16550
+-tahdistus).  Odotetut muunnokset (kbdfs: CR -> LF, CRLF -> LF; raw-tilassa
+CR -> LF) huomioidaan; muu poikkeama on FAIL.  Uusintayrityksiä ei ole.
+
+Nopeussopimus: cooked-tila kaiun kanssa on häviötön vähintään 3200 B/s
+jatkuvalla syötteellä (64 B/20 ms, yli kolminkertainen 9600 baudin
+linjanopeuteen nähden) ja purskeissa, jotka mahtuvat ytimen jonoon (8 KiB).
+QEMU:n 16550 ei tahdista vastaanottoa baudinopeudella, joten 20048 tavun
+purske (cooked ja raw) ylittää sopimuksen: häviö sallitaan vain, jos i8250:n serr laskee
+sen, saadun on oltava lähetetyn osajono (ei vieraita tavuja, järjestys
+säilyy) ja konsolin on vastattava sen jälkeen.
+Konsolin loki: KUVA.serialtest.log.
+"""
+
+import argparse
+import difflib
+import os
+import re
+import select
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import tty
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vm9  # noqa: E402
+
+ESP_OFFSET = 2048 * 512   # mkimage: ESP alkaa 1 MiB:stä
+PURSKE = 1 << 20
+PITKA = b"".join(b"%04d " % i for i in range(1, 201))[:-1] + b"\n"
+
+
+class SarjaKone(vm9.Kone):
+    """vm9.Kone, jonka kone, levyväylä ja sarjaportin siirtotie valitaan."""
+
+    def __init__(self, kuva, loki, kone, vayla, siirto, muisti, cpu):
+        super().__init__([], vm9.Ovmf.etsi(), loki, muisti=muisti, cpu=cpu, kone=kone)
+        self.kuva = kuva
+        self.vayla = vayla
+        self.siirto = siirto
+        self.lue_fd = None
+        self.kirj_fd = None
+        self.liitos = None
+
+    def komento(self):
+        k = super().komento()
+        i = k.index("ahci,id=ahci")
+        if self.vayla != "ahci":
+            del k[i - 1:i + 1]
+        i = k.index("-serial")
+        if self.siirto == "pty":
+            k[i + 1] = "pty"
+        elif self.siirto == "socket":
+            self.liitos = os.path.join(self.tyohak, "serial.sock")
+            k[i:i + 2] = ["-chardev", "socket,id=s0,path=%s,server=on,wait=on" % self.liitos,
+                          "-serial", "chardev:s0"]
+        d = "file=%s,format=raw,if=none,id=d0" % self.kuva
+        if self.vayla == "ahci":
+            k += ["-drive", d, "-device", "ide-hd,drive=d0,bus=ahci.0,bootindex=0"]
+        elif self.vayla == "vscsi":
+            k += ["-device", "virtio-scsi-pci,id=s0", "-drive", d,
+                  "-device", "scsi-hd,drive=d0,bus=s0.0,channel=0,scsi-id=0,lun=0,bootindex=0"]
+        else:
+            k += ["-drive", d, "-device", "virtio-blk-pci,drive=d0,bootindex=0"]
+        return k
+
+    def kaynnista(self):
+        self.lokitiedosto = open(self.lokipolku, "ab")
+        k = self.komento()
+        if self.siirto == "stdio":
+            self.proc = subprocess.Popen(k, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, bufsize=0)
+            self.lue_fd, self.kirj_fd = self.proc.stdout.fileno(), self.proc.stdin.fileno()
+        elif self.siirto == "pty":
+            self.proc = subprocess.Popen(k, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, bufsize=0)
+            rivi = b""
+            while not (rivi.endswith(b"\n") and b"/dev/pts/" in rivi):
+                c = self.proc.stdout.read(1)
+                if not c:
+                    raise vm9.VirheVM("QEMU ei kertonut pty:tä: %r" % rivi)
+                rivi += c
+            pts = re.search(rb"(/dev/pts/\d+)", rivi).group(1).decode()
+            self.lue_fd = self.kirj_fd = os.open(pts, os.O_RDWR | os.O_NOCTTY)
+            tty.setraw(self.lue_fd)
+        else:
+            self.proc = subprocess.Popen(k, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL)
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            for _ in range(200):
+                try:
+                    s.connect(self.liitos)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+            else:
+                raise vm9.VirheVM("sarjaportin pistoke ei avautunut")
+            self.liitos = s
+            self.lue_fd = self.kirj_fd = s.fileno()
+
+    def _lue(self, aika):
+        if self.proc.poll() is not None:
+            raise vm9.VirheVM("QEMU päättyi (koodi %s)" % self.proc.returncode)
+        r, _, _ = select.select([self.lue_fd], [], [], aika)
+        if r:
+            try:
+                data = os.read(self.lue_fd, 65536)
+            except OSError:
+                data = b""
+            if not data:
+                time.sleep(0.1)
+                if self.proc.poll() is not None:
+                    raise vm9.VirheVM("QEMU päättyi (koodi %s)" % self.proc.returncode)
+                return
+            self._talleta(data)
+
+    def kirjoita(self, data, koko=PURSKE, tauko=0.0):
+        """
+        Kirjoita sarjaporttiin palasina; lue samalla tulostetta, jotta
+        vieraan kaiku ei pysäytä sen lähetystä (eikä siten syötettä).
+        """
+        for i in range(0, len(data), koko):
+            pala = memoryview(data[i:i + koko])
+            while pala:
+                r, w, _ = select.select([self.lue_fd], [self.kirj_fd], [], 1.0)
+                if r:
+                    self._lue(0)
+                if w:
+                    n = os.write(self.kirj_fd, pala)
+                    pala = pala[n:]
+                elif self.proc.poll() is not None:
+                    raise vm9.VirheVM("QEMU päättyi (koodi %s)" % self.proc.returncode)
+            if tauko:
+                loppu = time.time() + tauko
+                while time.time() < loppu:
+                    self._lue(max(0, loppu - time.time()))
+
+    def laheta(self, teksti):
+        # komennot hitaasti, kuten vm9.Kone; tarkistettava data kirjoita():lla
+        self.kirjoita(teksti.encode(), 16, 0.02)
+
+    def tapa(self):
+        super().tapa()
+        for fd in {self.lue_fd, self.kirj_fd} - {None}:
+            if self.siirto == "pty":
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        if isinstance(self.liitos, socket.socket):
+            self.liitos.close()
+
+
+class Tarkistus:
+    def __init__(self):
+        self.tulokset = []
+
+    def ok(self, nimi, ehto, tieto=""):
+        luokka = "OK" if ehto else "FAIL"
+        self.tulokset.append((nimi, luokka, tieto))
+        print("%-6s %s%s" % (luokka, nimi, (": " + tieto) if tieto else ""))
+        sys.stdout.flush()
+
+
+def rivit(n, loppu=b"\n"):
+    return b"".join(b"r%05d" % i + loppu for i in range(1, n + 1))
+
+
+def laskurit(vm):
+    t, _ = vm.aja("cat /dev/eia0status", 30)
+    m = re.search(r"framing\((\d+)\) overruns\((\d+)\) berr\((\d+)\) serr\((\d+)\)", t)
+    if not m:
+        raise vm9.VirheVM("eia0status ei jäsenny: %r" % t)
+    return tuple(int(x) for x in m.groups())
+
+
+def lue_tiedosto(vm, polku):
+    """Vieraan tiedosto tavuina (xd:n heksa ei muutu konsolin muunnoksissa)."""
+    t, _ = vm.aja("xd -1x " + polku, 600)
+    tavut = bytearray()
+    for r in t.splitlines():
+        osat = r.split()
+        if len(osat) > 1 and re.fullmatch(r"[0-9a-f]{7}", osat[0]):
+            tavut += bytes(int(x, 16) for x in osat[1:])
+    return bytes(tavut)
+
+
+def erot(odotettu, saatu):
+    """
+    (puuttuvat, ylimääräiset, ensimmäiset poikkeamat) tavutasolla.  Ensin
+    rivit (numeroidut rivit ovat yksilöllisiä, joten vertailu on nopea),
+    sitten tavut vain poikkeavien rivilohkojen sisällä.
+    """
+    a = odotettu.splitlines(keepends=True)
+    b = saatu.splitlines(keepends=True)
+    pois = lisa = 0
+    kuvaus = []
+    for op, a1, a2, b1, b2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            continue
+        # yhtä monta riviä: rivi kerrallaan (pitkä lohko pysyy nopeana)
+        if a2 - a1 == b2 - b1:
+            parit = [(a1 + i, a[a1 + i], b[b1 + i]) for i in range(a2 - a1)]
+        else:
+            parit = [(a1, b"".join(a[a1:a2]), b"".join(b[b1:b2]))]
+        for rivi, x, y in parit:
+            if x == y:
+                continue
+            if len(x) + len(y) > 16384:
+                # epäsuhtainen jättilohko: vain kokoero, ei tavukohdistusta
+                pois += max(0, len(x) - len(y))
+                lisa += max(0, len(y) - len(x)) or (1 if x != y else 0)
+                kuvaus.append("lohko rivistä %d: %d -> %d tavua" % (rivi + 1, len(x), len(y)))
+                continue
+            for op2, x1, x2, y1, y2 in difflib.SequenceMatcher(None, x, y, autojunk=False).get_opcodes():
+                if op2 == "equal":
+                    continue
+                pois += x2 - x1
+                lisa += y2 - y1
+                if len(kuvaus) < 4:
+                    kuvaus.append("%s rivi %d: %r -> %r" % (op2, rivi + x.count(b"\n", 0, x1) + 1,
+                                                          x[x1:x2][:24], y[y1:y2][:24]))
+    return pois, lisa, kuvaus
+
+
+def osajono(saatu, lahetetty):
+    """Onko saatu lähetetyn osajono (tavuja voi puuttua, ei lisätä eikä siirtää)."""
+    j = 0
+    for c in saatu:
+        j = lahetetty.find(c, j)
+        if j < 0:
+            return False
+        j += 1
+    return True
+
+
+def ylikuorma_tulos(tk, nimi, odotettu, lahetetty, saatu, ennen, jalkeen, lisatieto=""):
+    """
+    Ylikuorma: häviö sallitaan vain serr:n laskemana, ja saadun on oltava
+    lähetetyn osajono (lähetetty sisältää testin omat loppurivit).
+    """
+    kasvu = tuple(b - a for a, b in zip(ennen, jalkeen))
+    pois = max(0, len(odotettu) - len(saatu))
+    ok = osajono(saatu, lahetetty)
+    tk.ok(nimi + " (rajattu ylikuorma)", ok and (saatu == odotettu or kasvu[3] > 0),
+          "%d/%d tavua, puuttuu %d, %s, i8250 f/o/b/s +%s, konsoli vastaa%s" % (
+              len(saatu), len(odotettu), pois, "järjestys säilyi" if ok else "VIERAITA TAVUJA",
+              "/".join(map(str, kasvu)), lisatieto))
+
+
+def tulos(tk, nimi, odotettu, saatu, ennen, jalkeen, lisatieto=""):
+    pois, lisa, kuvaus = erot(odotettu, saatu)
+    kasvu = tuple(b - a for a, b in zip(ennen, jalkeen))
+    ehto = pois == 0 and lisa == 0 and not any(kasvu)
+    tieto = "%d/%d tavua, puuttuu %d, ylimääräisiä %d, i8250 f/o/b/s +%s%s" % (
+        len(saatu), len(odotettu), pois, lisa, "/".join(map(str, kasvu)), lisatieto)
+    if kuvaus:
+        tieto += "; " + "; ".join(kuvaus)
+    tk.ok(nimi, ehto, tieto)
+
+
+def cooked(vm, tk, nimi, data, odotettu, koko, tauko, kaiku=True, ylikuorma=False):
+    """
+    Cooked-tila: sed kirjoittaa rivit tiedostoon ja lopettaa loppurivillä.
+    Loppurivi tunnistetaan sen lopusta, joten testin päättyminen ei riipu
+    rivin ensimmäisestä tavusta (eikä ^D:stä, joka on juuri sellainen).
+
+    ylikuorma: syöte ylittää tuetun nopeuden.  Häviö sallitaan vain, jos
+    ydin laskee sen (serr: devuartin 8 KiB jono täynnä), saadun on oltava
+    lähetetyn osajono ja konsolin on vastattava sen jälkeen.
+    """
+    ennen = laskurit(vm)
+    vm.laheta("rm -f /tmp/st; sed '/P2STLOPPU$/q' >/tmp/st; echo P2ST^VALMIS\n")
+    vm.odota(r"VALMIS\r?\n", 30)
+    time.sleep(0.5)
+    vm.puskuri = b""
+    alku = len(vm.kaikki)
+    vm.kirjoita(data, koko, tauko)
+    vm.kirjoita(b"P2STLOPPU\n")
+    if ylikuorma:
+        try:
+            vm.odota(r"P2STVALMIS", 120)
+        except vm9.VirheVM:
+            # loppurivi hävisi jonon ylivuodossa: uusi loppurivi
+            vm.kirjoita(b"\nP2STLOPPU\n")
+            try:
+                vm.odota(r"P2STVALMIS", 60)
+            except vm9.VirheVM:
+                tk.ok(nimi + " (konsoli vastaa)", False, repr(vm.puskuri[-200:]))
+                raise
+    else:
+        vm.odota(r"P2STVALMIS", 600)
+    kaiutettu = vm.kaikki[alku:]
+    saatu = lue_tiedosto(vm, "/tmp/st")
+    saatu = saatu[:saatu.rfind(b"P2STLOPPU")] if b"P2STLOPPU" in saatu else saatu
+    jalkeen = laskurit(vm)
+    if ylikuorma:
+        # uudelleen lähetetty loppurivi: sen rivinvaihto ja ensimmäisen
+        # loppurivin jäänne voivat jäädä tiedostoon
+        ylikuorma_tulos(tk, nimi, odotettu, data + b"P2STLOPPU\n\n", saatu, ennen, jalkeen)
+    elif kaiku:
+        # kaiku: kbdfs kirjoittaa jokaisen merkin; ydin muuttaa \n -> \r\n
+        k = kaiutettu.replace(b"\r\n", b"\n")
+        k = k[:k.find(b"P2STLOPPU")] if b"P2STLOPPU" in k else k
+        kp, kl, _ = erot(odotettu, k)
+        tulos(tk, nimi, odotettu, saatu, ennen, jalkeen)
+        tk.ok(nimi + " (kaiku)", kp == kl == 0, "puuttuu %d, ylimääräisiä %d" % (kp, kl))
+    else:
+        tulos(tk, nimi, odotettu, saatu, ennen, jalkeen)
+
+
+def raw(vm, tk, nimi, data, koko, tauko, ylikuorma=False):
+    """
+    Raw-tila: read -c lukee täsmälleen len(data) tavua, ei kaikua.
+    ylikuorma: kuten cooked(), häviö vain serr:n laskemana.
+    """
+    ennen = laskurit(vm)
+    vm.laheta("rm -f /tmp/st; {echo -n rawon >[1=3]; read -c %d >/tmp/st} >[3]/dev/consctl; echo P2ST^VALMIS\n"
+              % len(data))
+    time.sleep(1.5)
+    vm.puskuri = b""
+    vm.kirjoita(data, koko, tauko)
+    # Puuttuvat tavut korvataan täytteellä (~, 64 tavua kerrallaan,
+    # tuetulla nopeudella), jotta lukija päättyy ja häviö näkyy.  Datassa
+    # ei ole ~-merkkejä, joten täyte poistetaan tiedoston lopusta; lukijan
+    # jälkeen tullut täyte on rc:n rivillä: ^U pyyhkii sen, ja rivinvaihto
+    # ajaa rc:lle jo luovutetun osan (virheilmoitus, ei vaikutusta).
+    try:
+        vm.odota(r"P2STVALMIS", 10)
+    except vm9.VirheVM:
+        for _ in range(len(data) // 64 + 2):
+            vm.kirjoita(b"~" * 64)
+            try:
+                vm.odota(r"P2STVALMIS", 0.05)
+                break
+            except vm9.VirheVM:
+                pass
+        else:
+            raise vm9.VirheVM("raw-lukija ei päättynyt täytteellä")
+        time.sleep(0.5)
+        vm.kirjoita(b"\x15\n")
+        time.sleep(0.5)
+    saatu = lue_tiedosto(vm, "/tmp/st")
+    taytteet = len(saatu) - len(saatu.rstrip(b"~"))
+    saatu = saatu[:len(saatu) - taytteet]
+    jalkeen = laskurit(vm)
+    if ylikuorma:
+        ylikuorma_tulos(tk, nimi, data, data, saatu, ennen, jalkeen, ", täytteitä %d" % taytteet)
+        return
+    tulos(tk, nimi, data, saatu, ennen, jalkeen, ", täytteitä %d" % taytteet if taytteet else "")
+
+
+def palautus(vm, tk, levy):
+    """bootargs-kysymys, !rc-palautuskuori ennen juurta ja käsin kirjoitettu bootargs."""
+    mallit = [
+        r"mouseport is \([^)]*\) *\[[^\]]*\]:? *$",
+        r"bootargs is \([^)]*\)\s*\[[^\]]*\] *$",
+        r"panic: ",
+    ]
+    while True:
+        i, _ = vm.odota_jokin(mallit, 300)
+        if i == 0:
+            vm.laheta("ps2\n")
+        elif i == 1:
+            break
+        else:
+            raise vm9.VirheVM("ydin panikoi:\n" + vm.kaikki[-3000:].decode("latin-1"))
+    tk.ok("bootargs-kysymys sarjakonsolissa", True)
+    vm.laheta("!rc\n")
+    time.sleep(2)
+    komennot = [
+        ("echo P2REC^' '^$cputype", r"P2REC amd64"),
+        ("ls /dev/%s >/dev/null && echo P2REC^levy" % levy, r"P2REClevy"),
+        ("x=(a b c); echo P2REC^$#x </dev/null", r"P2REC3"),
+    ]
+    for kom, malli in komennot:
+        vm.puskuri = b""
+        vm.laheta(kom + "\n")
+        try:
+            vm.odota(malli + r"\r?\n", 30)
+            tk.ok("palautus-rc: " + kom, True)
+        except vm9.VirheVM:
+            tk.ok("palautus-rc: " + kom, False, repr(vm.puskuri[-200:]))
+    vm.laheta("exit\n")
+    vm.odota(r"bootargs is \([^)]*\)\s*\[[^\]]*\] *$", 60)
+    vm.laheta("local!/dev/%s/fscache\n" % levy)
+    kehote = vm9.kaynnista_9front(vm, 300)
+    tk.ok("bootargs käsin, juuri liitetty, rc-kehote", True, kehote)
+
+
+def interaktiivinen(vm, tk):
+    """Rivinmuokkaus, rc:n uudelleenohjaukset ja lainaukset, tuloste."""
+    tapaukset = [
+        # (nimi, syöte, odotettu tiedostoon)
+        ("askelpalautin", b"abcX\bd\n", b"abcd\n"),
+        ("^U pyyhkii rivin", b"roskaa\x15oikea\n", b"oikea\n"),
+        # ^W pyyhkii sanan ja sitä edeltävän välilyönnin (9frontin kbdfs)
+        ("^W pyyhkii sanan", b"yksi kaksi\x17 kolme\n", b"yksi kolme\n"),
+        ("CR-rivinvaihto", b"cr1\rcr2\r", b"cr1\ncr2\n"),
+        ("CRLF-rivinvaihto", b"crlf1\r\ncrlf2\r\n", b"crlf1\ncrlf2\n"),
+        # kbdfs luovuttaa rivin 256 merkin välein: merkki 257 heti perään
+        ("pitkä rivi (1000 merkkiä)", PITKA, PITKA),
+    ]
+    for nimi, syote, odotettu in tapaukset:
+        cooked(vm, tk, nimi, syote, odotettu, 16, 0.02, kaiku=False)
+    # komennot kirjoitettuina: rivin alussa uudelleenohjaus ja lainaukset
+    ennen = laskurit(vm)
+    vm.aja("rm -f /tmp/ro", 30)
+    rivit_ = []
+    for i in range(1, 41):
+        rivit_.append("</dev/null echo 'a b' \"c\" %03d >>/tmp/ro\n" % i)
+    vm.puskuri = b""
+    vm.kirjoita("".join(rivit_).encode(), 16, 0.02)
+    vm.aja("sleep 1", 60)
+    saatu = lue_tiedosto(vm, "/tmp/ro")
+    odotettu = b"".join(b"a b \"c\" %03d\n" % i for i in range(1, 41))
+    tulos(tk, "rc: 40 komentoa (</dev/null, lainaukset, >>)", odotettu, saatu, ennen, laskurit(vm))
+    # DEL: hylkää kuoren komentorivin; kuori, sen uudelleenkäynnistävä
+    # silmukka ja rio jatkavat.  exit DEL:n jälkeen: silmukka käynnistää
+    # uuden kuoren (rc:n haarautettu alikuori päättyy kiinni ottamaansa
+    # noteen, joten silmukan on oltava oma rc-prosessinsa).
+    nimi = "DEL hylkää komentorivin, exit käynnistää uuden kuoren, rio jatkaa"
+    vm.laheta("sleep 120; echo P2DEL^KESKEN\n")
+    time.sleep(2)
+    vm.puskuri = b""
+    t0 = time.time()
+    vm.kirjoita(b"\x7f")
+    try:
+        vm.odota(r"term% $", 20)
+        keskeytys = time.time() - t0
+        ennen, _ = vm.aja("echo $pid", 30)
+        vm.laheta("exit\n")
+        time.sleep(3)
+        jalkeen, _ = vm.aja("echo $pid", 30)
+        rio, _ = vm.aja("ps | grep -c ' rio$'", 30)
+        tk.ok(nimi, b"P2DELKESKEN" not in vm.kaikki and ennen != jalkeen and int(rio) > 0,
+              "%.1f s, kuori %s -> %s, rio %s" % (keskeytys, ennen.strip(), jalkeen.strip(), rio.strip()))
+    except vm9.VirheVM:
+        tk.ok(nimi, False, repr(vm.puskuri[-200:]))
+    # tuloste: seq ja md5sum vieraassa, vertailu isännällä
+    t, _ = vm.aja("seq 1 3000", 120)
+    odotettu = "".join("%d\n" % i for i in range(1, 3001))
+    tk.ok("tuloste: seq 1 3000", t == odotettu, "%d/%d tavua" % (len(t), len(odotettu)))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--image", default=os.path.join(vm9.oletus_ulos(), "plan2001-amd64.img"))
+    ap.add_argument("--disk", default="sdE0", help="levyn nimi vieraassa (mkimage --disk)")
+    ap.add_argument("--bus", default="ahci", choices=("ahci", "vscsi", "vblk"))
+    ap.add_argument("--machine", default="q35", choices=("q35", "pc"))
+    ap.add_argument("--memory", default="2048")
+    ap.add_argument("--cpu", default="2")
+    ap.add_argument("--transport", default="stdio", choices=("stdio", "pty", "socket"))
+    ap.add_argument("--boots", type=int, default=1, help="riippumattomia käynnistyksiä")
+    ap.add_argument("--quick", action="store_true", help="vain 2016 tavun tapaukset")
+    ap.add_argument("--keep", action="store_true", help="säilytä kertakäyttökopio")
+    a = ap.parse_args()
+    for t in ("mtype", "mcopy"):
+        if shutil.which(t) is None:
+            raise SystemExit("serialtest: %s puuttuu (mtools)" % t)
+
+    kokeet = [
+        ("cooked 2016 B, 1 B/10 ms", 288, 1, 0.01, False),
+        ("cooked 2016 B, 16 B/20 ms", 288, 16, 0.02, False),
+        ("cooked 2016 B, purske", 288, PURSKE, 0, False),
+        ("raw 2016 B, 16 B/20 ms", 288, 16, 0.02, True),
+        ("raw 2016 B, purske", 288, PURSKE, 0, True),
+    ]
+    if not a.quick:
+        kokeet += [
+            ("cooked 20048 B, 16 B/20 ms", 2864, 16, 0.02, False),
+            ("cooked 20048 B, 64 B/20 ms", 2864, 64, 0.02, False),
+            ("cooked 20048 B, purske", 2864, PURSKE, 0, "ylikuorma"),
+            ("raw 20048 B, 16 B/20 ms", 2864, 16, 0.02, True),
+            ("raw 20048 B, purske", 2864, PURSKE, 0, "raw-ylikuorma"),
+        ]
+
+    tk = Tarkistus()
+    loki = os.path.splitext(a.image)[0] + ".serialtest.log"
+    if os.path.exists(loki):
+        os.unlink(loki)
+    print("kone %s, väylä %s, levy %s, siirto %s, %s MiB, %s CPU, kiihdytys %s" % (
+        a.machine, a.bus, a.disk, a.transport, a.memory, a.cpu,
+        "kvm" if os.access("/dev/kvm", os.R_OK | os.W_OK) else "tcg"))
+    tyo = tempfile.mkdtemp(prefix="p2serial-")
+    try:
+        kopio = os.path.join(tyo, "levy.img")
+        subprocess.check_call(["cp", "--sparse=always", a.image, kopio])
+        mt = "%s@@%d" % (kopio, ESP_OFFSET)
+        env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+        ini = subprocess.check_output(["mtype", "-i", mt, "::/plan9.ini"], env=env).decode()
+        ini = [r for r in ini.splitlines() if r and not r.startswith("nobootprompt=")]
+        if not any(r.startswith("console=") for r in ini):
+            ini.append("console=0")
+        p = os.path.join(tyo, "plan9.ini")
+        open(p, "w").write("\n".join(ini) + "\n")
+        subprocess.check_call(["mcopy", "-o", "-i", mt, p, "::/plan9.ini"], env=env)
+
+        for kerta in range(1, a.boots + 1):
+            print("--- käynnistys %d/%d" % (kerta, a.boots))
+            sys.stdout.flush()
+            vm = SarjaKone(kopio, loki, a.machine, a.bus, a.transport, a.memory, a.cpu)
+            vm.kaynnista()
+            try:
+                palautus(vm, tk, a.disk)
+                t, _ = vm.aja("cat /dev/eia0status; cat /dev/kmesg | grep -i 'uart|i8250|console' ; echo", 30)
+                print("    " + t.strip().replace("\n", "\n    "))
+                for nimi, n, koko, tauko, onraw in kokeet:
+                    if onraw in (True, "raw-ylikuorma"):
+                        raw(vm, tk, nimi, rivit(n), koko, tauko, ylikuorma=onraw == "raw-ylikuorma")
+                    else:
+                        d = rivit(n)
+                        cooked(vm, tk, nimi, d, d, koko, tauko, ylikuorma=onraw == "ylikuorma")
+                interaktiivinen(vm, tk)
+            except vm9.VirheVM as e:
+                tk.ok("käynnistys %d: konsoli" % kerta, False, str(e)[:1500])
+            finally:
+                vm.sammuta()
+    finally:
+        if a.keep:
+            print("kopio: " + tyo)
+        else:
+            shutil.rmtree(tyo, ignore_errors=True)
+
+    huonot = [t for t in tk.tulokset if t[1] != "OK"]
+    print("serialtest: %d/%d OK (loki %s)" % (len(tk.tulokset) - len(huonot), len(tk.tulokset), loki))
+    sys.exit(1 if huonot else 0)
+
+
+if __name__ == "__main__":
+    main()

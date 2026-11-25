@@ -8,7 +8,8 @@
 #					ja 9front-11952:n jakelu (allproto)
 #
 # Levyt: sdE1 pinnattu ISO (jakelu), sdE2 sisään (tämä skripti, 9pc64,
-# bootx64.efi, rc, plan9.ini ja karsittu lähde; purettu hakemistoon /tmp/p2), sdE3 kohdelevy.
+# bootx64.efi, rc, kbdfs, termrc, console, plan9.ini ja karsittu lähde; purettu
+# hakemistoon /tmp/p2), sdE3 kohdelevy.
 #
 # Käyttö: rc mkimage.rc LEVY
 #	LEVY	kohdelevyn nimi kohdekoneessa, esim. sdE0 (plan9.ini:n
@@ -144,6 +145,9 @@ rm -rf /n/newfs/386 /n/newfs/68000 /n/newfs/68020 /n/newfs/arm /n/newfs/mips /n/
 rm -rf /n/newfs/acme/bin/386 /n/newfs/acme/bin/arm /n/newfs/acme/bin/mips /n/newfs/acme/bin/power /n/newfs/acme/bin/power64 /n/newfs/acme/bin/sparc /n/newfs/acme/bin/sparc64 /n/newfs/acme/bin/spim
 test -f /n/newfs/sys/include/bootinfo.h || die 'BootInfo-otsake puuttuu'
 cp $p2/rc /n/newfs/amd64/bin/rc || die 'yhdistetyn rc:n kopio'
+# sama korjattu kbdfs kuin ytimen bootfs:ssä; sarjakonsolin oma kuori
+cp $p2/kbdfs /n/newfs/amd64/bin/aux/kbdfs || die 'kbdfs:n kopio'
+cp $p2/termrc $p2/console /n/newfs/rc/bin/ || die 'termrc:n ja consolen kopio'
 
 # Plan2001:n ydin ja loader myös asennettuun järjestelmään, jotta
 # 9frontin omat työkalut (inst/bootsetup, 9fs 9fat) käyttävät niitä
