@@ -162,6 +162,52 @@ def prune_libmach(directory):
     exe.write_text(data)
 
 
+# PostScript programs built with pcc (APE) from sys/src/cmd/postscript.
+# tr2post, text2post, p9bitpost, g3p9bit and the rc/PostScript tools
+# (cropmarks, grabit, hardcopy, printfont, psencoding) are native and stay.
+POSTSCRIPT_APE = ("download", "postgif", "postprint", "postreverse", "posttek", "tcpostio")
+
+
+def prune_postscript(root):
+    ps = root / "sys/src/cmd/postscript"
+    # common/ stays for the native programs' headers and tr2post's
+    # common.c; only its pcc library com.a goes with the APE programs.
+    for name in ("mkfile", "bbox.c", "getopt.c", "glob.c", "misc.c",
+                 "request.c", "request.h", "tempnam.c", "gen.h"):
+        remove(ps / "common" / name)
+    # unbuilt UNIX remnants that link the same pcc library
+    for name in POSTSCRIPT_APE + ("picpack", "postbgi", "postdaisy", "postdmd", "postmd", "postio"):
+        remove(ps / name)
+    mk = ps / "mkfile"
+    data = mk.read_text()
+    data = data.replace("TARGETS=common\\\n\t", "TARGETS=", 1)
+    for name in POSTSCRIPT_APE:
+        old = f"\t{name}\\\n"
+        if data.count(old) != 1:
+            raise SystemExit(f"prune-tree: {name} not a target in {mk}")
+        data = data.replace(old, "")
+    for name in ("picpack", "postbgi", "postdaisy", "postdmd", "postmd", "postio"):
+        data = re.sub(rf"(?m)^#\t{name}\\?\n", "", data)
+    mk.write_text(data)
+    # dpost -f adds fonts with aux/download, which needs APE.
+    replace(root / "rc/bin/dpost", "\taux/tr2post $* | addpsfonts\n",
+            "\techo 'dpost: -f needs aux/download, which is unavailable' >[1=2]\n\texit unsupported\n")
+
+
+def prune_syscall_stubs(path):
+    """Keep only the supported targets' system call stubs (wasm32 has its own)."""
+    data = path.read_text()
+    start = data.index("\t\t{switch($objtype){\n") + len("\t\t{switch($objtype){\n")
+    end = data.index("\t\t}} > $i.s\n", start)
+    blocks = re.split(r"(?m)^(?=\t\tcase )", data[start:end])
+    if blocks[0]:
+        raise SystemExit(f"prune-tree: unexpected system call switch in {path}")
+    kept = [b for b in blocks[1:] if b.split("\n", 1)[0].split()[1:] in (["amd64"], ["arm64"])]
+    if len(kept) != 2:
+        raise SystemExit(f"prune-tree: amd64/arm64 system call stubs changed in {path}")
+    path.write_text(data[:start] + "".join(kept) + data[end:])
+
+
 def prune_page(path):
     data = path.read_text()
     start = data.index("typedef struct Ghost Ghost;")
@@ -214,10 +260,7 @@ def prune_authproto(path, old_compilers):
     obsolete = set(old_compilers) | {"pcc", "gs", "compress", "eqn", "grap", "pic",
                                      "spin", "vi", "lp", "lpdaemon", "lpdsend",
                                      "lpsend", "antiword", "8prefix", "apm", "dpost",
-                                     "cropmarks", "download", "g3p9bit", "grabit",
-                                     "hardcopy", "p9bitpost", "postgif", "postprint",
-                                     "postreverse", "posttek", "tcpostio", "text2post",
-                                     "tr2post", "flacdec", "flacenc", "mp3enc",
+                                     *POSTSCRIPT_APE, "flacdec", "flacenc", "mp3enc",
                                      "oggdec", "oggenc"}
     old_arch = {"386", "68000", "68020", "arm", "mips", "power", "power64",
                 "sparc", "sparc64", "spim"}
@@ -371,12 +414,12 @@ def main(root):
                  "sys/lib/lp/process/pdfpost", "sys/man/1/ps2pdf",
                  "sys/man/1/troff2png", "sys/src/cmd/eqn", "sys/src/cmd/grap",
                  "sys/src/cmd/pic", "sys/src/cmd/spin", "sys/src/cmd/compress",
-                 "sys/src/cmd/postscript", "sys/src/cmd/lp", "sys/src/cmd/aux/antiword",
+                 "sys/src/cmd/lp", "sys/src/cmd/aux/antiword",
                  "sys/src/cmd/vi", "sys/src/cmd/aux/apm.c",
-                 "sys/lib/lp", "sys/lib/postscript", "sys/lib/antiword",
+                 "sys/lib/lp", "sys/lib/antiword",
                  "rc/bin/lp", "rc/bin/doc2ps", "rc/bin/service/!tcp515",
-                 "rc/bin/uncompress", "rc/bin/addpsfonts", "rc/bin/printfont",
-                 "rc/bin/dpost", "rc/bin/postscript", "sys/src/cmd/bzip2/bzip2recover.c"):
+                 "rc/bin/uncompress", "rc/bin/addpsfonts",
+                 "sys/src/cmd/bzip2/bzip2recover.c"):
         remove(root / path)
     remove(src / "cmd/aux/8prefix.c")
     for path in ("sys/doc/ape.ms", "sys/doc/ape.ps", "sys/doc/ape.pdf",
@@ -415,10 +458,8 @@ def main(root):
             remove(root / obj / "bin" / program)
         for program in ("pcc", "compress", "eqn", "grap", "pic", "spin", "vi"):
             remove(root / obj / "bin" / program)
-        for program in ("8prefix", "apm", "antiword", "lpdaemon", "lpdsend", "lpsend", "cropmarks",
-                        "download", "g3p9bit", "grabit", "hardcopy", "p9bitpost",
-                        "postgif", "postprint", "postreverse", "posttek", "tcpostio",
-                        "text2post", "tr2post"):
+        for program in ("8prefix", "apm", "antiword", "lpdaemon", "lpdsend", "lpsend",
+                        *POSTSCRIPT_APE):
             remove(root / obj / "bin/aux" / program)
         for program in ("flacdec", "flacenc", "mp3enc", "oggdec", "oggenc"):
             remove(root / obj / "bin/audio" / program)
@@ -436,7 +477,7 @@ def main(root):
     if proto.exists():
         proto.write_text("\n".join(line for line in proto.read_text().splitlines()
                                    if line.strip() not in {"ape", "ghostscript", "apeselect",
-                                                           "lp", "postscript"}) + "\n")
+                                                           "lp"}) + "\n")
 
     pc64 = src / "9/pc64"
     pc = src / "9/pc"
@@ -486,6 +527,11 @@ def main(root):
     replace(threadmk, "spim.$O:\tmips.c\n\t$CC $CFLAGS -o $target mips.c\n\n", "")
     prune_libmach(src / "libmach")
     prune_page(src / "cmd/page.c")
+    prune_syscall_stubs(src / "libc/9syscall/mkfile")
+    mkdevc = src / "9/port/mkdevc"
+    replace(mkdevc, 'objtype ~ "(386|alpha|amd64)"', 'objtype == "amd64"')
+    replace(mkdevc, 'objtype ~ "(386|amd64)"', 'objtype == "amd64"')
+    prune_postscript(root)
     cmdmk = src / "cmd/mkfile"
     cmdmk.write_text(cmdmk.read_text() + "\n$O.page: page.$O /$objtype/lib/libgeometry.a\n\t$LD -o $target $prereq\n")
     authproto = root / "sys/lib/sysconfig/auth/authproto"
