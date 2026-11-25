@@ -374,7 +374,7 @@ def main(root):
                  "sys/src/cmd/postscript", "sys/src/cmd/lp", "sys/src/cmd/aux/antiword",
                  "sys/src/cmd/vi", "sys/src/cmd/aux/apm.c",
                  "sys/lib/lp", "sys/lib/postscript", "sys/lib/antiword",
-                 "rc/bin/lp", "rc/bin/doc2ps",
+                 "rc/bin/lp", "rc/bin/doc2ps", "rc/bin/service/!tcp515",
                  "rc/bin/uncompress", "rc/bin/addpsfonts", "rc/bin/printfont",
                  "rc/bin/dpost", "rc/bin/postscript", "sys/src/cmd/bzip2/bzip2recover.c"):
         remove(root / path)
