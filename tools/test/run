@@ -233,12 +233,13 @@ fi
 # (build/dist: tools/dist) on this computer (?iso=file) - the base system, the tools, the source
 # with its git - and on the disk: the source's git as 9front's sysupdate has it (bind -ac /dist/9front
 # /: the branch, origin's, the work tree clean), and a small build with the machine's own tools (mk,
-# 3c, 3l, yacc: echo and hoc from /sys/src/cmd, installed and run).  The whole system's build is
+# 3c, 3l, yacc: echo and hoc from /sys/src/cmd, installed and run; the native PostScript
+# tools tr2post and text2post built from their sources, text2post run).  The whole system's build is
 # people's to run (cd /sys/src; mk install).  The ISO is large: only when named
 if [[ " $names " == *" dist "* ]]; then
 	if [ -e "$root/build/dist/plan9-wasm32.iso" ]; then
 		gateway up
-		then="bind -ac /dist/9front /; cd /; git/branch; cmp -s .git/refs/heads/tree .git/refs/remotes/origin/tree && echo the branch is at origin; git/fs; git/walk -q; echo walk status \$status; cd /sys/src/cmd; mk echo.install >/tmp/mk.log >[2=1] && echo built echo; /wasm32/bin/echo hello from echo built here; cd hoc; mk install >>/tmp/mk.log >[2=1] && echo built hoc; echo 2+3 | /wasm32/bin/hoc; fshalt -r >/dev/null >[2=1]"
+		then="bind -ac /dist/9front /; cd /; git/branch; cmp -s .git/refs/heads/tree .git/refs/remotes/origin/tree && echo the branch is at origin; git/fs; git/walk -q; echo walk status \$status; cd /sys/src/cmd; mk echo.install >/tmp/mk.log >[2=1] && echo built echo; /wasm32/bin/echo hello from echo built here; cd hoc; mk install >>/tmp/mk.log >[2=1] && echo built hoc; echo 2+3 | /wasm32/bin/hoc; cd /sys/src/cmd/postscript/tr2post; mk >>/tmp/mk.log >[2=1] && echo built tr2post; cd ../text2post; mk >>/tmp/mk.log >[2=1] && echo built text2post; echo p2 | ./3.out >/tmp/p2.ps; sed 1q /tmp/p2.ps; fshalt -r >/dev/null >[2=1]"
 		SITE=$root/build/dist/live ISOFILE=$root/build/dist/plan9-wasm32.iso SENDWAIT=7200 HALTWAIT=7200 EXPECTJS="window.plan9firmware === 'disk'" \
 			THEN="$(rcjson "$then" | sed 's|^\["/bin/rc", "-c", |["/bin/rc", "/boot/init", |')" \
 			run dist '["/bin/rc", "/boot/init", ". /rc/bin/termrc; ramfs; inst/start"]' "$inst" '&noreboot=1&boot=disk&iso=file'
