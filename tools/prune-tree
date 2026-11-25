@@ -246,6 +246,80 @@ def prune_authproto(path, old_compilers):
     path.write_text("".join(kept))
 
 
+def prune_audio_man(path):
+    data = path.read_text()
+    start = data.index(".SS\n.I Pcmconv\n")
+    end = data.index(".SH EXAMPLE\n", start)
+    path.write_text(""".TH AUDIO 1
+.SH NAME
+mp3dec, wavdec, sundec, pcmconv, mixfs \\- decode and process audio
+.SH SYNOPSIS
+.B audio/mp3dec
+[
+.B -d
+] [
+.B -s
+.I seconds
+]
+.br
+.B audio/wavdec
+.br
+.B audio/sundec
+.PP
+.B audio/pcmconv
+[
+.B -i
+.I fmt
+] [
+.B -o
+.I fmt
+] [
+.B -l
+.I length
+]
+.PP
+.B audio/mixfs
+[
+.B -D
+] [
+.B -s
+.I srvname
+] [
+.B -m
+.I mtpt
+] [
+/dev/audio
+]
+.SH DESCRIPTION
+The decoders read audio from standard input and write 16-bit stereo PCM
+to standard output at 44.1 kHz.
+.I Mp3dec
+decodes MPEG audio; its
+.B -d
+option enables diagnostic output and
+.B -s
+seeks to a position in seconds.
+.I Wavdec
+decodes RIFF wave and
+.I sundec
+decodes Sun audio.
+""" + data[start:end] + """.SH EXAMPLE
+.EX
+audio/mp3dec <foo.mp3 >/dev/audio
+.EE
+.SH SOURCE
+.B /sys/src/cmd/audio
+.SH "SEE ALSO"
+.IR play (1),
+.IR zuke (1)
+.SH HISTORY
+.I Pcmconv
+first appeared in 9front (December, 2012).
+.I Mixfs
+first appeared in 9front (December, 2013).
+""")
+
+
 def main(root):
     src = root / "sys/src"
     old_compilers = ("1a", "1c", "1l", "2a", "2c", "2l", "5a", "5c", "5e", "5i", "5l",
@@ -393,12 +467,21 @@ def main(root):
         remove(src / "cmd/audio" / name)
     bzip = src / "cmd/bzip2/mkfile"
     replace(bzip, "bzip2recover.$O: bzip2recover.c\n\tpcc -D_POSIX_SOURCE -D_BSD_EXTENSION -c bzip2recover.c\n\n", "")
+    prune_audio_man(root / "sys/man/1/audio")
     play = root / "rc/bin/play"
     for old in ("\t\tcase *ogg* *vorbis*\n\t\t\taudio/oggdec\n",
                 "\t\tcase *flac*\n\t\t\taudio/flacdec\n",
                 "\t\t\tcase *.ogg *.OGG\n\t\t\t\taudio/oggdec\n",
                 "\t\t\tcase *.flac *.FLAC\n\t\t\t\taudio/flacdec\n"):
         replace(play, old, "")
+    man = root / "rc/bin/man"
+    for old in ("\t\tif(~ $x *grap*)\n\t\t\tpreproc=($preproc grap)\n",
+                "\t\tif(~ $x *pic*)\n\t\t\tpreproc=($preproc pic)\n",
+                "\tif(~ $x *eqn*)\n\t\tpreproc=($preproc eqn)\n"):
+        replace(man, old, "")
+    replace(root / "rc/bin/hget",
+            "\t\tcase *compress*\n\t\t\t~ `{cat $d/contenttype >[2]/dev/null} *compress* || exec uncompress\n",
+            "\t\tcase *compress*\n\t\t\techo 'hget: compress content encoding is unavailable' >[1=2]\n\t\t\texit unsupported\n")
     remove(src / "cmd/bitsy")
     remove(src / "cmd/aux/multi")
     remove(src / "games/gba/rom")
