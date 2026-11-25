@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<!--
+ The accounts' page (README.md, "Accounts and passkeys"): a Plan 9
+ account made with an invitation (#invite=CODE) and a passkey, signed in
+ to with a passkey, its passkeys listed, added and removed.  auth/accountd
+ answers on this origin's /account (aux/etherws -C this origin).  The rp
+ id is the meta's, else this page's host: it must be accountd's -r.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="p2-rpid" content="">
+<title>Plan2001 account</title>
+<style>
+:root { color-scheme: light dark; --fg: #1d1d1b; --bg: #fafaf7; --line: #c9c9c2; --accent: #2f5d8a; --bad: #a02c2c; }
+@media (prefers-color-scheme: dark) { :root { --fg: #e8e8e3; --bg: #1b1c1e; --line: #44464a; --accent: #8db4dc; --bad: #e07b7b; } }
+body { font: 16px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); margin: 0; padding: 16px; }
+main { max-width: 34rem; margin: 0 auto; }
+h1 { font-size: 1.3rem; }
+button { font: inherit; padding: .55rem .9rem; margin: .2rem .3rem .2rem 0; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); cursor: pointer; }
+button.main { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+input { font: inherit; padding: .45rem; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); width: 100%; box-sizing: border-box; }
+section[hidden] { display: none; }
+#status { min-height: 1.5em; margin-top: 1rem; }
+#status.bad { color: var(--bad); }
+ul { padding: 0; list-style: none; }
+li { border-top: 1px solid var(--line); padding: .5rem 0; display: flex; justify-content: space-between; gap: .5rem; align-items: center; flex-wrap: wrap; }
+small { opacity: .75; }
+</style>
+</head>
+<body>
+<main>
+<h1>Plan2001 account</h1>
+
+<section id="enroll" hidden>
+<p>An invitation for the account <b id="enrollname"></b>.  Make its passkey: on this device, on a phone (the browser shows a QR code), or on a security key.</p>
+<label>Name for the passkey <input id="enrolllabel" maxlength="64" placeholder="e.g. work laptop"></label>
+<p>
+<button class="main" data-hint="client-device" data-op="enroll">This device</button>
+<button data-hint="hybrid" data-op="enroll">A phone</button>
+<button data-hint="security-key" data-op="enroll">A security key</button>
+</p>
+</section>
+
+<section id="signin" hidden>
+<p>Sign in with your passkey.</p>
+<p>
+<button class="main" data-hint="client-device" data-op="login">This device</button>
+<button data-hint="hybrid" data-op="login">A phone</button>
+<button data-hint="security-key" data-op="login">A security key</button>
+</p>
+</section>
+
+<section id="account" hidden>
+<p>Signed in as <b id="accountname"></b>. <button id="logout">Sign out</button></p>
+<h2>Passkeys</h2>
+<ul id="creds"></ul>
+<label>Name for a new passkey <input id="addlabel" maxlength="64" placeholder="e.g. phone"></label>
+<p>
+<button data-hint="client-device" data-op="add">Add: this device</button>
+<button data-hint="hybrid" data-op="add">Add: a phone</button>
+<button data-hint="security-key" data-op="add">Add: a security key</button>
+</p>
+</section>
+
+<p id="status" role="status"></p>
+</main>
+<script src="account.js"></script>
+</body>
+</html>
