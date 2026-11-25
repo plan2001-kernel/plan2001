@@ -188,7 +188,7 @@ def prune_distproto(path):
         if section in unsupported:
             continue
         name = line.strip().split()[0] if line.strip() else ""
-        if name == "ape" or (section == "acme" and name in unsupported):
+        if name in {"ape", "bitsy"} or (section == "acme" and name in unsupported):
             continue
         kept.append(line)
     path.write_text("".join(kept))
@@ -210,8 +210,47 @@ def prune_dist_mkfile(path):
     path.write_text(header + gzip + pi3 + disk + data[data.index("binds:V:"):])
 
 
+def prune_authproto(path, old_compilers):
+    obsolete = set(old_compilers) | {"pcc", "gs", "compress", "eqn", "grap", "pic",
+                                     "spin", "vi", "lp", "lpdaemon", "lpdsend",
+                                     "lpsend", "antiword", "8prefix", "apm", "dpost",
+                                     "cropmarks", "download", "g3p9bit", "grabit",
+                                     "hardcopy", "p9bitpost", "postgif", "postprint",
+                                     "postreverse", "posttek", "tcpostio", "text2post",
+                                     "tr2post", "flacdec", "flacenc", "mp3enc",
+                                     "oggdec", "oggenc"}
+    old_arch = {"386", "68000", "68020", "arm", "mips", "power", "power64",
+                "sparc", "sparc64", "spim"}
+    kept = []
+    section = ""
+    skip_indent = None
+    for line in path.read_text().splitlines(keepends=True):
+        indent = len(line) - len(line.lstrip(" \t"))
+        name = line.strip().split()[0] if line.strip() else ""
+        if line and line[0] not in " \t#\n":
+            section = name
+        if section in old_arch:
+            continue
+        if skip_indent is not None:
+            if indent > skip_indent:
+                continue
+            skip_indent = None
+        if name == "bitsy" or (section == "sys" and name == "lp"):
+            skip_indent = indent
+            continue
+        if section == "rc" and name in {"fax", "lp"}:
+            continue
+        if section == "$cputype" and name in obsolete:
+            continue
+        kept.append(line)
+    path.write_text("".join(kept))
+
+
 def main(root):
     src = root / "sys/src"
+    old_compilers = ("1a", "1c", "1l", "2a", "2c", "2l", "5a", "5c", "5e", "5i", "5l",
+                     "8a", "8c", "8l", "9a", "9c", "9l", "ka", "kc", "ki", "kl",
+                     "qa", "qc", "qi", "ql", "va", "vc", "vl", "tc", "tl")
     shutil.copyfile(root / "386/include/ureg.h", root / "sys/include/realmode.h")
     for name in ("386", "68000", "68020", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"):
         remove(root / name)
@@ -220,6 +259,7 @@ def main(root):
                  "sys/man/1/pc", "sys/man/1/pcc", "sys/man/1/2a",
                  "sys/man/1/2c", "sys/man/1/2l", "rc/bin/ape", "rc/lib/ape",
                  "sys/lib/dist/usr/glenda/bin/386", "sys/lib/sysconfig/proto/armpaqproto",
+                 "sys/lib/sysconfig/proto/standalone",
                  "rc/bin/pdf2ps",
                  "rc/bin/ps2pdf", "rc/bin/ps2gif", "rc/bin/psfax",
                  "rc/bin/troff2gif", "rc/bin/troff2png", "rc/bin/fax",
@@ -252,6 +292,9 @@ def main(root):
     for obj in ("amd64", "arm64", "wasm32"):
         for part in ("include/ape", "lib/ape", "bin/ape", "bin/gs"):
             remove(root / obj / part)
+        remove(root / obj / "bin/bitsy")
+        for program in old_compilers:
+            remove(root / obj / "bin" / program)
         for program in ("pcc", "compress", "eqn", "grap", "pic", "spin", "vi"):
             remove(root / obj / "bin" / program)
         for program in ("8prefix", "apm", "antiword", "lpdaemon", "lpdsend", "lpsend", "cropmarks",
@@ -306,9 +349,6 @@ def main(root):
             remove(boot)
 
     # The numbered 3/6/7 compilers and cc's common backend stay available.
-    old_compilers = ("1a", "1c", "1l", "2a", "2c", "2l", "5a", "5c", "5e", "5i", "5l",
-                     "8a", "8c", "8l", "9a", "9c", "9l", "ka", "kc", "ki", "kl",
-                     "qa", "qc", "qi", "ql", "va", "vc", "vl", "tc", "tl")
     for name in old_compilers:
         remove(src / "cmd" / name)
     for arch in ("386", "68000", "68020", "arm", "mips", "power", "power64", "sparc", "spim"):
@@ -323,7 +363,11 @@ def main(root):
     cmdmk = src / "cmd/mkfile"
     cmdmk.write_text(cmdmk.read_text() + "\n$O.page: page.$O /$objtype/lib/libgeometry.a\n\t$LD -o $target $prereq\n")
     authproto = root / "sys/lib/sysconfig/auth/authproto"
-    authproto.write_text(authproto.read_text().replace("\t\tgs\t\t775 sys sys\n", ""))
+    prune_authproto(authproto, old_compilers)
+    authmk = root / "sys/lib/sysconfig/auth/mkfile"
+    authdata = authmk.read_text()
+    authmk.write_text(authdata[authdata.index("ream:\n"):])
+    replace(root / "rc/bin/inst/partdisk", "disk/mbr -m /386/mbr", "disk/mbr")
     prune_distproto(root / "sys/lib/sysconfig/proto/distproto")
     prune_dist_mkfile(root / "sys/lib/dist/mkfile")
     bootproto = root / "sys/lib/sysconfig/proto/9bootproto"

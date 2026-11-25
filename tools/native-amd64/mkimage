@@ -129,6 +129,8 @@ def main():
             ("plan9.ini", plan9ini(a.disk, a.console)),
         ] + vm9.source_jasenet(tyo, os.path.abspath(a.shared)) + [
             ("syslib", os.path.join(tyo, "source/sys/lib")),
+            ("sysdoc", os.path.join(tyo, "source/sys/doc")),
+            ("sysman", os.path.join(tyo, "source/sys/man")),
             ("rcroot", os.path.join(tyo, "source/rc")),
         ])
         vm = vm9.Kone([(kone, "qcow2", False, "hd"),
