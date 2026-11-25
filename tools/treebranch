@@ -4,7 +4,8 @@
 # tools/release; not its history: 9front's own is github.com/9front/9front)
 # and this tree's files over it (the files patches/9front makes, and the
 # new ones: git ls-files of main's HEAD, as tools/tree takes them),
-# without 9front's off-topic files (tools/dist.deny).  Its root is the
+# without unsupported targets (tools/prune-tree) or 9front's off-topic
+# files (tools/dist.deny).  Its root is the
 # machine's /: the installer copies it with /dist/9front/.git, and
 # bind -ac /dist/9front / makes / its work tree, as on 9front.  A commit
 # a run when the source has changed, onto the branch's last (the first
@@ -39,6 +40,7 @@ for p in patches/9front/*.diff; do
 	done
 done
 rm -rf "$tmp"
+"$here/prune-tree" "$wt"
 # 9front's off-topic files
 (cd "$wt" && git ls-files) | python3 -I -c '
 import re, sys

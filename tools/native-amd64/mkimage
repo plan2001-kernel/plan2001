@@ -127,7 +127,10 @@ def main():
             ("bootx64.efi", os.path.join(a.sisaan, "bootx64.efi")),
             ("rc", os.path.join(a.sisaan, "rc")),
             ("plan9.ini", plan9ini(a.disk, a.console)),
-        ] + vm9.overlay_jasenet(os.path.abspath(a.shared)))
+        ] + vm9.source_jasenet(tyo, os.path.abspath(a.shared)) + [
+            ("syslib", os.path.join(tyo, "source/sys/lib")),
+            ("rcroot", os.path.join(tyo, "source/rc")),
+        ])
         vm = vm9.Kone([(kone, "qcow2", False, "hd"),
                        (iso, "raw", True, "cd"),
                        (sisaan, "raw", False, "hd"),

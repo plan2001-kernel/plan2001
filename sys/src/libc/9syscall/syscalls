@@ -1,9 +1,9 @@
 #!/bin/rc
 # syscalls objtype sys.h [defines]: one architecture selection for libc,
-# APE and kernel tables. The header remains the syscall-number authority.
+# Kernel tables. The header remains the syscall-number authority.
 if(! ~ $#* 2 3 || ~ $1 '') exit usage
 switch($1){
-case wasm32 amd64 arm64 arm 386 spim mips mips2 power power64 sparc sparc64 68000 68020 alpha 3210 29000 riscv64
+case wasm32 amd64 arm64
 case *
 	echo 'syscalls: unsupported objtype '^$1 >[1=2]
 	exit objtype

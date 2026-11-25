@@ -9,16 +9,12 @@
 +#endif
 --- a/sys/include/libc.h
 +++ b/sys/include/libc.h
-@@ -755,6 +755,9 @@
- extern	int	dup(int, int);
- extern	int	errstr(char*, uint);
- extern	int	exec(char*, char*[]);
+@@ -728 +727,0 @@
+-/* keep /sys/src/ape/lib/ap/plan9/sys9.h in sync with this -rsc */
+@@ -757,0 +757,3 @@
 +#ifdef __wasm32__
 +extern	int	spawn(char*, char*[], int*, int, int);
 +#endif
- extern	int	execl(char*, ...);
- extern	int	fork(void);
- extern	int	rfork(int);
 --- a/sys/src/cmd/rc/exec.h
 +++ b/sys/src/cmd/rc/exec.h
 @@ -76,6 +76,7 @@

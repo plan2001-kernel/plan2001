@@ -4,7 +4,8 @@
 # must apply to the release as it is) and this tree's files over it - new
 # files, and the patched files again, which must be the same.  9front's
 # root layout: /sys, /rc, /$objtype ... as a 9front machine's /.  Only
-# git's files of this tree; the tree made anew.
+# git's files of this tree; the tree made anew.  tools/prune-tree selects
+# the supported Plan2001 targets after the verified patches and overlay.
 #   tools/tree [DIR]	default build/tree
 set -e
 here=$(cd "$(dirname "$0")" && pwd); root=$(dirname "$here")
@@ -23,6 +24,7 @@ for p in "$root"/patches/9front/*.diff; do
 	done
 done
 (cd "$root" && echo "$files" | cpio -pdmu --quiet "$out")
+"$here/prune-tree" "$out"
 # what the release ships made from another file (libsec's X.c and
 # libauthsrv's X.mpc from X.mp, by mpc) newer than it, as on a 9front
 # machine: mk would make it again with a tool the host lacks
