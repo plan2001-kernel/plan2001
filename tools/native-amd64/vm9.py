@@ -353,7 +353,7 @@ JAETUT = [
 ]
 
 # AMD64 ja yhteiset ytimen lähteet samasta 9front-overlaysta.
-OVERLAY = ["sys/src/9/pc64", "sys/src/9/pc", "sys/src/9/port", "sys/src/9/ip", "sys/src/boot/efi", "sys/src/cmd/rc", "sys/src/libc/9syscall", "sys/src/ape/lib/ap/syscall"]
+OVERLAY = ["sys/src/9/pc64", "sys/src/9/pc", "sys/src/9/port", "sys/src/9/ip", "sys/src/boot/efi", "sys/src/cmd/rc", "sys/src/cmd/aux/kbdfs", "sys/src/9/boot", "sys/man/8", "sys/src/libc/9syscall", "sys/src/ape/lib/ap/syscall"]
 
 
 def overlay_jasenet(jaettu):

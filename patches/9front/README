@@ -115,3 +115,38 @@ sdvirtio-scsi-lun.diff
 		targets report LUN 0 without one (QEMU's 'QEMU TARGET',
 		peripheral qualifier 1, type 1Fh).  Targets without REPORT LUNS get LUN 0 as before; virtio
 		block devices are unchanged.  2026-11-24.
+
+kbdfs-cooked-input.diff
+		aux/kbdfs: ctlproc handed each cooked-mode rune to lineproc
+		with nbsend on the unbuffered cook channel.  After a newline
+		lineproc's nbsendp(conschan) yields (also after ^D and after
+		the 256th rune of a long line), so when the next rune was
+		already in runechan nobody was receiving and it was dropped:
+		the first character of a line typed or pasted after another
+		(serial console: r00001 arrived as 00001, ^D was lost) and the
+		257th of a long one.  ctlproc now blocks in send; lineproc
+		never waits for it.  2026-11-25.
+
+kbdfs-serial-console.diff
+		aux/kbdfs -c: the runes it reads from its console file go to
+		cons even while kbd is open, so the serial line stays a console
+		of its own when rio takes the keyboard, instead of becoming
+		rio's keyboard (rio's per-window queue of 32 keys and kbdchan's
+		nbsendp dropped a serial paste's characters).  kbdfs(8).
+		In raw mode a console-file rune no longer goes to conschan
+		with nbsendp (128 runes, then dropped): ctlproc holds it,
+		reading no more from consfd, until a reader takes it, and
+		goes on taking ctlchan's messages.  2026-11-25.
+
+serial-console-shell.diff
+		boot/bootrc starts kbdfs with -c.  rc/bin/termrc: with
+		$console set, a shell of its own on the serial line, outside
+		rio, started after termrc's mounts (dns), once
+		(/env/serialshell) and again when it ends:
+		a kbdfs of its own reads /srv/cons raw (holding rawon), edits
+		lines and echoes; DEL abandons the shell's command line, and
+		the restarting loop, an rc of its own (rc's forked subshells
+		exit on any note they catch), ignores it.  rc/bin/console:
+		in rio, with that shell running, the console window is an
+		ordinary one, not a second shell teed to the line.
+		2026-11-25.

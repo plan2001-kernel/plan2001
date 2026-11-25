@@ -43,6 +43,14 @@ mk install >[2=1] || die libc
 cd /sys/src/ape
 mk lib.install >[2=1] || die APE
 
+# Ytimen bootfs ottaa ohjelmat nimiavaruuden /amd64/bin:stä: korjattu
+# kbdfs (sarjakonsolin syöte, patches/9front/kbdfs-*.diff)
+# julkaisun binäärin päälle ennen ytimen käännöstä.
+echo '--- aux/kbdfs'
+cd /sys/src/cmd/aux/kbdfs || die kbdfs
+mk >[2=1] || die 'kbdfs käännös'
+bind 6.out /amd64/bin/aux/kbdfs || die 'kbdfs bind'
+
 echo '--- ydin: /sys/src/9/pc64'
 cd /sys/src/9/pc64 || die pc64
 # The build VM may have private parent permissions; the boot user must
@@ -54,6 +62,7 @@ mkdir -p /n/p2boot
 paqfs -q -m /n/p2boot pc64.bootfs.paq || die bootfs
 ls -ld /n/p2boot /n/p2boot/amd64 /n/p2boot/amd64/bin /n/p2boot/rc /n/p2boot/rc/bin
 ls -l /n/p2boot/rc/bin/bootrc /n/p2boot/amd64/bin/rc
+cmp /n/p2boot/amd64/bin/aux/kbdfs /sys/src/cmd/aux/kbdfs/6.out || die 'bootfs:n kbdfs ei ole korjattu'
 
 
 # Jaetut pc-tiedostot kuuluvat myös 386-porttiin. Tarkista ne sen
@@ -83,6 +92,7 @@ rm -rf $p2/out
 mkdir -p $p2/out
 cp /sys/src/9/pc64/9pc64 /sys/src/boot/efi/bootx64.efi $p2/out || die kopio
 cp /sys/src/cmd/rc/6.out $p2/out/rc || die 'rc kopio'
+cp /sys/src/cmd/aux/kbdfs/6.out $p2/out/kbdfs || die 'kbdfs kopio'
 if(! ~ $#aa64 0)
 	cp /sys/src/boot/efi/bootaa64.efi $p2/out
 nm /amd64/lib/libc.a /amd64/lib/ape/libap.a | grep -e ' [Tt] (spawn|_SPAWN)$' && die 'native spawn interface leaked'

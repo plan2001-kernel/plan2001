@@ -1,0 +1,28 @@
+--- a/sys/src/cmd/aux/kbdfs/kbdfs.c
++++ b/sys/src/cmd/aux/kbdfs/kbdfs.c
+@@ -1149,7 +1149,7 @@
+ 			case Rawon:
+ 				if(raw = (c == Rawon)){
+ 					r = 0;
+-					nbsend(cook, &r);
++					send(cook, &r);
+ 				}
+ 			}
+ 			break;
+@@ -1169,7 +1169,15 @@
+ 					free(s);
+ 				break;
+ 			}
+-			nbsend(cook, &r);
++			/*
++			 * cook is unbuffered and lineproc leaves its recv
++			 * whenever it hands over a line (newline, ^D or a
++			 * full rb): nbsendp(conschan) yields, so with more
++			 * input already in runechan a nbsend here found no
++			 * receiver and dropped the next rune.  lineproc never
++			 * waits for this thread, so block until it takes it.
++			 */
++			send(cook, &r);
+ 			break;
+ 		}
+ 	}
