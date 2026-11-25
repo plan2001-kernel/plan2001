@@ -1,0 +1,923 @@
+#!/usr/bin/env python3
+"""
+Tilit ja passkeyt (README.md, "Accounts and passkeys") amd64-9frontissa
+QEMU:ssa (tools/native-amd64/cpuvieras.py) ja headless-Chromiumissa:
+
+- lähteet (libwebauthn, cmd/accounts, cmd/ethergw) vieraaseen ja mk
+  install siellä; auth/accountd ja aux/etherws -C käyntiin sarjakonsolin
+  nimiavaruudessa (keyfs /mnt/keys, tiedostopalvelimen konsoli)
+- isännän HTTP-palvelin: sivu (sys/lib/accounts) ja /account-WebSocket
+  läpi vieraan etherwsille; sivun alkuperä http://localhost:PORTTI, rp
+  localhost
+- ohjelmistopasskey (P-256): alkuperä, kutsut (väärä, vanhentunut,
+  käytetty, samanaikaiset), haasteet (puuttuva, väärä, toistettu), rp,
+  UP/UV, AT, allekirjoitus, laskuri, käyttäjäkahva, sama passkey kahdesti,
+  ryhmien sallittu lista, tuore istunto lisäykseen, viimeisen passkeyn
+  poisto, disable/enable, epäonnistuneen luonnin peruminen ja uusinta
+- auth/asuser: istunnon käyttäjänä, tiedoston oikeudet (toinen käyttäjä ei
+  lue 600-tiedostoa), päättynyt istunto, ei-hostownerin pyyntö
+- Chromium (virtuaaliautentikaattorit, PRF päällä ja pois): kutsu,
+  passkey tällä laitteella, evästeet pois, kirjautuminen, toinen passkey
+  turva-avaimeen, lista, poisto, istunto asuserille
+
+Kuva: amd64-asennuskuva (tools/native-amd64/mkimage), jossa kääntäjät ja
+/sys/src; kuvaa ei muuteta (kertakäyttöinen kopio).  Tulostaa OK/FAIL-
+rivit; paluuarvo 1, jos jokin FAIL.
+
+    tools/test/accounts --image build/amd64.img [--logdir DIR] [--keep]
+"""
+
+import argparse
+import base64
+import hashlib
+import http.server
+import importlib.machinery
+import importlib.util
+import json
+import os
+import secrets
+import shutil
+import socket
+import socketserver
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import urllib.parse
+import urllib.request
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+
+sys.dont_write_bytecode = True
+TAMA = os.path.dirname(os.path.abspath(__file__))
+JUURI = os.path.dirname(os.path.dirname(TAMA))
+sys.path.insert(0, os.path.join(JUURI, "tools", "native-amd64"))
+import vm9  # noqa: E402
+import cpuvieras  # noqa: E402
+
+
+def lataa(nimi, polku):
+    l = importlib.machinery.SourceFileLoader(nimi, polku)
+    m = importlib.util.module_from_spec(importlib.util.spec_from_loader(nimi, l))
+    l.exec_module(m)
+    return m
+
+
+wasmapp = lataa("wasmapp", os.path.join(TAMA, "wasmapp"))   # Cdp
+
+WSPORTTI = 8088     # vieraan etherws (accountd)
+WSPORTTI2 = 8089    # vieraan etherws (accountd2: rikkinäinen konsoli)
+WSPORTTI3 = 8090    # vieraan etherws /auth (aux/ethernetd: libwebauthnin toinen käyttäjä)
+RP = "localhost"
+
+LAHTEET = [
+    ("sys/include/webauthn.h", "/sys/include/webauthn.h"),
+    ("sys/src/libwebauthn/mkfile", "/sys/src/libwebauthn/mkfile"),
+    ("sys/src/libwebauthn/webauthn.c", "/sys/src/libwebauthn/webauthn.c"),
+    ("sys/src/cmd/accounts/mkfile", "/sys/src/cmd/accounts/mkfile"),
+    ("sys/src/cmd/accounts/conn.h", "/sys/src/cmd/accounts/conn.h"),
+    ("sys/src/cmd/accounts/conn.c", "/sys/src/cmd/accounts/conn.c"),
+    ("sys/src/cmd/accounts/accountd.c", "/sys/src/cmd/accounts/accountd.c"),
+    ("sys/src/cmd/accounts/account.c", "/sys/src/cmd/accounts/account.c"),
+    ("sys/src/cmd/accounts/asuser.c", "/sys/src/cmd/accounts/asuser.c"),
+    ("sys/src/cmd/ethergw/mkfile", "/sys/src/cmd/ethergw/mkfile"),
+    ("sys/src/cmd/ethergw/ethernetd.c", "/sys/src/cmd/ethergw/ethernetd.c"),
+    ("sys/src/cmd/ethergw/etherws.c", "/sys/src/cmd/ethergw/etherws.c"),
+]
+
+
+class Tulos:
+    def __init__(self):
+        self.ok_n = 0
+        self.virheet = []
+
+    def ok(self, nimi, ehto, tieto=""):
+        print("%-5s %s%s" % ("OK" if ehto else "FAIL", nimi, (": " + str(tieto)[:300]) if tieto and not ehto else ""))
+        sys.stdout.flush()
+        if ehto:
+            self.ok_n += 1
+        else:
+            self.virheet.append(nimi)
+        return ehto
+
+
+def b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def unb64u(s):
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+class WS:
+    """Sivun WebSocket (maskatut tekstikehykset)."""
+
+    def __init__(self, portti, origin, polku="/account"):
+        self.s = socket.create_connection(("127.0.0.1", portti), timeout=60)
+        key = base64.b64encode(os.urandom(16)).decode()
+        h = "GET %s HTTP/1.1\r\nHost: localhost:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" \
+            "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n" % (polku, portti, key)
+        if origin:
+            h += "Origin: %s\r\n" % origin
+        self.s.sendall((h + "\r\n").encode())
+        r = b""
+        while b"\r\n\r\n" not in r:
+            x = self.s.recv(1)
+            if not x:
+                break
+            r += x
+        self.status = r.split(b"\r\n")[0].decode("latin-1")
+
+    def send(self, text):
+        d = text.encode()
+        n = len(d)
+        h = bytes([0x81]) + (bytes([0x80 | n]) if n < 126 else bytes([0x80 | 126]) + struct.pack(">H", n))
+        m = os.urandom(4)
+        self.s.sendall(h + m + bytes(c ^ m[i % 4] for i, c in enumerate(d)))
+
+    def _n(self, n):
+        b = b""
+        while len(b) < n:
+            x = self.s.recv(n - len(b))
+            if not x:
+                raise EOFError("yhteys päättyi")
+            b += x
+        return b
+
+    def text(self):
+        while True:
+            b0, b1 = self._n(2)
+            n = b1 & 0x7f
+            if n == 126:
+                n = struct.unpack(">H", self._n(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", self._n(8))[0]
+            d = self._n(n)
+            if b0 & 0x0f == 8:
+                raise EOFError("close")
+            if b0 & 0x0f == 1:
+                return d.decode()
+
+    def ask(self, line):
+        self.send(line)
+        return self.text()
+
+    def close(self):
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
+
+class Passkey:
+    """Ohjelmistopasskey kuten autentikaattorin: P-256, laskuri."""
+
+    def __init__(self, laskuri=False):
+        self.key = ec.generate_private_key(ec.SECP256R1())
+        self.rawid = os.urandom(16)
+        self.id = b64u(self.rawid)
+        self.count = 0 if not laskuri else 1
+        self.laskuri = laskuri
+
+    def cose(self):
+        n = self.key.public_key().public_numbers()
+        return (bytes([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]) + n.x.to_bytes(32, "big")
+                + bytes([0x22, 0x58, 0x20]) + n.y.to_bytes(32, "big"))
+
+    def authdata(self, rp=RP, flags=0x05, count=0, at=False, idlle=None):
+        a = hashlib.sha256(rp.encode()).digest() + bytes([flags | (0x40 if at else 0)]) + struct.pack(">I", count)
+        if at:
+            cid = idlle if idlle is not None else self.rawid
+            a += bytes(16) + struct.pack(">H", len(cid)) + cid + self.cose()
+        return a
+
+
+def client(tyyppi, chal, origin, **lisa):
+    d = {"type": tyyppi, "challenge": chal, "origin": origin, "crossOrigin": False}
+    d.update(lisa)
+    return json.dumps(d, separators=(",", ":")).encode()
+
+
+class Testi:
+    def __init__(self, a, tk):
+        self.a = a
+        self.tk = tk
+        self.tyo = tempfile.mkdtemp(prefix="accounts-", dir=a.tmpdir)
+        self.loki = os.path.join(a.logdir or self.tyo, "accounts-serial.log")
+        self.v = None
+        self.http = None
+
+    # --- vieras ---
+
+    def aja(self, komento, aikaraja=120, stdin=b""):
+        t = self.v.pterm.aja(komento, aikaraja=aikaraja, stdin=stdin)
+        return t
+
+    def kaynnista(self):
+        juuri = os.path.join(self.tyo, "juuri.img")
+        subprocess.check_call(["cp", "--sparse=always", self.a.image, juuri])
+        mt = "%s@@%d" % (juuri, 2048 * 512)
+        env = dict(os.environ, MTOOLS_SKIP_CHECK="1")
+        ini = subprocess.check_output(["mtype", "-i", mt, "::/plan9.ini"], env=env).decode()
+        if not any(r.startswith("console=") for r in ini.splitlines()):
+            p = os.path.join(self.tyo, "plan9.ini")
+            open(p, "w").write(ini.rstrip("\n") + "\nconsole=0\n")
+            subprocess.check_call(["mcopy", "-o", "-i", mt, p, "::/plan9.ini"], env=env)
+        self.v = cpuvieras.CpuVieras(juuri, self.tyo, self.loki, lisaportit=(WSPORTTI, WSPORTTI2, WSPORTTI3))
+        self.v.vm.kaynnista()
+        vm9.kaynnista_9front(self.v.vm, 300)
+        t = self.v.provisioi()
+        self.tk.ok("vieras: CPU/auth-palvelin, 9pterm glendana", t.stdout == "glenda", t)
+
+    def kaanna(self):
+        t = self.aja("mkdir -p /sys/src/libwebauthn /sys/src/cmd/accounts /sys/src/cmd/ethergw /sys/lib/accounts")
+        for paik, eta in LAHTEET:
+            t = self.v.pterm.put(os.path.join(JUURI, paik), eta)
+            if t.koodi != 0:
+                raise vm9.VirheVM("put %s: %s %s" % (eta, t.status, t.stderr))
+        t = self.aja("cd /sys/src/libwebauthn && mk install >[2=1] && cd /sys/src/cmd/accounts && mk install >[2=1]"
+                     " && cd /sys/src/cmd/ethergw && mk install >[2=1]", aikaraja=900)
+        self.tk.ok("vieras: libwebauthn, auth/accountd, account, asuser, aux/etherws käännetty (amd64)",
+                   t.koodi == 0, t.stdout[-1500:] + t.status)
+        if t.koodi != 0:
+            raise vm9.VirheVM("käännös")
+        # varoitukset (-w) näkyvät mk:n tulosteessa
+        varoitukset = [r for r in t.stdout.splitlines() if "warning" in r.lower() or ": set and not used" in r]
+        self.tk.ok("vieras: käännös ilman varoituksia", not varoitukset, "\n".join(varoitukset))
+
+    def palvelut(self):
+        # auth/asuserin factotum löytää auth-palvelimen kuten mikä tahansa:
+        # ndb:n authdom=/auth= (vieraan kertakäyttöinen kopio)
+        t = self.aja("echo 'authdom=9front auth=10.0.2.15' >>/lib/ndb/local && echo -n refresh >/net/cs"
+                     " && ndb/query authdom 9front auth")
+        self.tk.ok("vieras: ndb auth=10.0.2.15 authdom=9front", t.stdout.strip() == "10.0.2.15", t)
+        t = self.aja("ls /srv")
+        cmd = [s.strip()[5:] for s in t.stdout.split() if s.endswith(".cmd")]
+        if not cmd:
+            raise vm9.VirheVM("tiedostopalvelimen konsoli puuttuu /srv:stä: %r" % t.stdout)
+        self.fscons = "/srv/" + cmd[0].split("/")[-1]
+        self.origin = "http://localhost:%d" % self.httpportti
+        skripti = "\n".join([
+            "#!/bin/rc",
+            "rfork e",
+            "a=(-l -r %s -o %s -d 9front -g lab -g 'proj*' -R 20)" % (RP, self.origin),
+            "auth/accountd $a -c %s >>[2]/usr/glenda/accountd.log &" % self.fscons,
+            # toinen: konsoli, jota ei ole (luonnin peruminen)
+            "auth/accountd $a -c /srv/eiole.cmd -s accountd2 >>[2]/usr/glenda/accountd2.log &",
+            "for(s in accountd accountd2) for(i in `{seq 1 100}) if(! test -e /srv/$s) sleep 0.1",
+            "e=(-A http://none.invalid -E http://none.invalid -C %s)" % self.origin,
+            "aux/listen1 'tcp!*!%d' /bin/aux/etherws $e >>[2]/usr/glenda/listen.log &" % WSPORTTI,
+            "aux/listen1 'tcp!*!%d' /bin/aux/etherws $e -a accountd2 >>[2]/usr/glenda/listen2.log &" % WSPORTTI2,
+            # ethernetd: vain /auth (kutsut ja passkeyt), ei koneita
+            "mkdir -p /usr/glenda/ether/cred",
+            "echo ethinvitation000001 erkki >/usr/glenda/ether/invites",
+            "aux/ethernetd -l -r %s -o %s -d /usr/glenda/ether -g 10.0.2.2 0 >>[2]/usr/glenda/ethernetd.log &" % (RP, self.origin),
+            "for(i in `{seq 1 100}) if(! test -e /srv/ethernetd) sleep 0.1",
+            "aux/listen1 'tcp!*!%d' /bin/aux/etherws -A %s -E http://none.invalid >>[2]/usr/glenda/listen3.log &"
+            % (WSPORTTI3, self.origin),
+            "for(p in %d %d %d) for(i in `{seq 1 100}) if(! grep -s '!'^$p^'$' /net/tcp/*/local >[2]/dev/null) sleep 0.1"
+            % (WSPORTTI, WSPORTTI2, WSPORTTI3),
+            "if(test -e /srv/accountd && test -e /srv/accountd2 && test -e /srv/ethernetd) echo P2ACC-VALMIS",
+            "if not echo P2ACC-VIRHE",
+            "",
+        ])
+        p = os.path.join(self.tyo, "acc.rc")
+        open(p, "w").write(skripti)
+        self.v.pterm.put(p, "/usr/glenda/acc.rc")
+        # sarjakonsolin nimiavaruudessa: keyfs /mnt/keys
+        self.v.vm.laheta("rc /usr/glenda/acc.rc\n")
+        i, m = self.v.vm.odota_jokin([r"P2ACC-VALMIS", r"P2ACC-VIRHE"], 60)
+        self.tk.ok("vieras: accountd, accountd2, ethernetd ja etherws käynnissä", i == 0)
+        if i != 0:
+            t = self.aja("cd /usr/glenda && for(f in *.log) { echo == $f; tail -5 $f }")
+            raise vm9.VirheVM("palvelut: %s" % t.stdout[-2000:])
+
+    def account(self, *args, srv=None):
+        k = "auth/account " + ("-s %s " % srv if srv else "") + " ".join(args)
+        t = self.aja(k, aikaraja=60)
+        return t.stdout.rstrip("\n")
+
+    def accountd_loki(self):
+        return self.aja("cat /usr/glenda/accountd.log /usr/glenda/accountd2.log").stdout
+
+    # --- isännän HTTP: sivu ja /account läpi ---
+
+    def http_kayntiin(self):
+        sivut = {"/": "account.html", "/account.html": "account.html", "/account.js": "account.js"}
+        hak = os.path.join(JUURI, "sys", "lib", "accounts")
+        testi = self
+
+        class K(socketserver.BaseRequestHandler):
+            def handle(self):
+                s = self.request
+                h = b""
+                while b"\r\n\r\n" not in h:
+                    x = s.recv(4096)
+                    if not x:
+                        return
+                    h += x
+                rivi = h.split(b"\r\n")[0].decode("latin-1").split(" ")
+                polku = urllib.parse.urlparse(rivi[1]).path if len(rivi) > 1 else "/"
+                if polku == "/account":
+                    portti = testi.v.portit[testi.wsportti]
+                    u = socket.create_connection(("127.0.0.1", portti))
+                    u.sendall(h)
+
+                    def putki(a, b):
+                        try:
+                            while True:
+                                d = a.recv(65536)
+                                if not d:
+                                    break
+                                b.sendall(d)
+                        except OSError:
+                            pass
+                        for x in (a, b):
+                            try:
+                                x.shutdown(socket.SHUT_RDWR)
+                            except OSError:
+                                pass
+                    t = threading.Thread(target=putki, args=(u, s), daemon=True)
+                    t.start()
+                    putki(s, u)
+                    t.join(5)
+                    return
+                if polku not in sivut:
+                    s.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+                d = open(os.path.join(hak, sivut[polku]), "rb").read()
+                tyyppi = "text/html" if sivut[polku].endswith(".html") else "text/javascript"
+                s.sendall(("HTTP/1.1 200 OK\r\nContent-Type: %s; charset=utf-8\r\nContent-Length: %d\r\n"
+                           "Cache-Control: no-store\r\nConnection: close\r\n\r\n" % (tyyppi, len(d))).encode() + d)
+
+        class S(socketserver.ThreadingMixIn, socketserver.TCPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
+        self.wsportti = WSPORTTI
+        self.http = S(("127.0.0.1", 0), K)
+        self.httpportti = self.http.server_address[1]
+        threading.Thread(target=self.http.serve_forever, daemon=True).start()
+
+    # --- protokolla ohjelmistopasskeylla ---
+
+    def ws(self, origin=None, portti=None):
+        return WS(portti or self.httpportti, origin if origin is not None else self.origin)
+
+    def haaste(self, w, line):
+        r = w.ask(line)
+        if not r.startswith("challenge "):
+            return None, r
+        return r.split(" "), r
+
+    def enroll(self, pk, koodi, flags=0x05, rp=RP, tyyppi="webauthn.create", origin=None, chal=None, at=True,
+               idlle=None, label="-", w=None, haaste=True, portti=None):
+        oma = w is None
+        w = w or self.ws(portti=portti)
+        try:
+            if haaste:
+                f, r = self.haaste(w, "challenge enroll " + koodi)
+                if f is None:
+                    return r
+                c = f[1]
+            else:
+                c = b64u(os.urandom(32))
+            a = pk.authdata(rp, flags, 0, at=at, idlle=idlle)
+            cl = client(tyyppi, chal or c, origin or self.origin)
+            return w.ask("enroll %s %s %s %s %s" % (koodi, pk.id, b64u(a), b64u(cl), label))
+        finally:
+            if oma:
+                w.close()
+
+    def login(self, pk, count=None, flags=0x05, rp=RP, allekirjoittaja=None, id=None, kahva="-", at=False,
+              tyyppi="webauthn.get", w=None):
+        oma = w is None
+        w = w or self.ws()
+        try:
+            f, r = self.haaste(w, "challenge login")
+            if f is None:
+                return r
+            if count is None:
+                if pk.laskuri:
+                    pk.count += 1
+                count = pk.count
+            elif pk.laskuri:
+                pk.count = max(pk.count, count)
+            a = pk.authdata(rp, flags, count, at=at)
+            cl = client(tyyppi, f[1], self.origin)
+            sig = (allekirjoittaja or pk).key.sign(a + hashlib.sha256(cl).digest(), ec.ECDSA(hashes.SHA256()))
+            return w.ask("login %s %s %s %s %s" % (id or pk.id, b64u(a), b64u(cl), b64u(sig), kahva))
+        finally:
+            if oma:
+                w.close()
+
+    def add(self, tok, pk, label="-"):
+        w = self.ws()
+        try:
+            f, r = self.haaste(w, "challenge add " + tok)
+            if f is None:
+                return r, []
+            a = pk.authdata(RP, 0x05, 0, at=True)
+            cl = client("webauthn.create", f[1], self.origin)
+            return w.ask("add %s %s %s %s %s" % (tok, pk.id, b64u(a), b64u(cl), label)), f[4:]
+        finally:
+            w.close()
+
+    def kysy(self, line):
+        w = self.ws()
+        try:
+            return w.ask(line)
+        finally:
+            w.close()
+
+    def odota(self, nimi, saatu, alku):
+        return self.tk.ok(nimi, saatu.startswith(alku), saatu)
+
+    # --- testit ---
+
+    def protokolla(self):
+        tk = self.tk
+        # alkuperä: vain sivun oma, ei ilman
+        for origin, want in (("https://evil.example", "403"), ("", "403")):
+            w = WS(self.httpportti, origin or None)
+            tk.ok("/account alkuperältä %r: %s" % (origin or "(ei)", want), want in w.status, w.status)
+            w.close()
+
+        # kutsut: nimet, ryhmät
+        self.odota("kutsu: varattu nimi (glenda)", self.account("invite", "glenda", "3600"), "error reserved")
+        self.odota("kutsu: varattu nimi (adm)", self.account("invite", "adm", "3600"), "error reserved")
+        self.odota("kutsu: huono nimi", self.account("invite", "Alice", "3600"), "error bad name")
+        self.odota("kutsu: liian pitkä nimi", self.account("invite", "a" * 28, "3600"), "error bad name")
+        self.odota("kutsu: ryhmä ei sallittu (sys)", self.account("invite", "alice", "3600", "sys"),
+                   "error not a group")
+        self.odota("kutsu: ryhmä ei listalla", self.account("invite", "alice", "3600", "muut"), "error not a group")
+        self.odota("kutsu: huono aika", self.account("invite", "alice", "5"), "error bad time")
+        r = self.account("invite", "alice", "3600", "lab")
+        self.odota("kutsu alice (ryhmä lab)", r, "ok ")
+        ka = r.split(" ")[1]
+        self.odota("kutsu: samalle nimelle jo avoin", self.account("invite", "alice", "3600"), "error an invitation")
+        kb = self.account("invite", "bob", "3600").split(" ")[1]
+        kv = self.account("invite", "eve", "60").split(" ")[1]
+        self.vanhenee = time.time() + 61
+        self.odota("kutsulista ei näytä koodia", self.account("invites"), "ok")
+        tk.ok("kutsulista: vain tiivisteet", ka not in self.account("invites"))
+
+        alice = Passkey()
+        e = self.enroll
+        self.odota("enroll: ei kutsua", e(alice, b64u(os.urandom(24))), "error no such invitation")
+        self.odota("enroll: ei UV:tä", e(alice, ka, flags=0x01), "error the user not verified")
+        self.odota("enroll: ei UP:tä", e(alice, ka, flags=0x04), "error no user present")
+        self.odota("enroll: BS ilman BE:tä", e(alice, ka, flags=0x15), "error bad authenticator data")
+        self.odota("enroll: toisen rp:n passkey", e(alice, ka, rp="plan2001.com"), "error not this site's passkey")
+        self.odota("enroll: toinen alkuperä", e(alice, ka, origin="https://evil.example"),
+                   "error not this site's origin")
+        self.odota("enroll: tyyppi get", e(alice, ka, tyyppi="webauthn.get"), "error not what was asked")
+        self.odota("enroll: toinen haaste", e(alice, ka, chal=b64u(os.urandom(32))), "error not this challenge")
+        self.odota("enroll: ei haastetta", e(alice, ka, haaste=False), "error no challenge")
+        self.odota("enroll: ei AT:tä", e(alice, ka, at=False), "error no attested credential")
+        self.odota("enroll: AT:n id ei passkeyn", e(alice, ka, idlle=os.urandom(16)), "error not the attested")
+        # kirjautumisen haaste ei käy luontiin
+        w = self.ws()
+        w.ask("challenge login")
+        self.odota("enroll: kirjautumisen haaste", e(alice, ka, w=w, haaste=False), "error no challenge")
+        w.close()
+        # toisen kutsun haaste ei käy
+        w = self.ws()
+        f, _ = self.haaste(w, "challenge enroll " + kb)
+        a = alice.authdata(RP, 0x05, 0, at=True)
+        cl = client("webauthn.create", f[1], self.origin)
+        r = w.ask("enroll %s %s %s %s -" % (ka, alice.id, b64u(a), b64u(cl)))
+        self.odota("enroll: toisen kutsun haaste", r, "error not this invitation's challenge")
+        w.close()
+        # haaste käytetään kerran (myös virheellinen yritys kuluttaa sen)
+        w = self.ws()
+        f, _ = self.haaste(w, "challenge enroll " + ka)
+        cl = client("webauthn.create", f[1], self.origin)
+        r1 = w.ask("enroll %s %s %s %s -" % (ka, alice.id, b64u(alice.authdata(RP, 0x01, 0, at=True)), b64u(cl)))
+        r2 = w.ask("enroll %s %s %s %s -" % (ka, alice.id, b64u(alice.authdata(RP, 0x05, 0, at=True)), b64u(cl)))
+        tk.ok("haaste kerran: toisto samalla yhteydellä hylätään", r1.startswith("error") and r2.startswith(
+            "error no challenge"), (r1, r2))
+        w.close()
+
+        lab = b64u("Alicen kone".encode())
+        r = e(alice, ka, label=lab)
+        self.odota("enroll alice: istunto", r, "ok ")
+        self.ta = r.split(" ")[1]
+        tk.ok("enroll: vastaus TOKEN NAME EXPIRES", r.split(" ")[2] == "alice", r)
+        self.odota("kutsu kerran", e(Passkey(), ka), "error no such invitation")
+        self.odota("enroll bob: sama passkey toiselle tilille", e(alice, kb), "error the passkey is known")
+        tk.ok("kutsu bob säilyy epäonnistuneen jälkeen", "bob" in self.account("invites"))
+
+        # tiedostopalvelin ja keyfs
+        t = self.aja("grep '^[0-9]*:alice:' /adm/users; grep ':lab:' /adm/users; ls -ld /usr/alice")
+        rivit = t.stdout.splitlines()
+        tk.ok("alice: /adm/users", any(":alice:alice:" in r for r in rivit), t.stdout)
+        tk.ok("alice: ryhmässä lab", any(":lab:" in r and "alice" in r.split(":")[3] for r in rivit), t.stdout)
+        tk.ok("alice: /usr/alice aliceen", any(r.startswith("d") and " alice " in r and "/usr/alice" in r
+                                                for r in rivit), t.stdout)
+        tk.ok("lab: ryhmä (id >= 10000)", any(":lab:" in r and int(r.split(":")[0]) >= 10000 for r in rivit),
+              t.stdout)
+        self.odota("account users", self.account("users"), "ok")
+        tk.ok("users: alice active, 1 passkey", "\nalice active " in self.account("users")
+              and self.account("users").split("\nalice active ")[1].split("\n")[0].endswith(" 1"),
+              self.account("users"))
+
+        # kirjautuminen
+        l = self.login
+        self.odota("login: alice", l(alice), "ok ")
+        self.odota("login: sama laskuri (0, 0: synkattu passkey)", l(alice), "ok ")
+        self.odota("login: tuntematon passkey", l(alice, id=b64u(os.urandom(16))), "error no such passkey")
+        self.odota("login: toisen avaimen allekirjoitus", l(alice, allekirjoittaja=Passkey()), "error bad signature")
+        self.odota("login: ei UV:tä", l(alice, flags=0x01), "error the user not verified")
+        self.odota("login: toisen rp:n", l(alice, rp="auth.plan2001.com"), "error not this site's passkey")
+        self.odota("login: tyyppi create", l(alice, tyyppi="webauthn.create"), "error not what was asked")
+        self.odota("login: AT väitteessä", l(alice, at=True), "error bad assertion")
+        self.odota("login: väärä käyttäjäkahva", l(alice, kahva=b64u(os.urandom(16))), "error not this account's")
+        # laskurillinen avain: laskuri nousee, toisto hylätään
+        bob = Passkey(laskuri=True)
+        r = e(bob, kb)
+        self.odota("enroll bob (laskurillinen)", r, "ok ")
+        self.tb = r.split(" ")[1]
+        self.odota("login bob: laskuri 2", l(bob), "ok ")
+        self.odota("login bob: laskuri 2 uudelleen (kopio?)", l(bob, count=2), "error counter not above")
+        self.odota("login bob: laskuri 1", l(bob, count=1), "error counter not above")
+        r = l(bob, count=5)
+        self.odota("login bob: laskuri 5", r, "ok ")
+        self.tb = r.split(" ")[1]
+
+        # istunto
+        self.odota("session: alice", self.kysy("session " + self.ta), "ok alice ")
+        self.odota("session: keksitty", self.kysy("session " + b64u(os.urandom(32))), "error no such session")
+        r = self.kysy("creds " + self.ta)
+        tk.ok("creds: alicen yksi passkey ja nimi", r.startswith("ok\n") and len(r.split("\n")) == 2 and lab in r, r)
+        tk.ok("creds: ei bobin passkeyta", " bob " not in r, r)
+
+        # lisäys: tuore istunto (-R 20), sama passkey ei toiseen kertaan
+        self.ta = l(alice).split(" ")[1]
+        alice2 = Passkey()
+        r, ids = self.add(self.ta, alice2, b64u(b"puhelin"))
+        self.odota("add: toinen passkey alicelle", r, "ok ")
+        tk.ok("add: haaste kertoo olemassa olevat id:t (excludeCredentials)", alice.id in ids, ids)
+        h2 = r.split(" ")[1]
+        r, _ = self.add(self.ta, alice2)
+        self.odota("add: sama passkey uudelleen", r, "error the passkey is known")
+        r, _ = self.add(self.tb, alice)
+        self.odota("add: toisen tilin passkey bobille", r, "error the passkey is known")
+        r, _ = self.add(b64u(os.urandom(32)), Passkey())
+        self.odota("add: ilman istuntoa", r, "error no such session")
+        # alice2:n istunto
+        r = l(alice2)
+        self.odota("login: alicen toinen passkey", r, "ok ")
+        ta2 = r.split(" ")[1]
+        r = self.kysy("creds " + self.ta)
+        h1 = [x.split(" ")[0] for x in r.split("\n")[1:] if x.split(" ")[0] != h2][0]
+        tk.ok("creds: kaksi", len(r.split("\n")) == 3, r)
+        # poisto: viimeistä ei voi poistaa, poistetun istunnot päättyvät
+        self.odota("revoke: toisen tilin passkey", self.kysy("revoke %s %s" % (self.tb, h1)), "error no such passkey")
+        self.odota("revoke: alice2", self.kysy("revoke %s %s" % (self.ta, h2)), "ok")
+        self.odota("revoke: alice2:n istunto päättyi", self.kysy("session " + ta2), "error no such session")
+        self.odota("revoke: alice2 ei kirjaudu", l(alice2), "error no such passkey")
+        self.odota("revoke: viimeistä ei", self.kysy("revoke %s %s" % (self.ta, h1)), "error it is the account's last")
+        # tuoreus (-R 20)
+        time.sleep(21)
+        r, _ = self.add(self.ta, Passkey())
+        self.odota("add: vanha istunto (-R 20): kirjaudu uudelleen", r, "error sign in again")
+        r = l(alice)
+        self.ta = r.split(" ")[1]
+
+        # ryhmät
+        self.odota("group: sys ei sallittu", self.account("group", "alice", "+sys"), "error not a group")
+        self.odota("group: alice (käyttäjä) ei ryhmä", self.account("group", "bob", "+alice"), "error not a group")
+        self.odota("group: proj1 (proj*)", self.account("group", "alice", "+proj1"), "ok")
+        tk.ok("group: alice proj1:ssä", "proj1" in self.account("groups", "alice"), self.account("groups", "alice"))
+        self.odota("group: -proj1", self.account("group", "alice", "-proj1"), "ok")
+        tk.ok("group: alice ei proj1:ssä", "proj1" not in self.account("groups", "alice"))
+        self.odota("group: ei tiliä", self.account("group", "nosuch", "+proj1"), "error no such account")
+
+        # disable / enable
+        self.odota("disable bob", self.account("disable", "bob"), "ok")
+        self.odota("disable: bobin istunto päättyi", self.kysy("session " + self.tb), "error no such session")
+        self.odota("disable: bob ei kirjaudu", l(bob), "error the account is not enabled")
+        self.odota("enable bob", self.account("enable", "bob"), "ok")
+        r = l(bob)
+        self.odota("enable: bob kirjautuu", r, "ok ")
+        self.tb = r.split(" ")[1]
+        self.odota("logout: alice2 (keksitty)", self.kysy("logout " + b64u(os.urandom(32))), "ok")
+
+        # samanaikaiset luonnit samalla kutsulla: tasan yksi
+        kc = self.account("invite", "carl", "3600").split(" ")[1]
+        tulokset = [None] * 4
+        valmiit = []
+        for i in range(4):
+            w = self.ws()
+            f, _ = self.haaste(w, "challenge enroll " + kc)
+            valmiit.append((w, f[1], Passkey()))
+
+        def yksi(i):
+            w, c, pk = valmiit[i]
+            a = pk.authdata(RP, 0x05, 0, at=True)
+            cl = client("webauthn.create", c, self.origin)
+            try:
+                tulokset[i] = w.ask("enroll %s %s %s %s -" % (kc, pk.id, b64u(a), b64u(cl)))
+            except Exception as x:
+                tulokset[i] = "poikkeus %s" % x
+            w.close()
+        sa = [threading.Thread(target=yksi, args=(i,)) for i in range(4)]
+        for s in sa:
+            s.start()
+        for s in sa:
+            s.join(120)
+        okt = [r for r in tulokset if r and r.startswith("ok ")]
+        tk.ok("samanaikaiset luonnit: tasan yksi onnistuu", len(okt) == 1, tulokset)
+        tk.ok("samanaikaiset luonnit: muut 'no such invitation'",
+              all(r.startswith("error no such invitation") for r in tulokset if r not in okt), tulokset)
+        tk.ok("samanaikaiset luonnit: carlilla yksi passkey", self.account("creds", "carl").count("\n") == 1,
+              self.account("creds", "carl"))
+
+        # epäonnistunut luonti (accountd2: konsolia ei ole) perutaan; uusinta onnistuu
+        kf = self.account("invite", "frank", "3600", "lab").split(" ")[1]
+        frank = Passkey()
+        self.wsportti = WSPORTTI2
+        try:
+            r = self.enroll(frank, kf)
+        finally:
+            self.wsportti = WSPORTTI
+        self.odota("luonti ilman tiedostopalvelimen konsolia epäonnistuu", r, "error can not open the file server")
+        tk.ok("peruttu: kutsu frank jäljellä", "frank" in self.account("invites"), self.account("invites"))
+        tk.ok("peruttu: frank pending", "\nfrank pending" in self.account("users"), self.account("users"))
+        t = self.aja("grep -c ':frank:' /adm/users; grep ':lab:' /adm/users")
+        tk.ok("peruttu: ei fs-käyttäjää eikä ryhmää", t.stdout.splitlines()[0].strip() == "0"
+              and "frank" not in t.stdout, t.stdout)
+        self.odota("peruttu: passkey ei jäänyt", self.login(frank), "error no such passkey")
+        r = self.enroll(frank, kf)
+        self.odota("uusinta: frank luodaan (pending otetaan)", r, "ok ")
+        self.tf = r.split(" ")[1]
+        tk.ok("uusinta: frank active", "\nfrank active" in self.account("users"), self.account("users"))
+
+        # vanhentunut kutsu
+        odota = self.vanhenee - time.time()
+        if odota > 0:
+            time.sleep(odota)
+        self.odota("vanhentunut kutsu", self.enroll(Passkey(), kv), "error")
+        tk.ok("vanhentunut kutsu poistettu", "eve" not in self.account("invites"), self.account("invites"))
+
+        # yhteydet suljetaan: accountd:n avoimet tiedostot eivät kasva yhteyksien myötä
+        t = self.aja("for(p in `{ps | awk '$NF == \"accountd\" {print $2}'}) wc -l </proc/$p/fd")
+        luvut = [int(x) for x in t.stdout.split()]
+        tk.ok("accountd: ei vuotavia tiedostokuvaajia (alle 20 kussakin)", luvut and max(luvut) < 20, t.stdout)
+
+        # lokissa ei tokeneita, koodeja eikä avaimia
+        loki = self.accountd_loki()
+        tk.ok("loki: ei istuntotokeneita", all(t not in loki for t in (self.ta, self.tb, self.tf)))
+        tk.ok("loki: ei kutsukoodeja", all(k not in loki for k in (ka, kb, kc, kf, kv)))
+
+    def ethernetd(self):
+        """aux/ethernetd:n /auth libwebauthnin päällä: luonti vaatii AT:n, kirjautuminen ennallaan."""
+        tk = self.tk
+
+        def auth(rivi):
+            w = WS(self.v.portit[WSPORTTI3], self.origin, "/auth")
+            try:
+                c = w.text()
+                if not c.startswith("challenge "):
+                    return c
+                return w.ask(rivi(c[10:]))
+            finally:
+                w.close()
+
+        from cryptography.hazmat.primitives import serialization
+        pk = Passkey()
+        spki = b64u(pk.key.public_key().public_bytes(serialization.Encoding.DER,
+                                                     serialization.PublicFormat.SubjectPublicKeyInfo))
+
+        def enroll(at=True, idlle=None):
+            return auth(lambda c: "enroll ethinvitation000001 %s %s %s %s" % (
+                pk.id, spki, b64u(pk.authdata(RP, 0x05, 0, at=at, idlle=idlle)),
+                b64u(client("webauthn.create", c, self.origin))))
+
+        def login(count, flags=0x05):
+            def rivi(c):
+                a = pk.authdata(RP, flags, count)
+                cl = client("webauthn.get", c, self.origin)
+                sig = pk.key.sign(a + hashlib.sha256(cl).digest(), ec.ECDSA(hashes.SHA256()))
+                return "login %s %s %s %s" % (pk.id, b64u(a), b64u(cl), b64u(sig))
+            return auth(rivi)
+        self.odota("ethernetd: luonti ilman AT:tä", enroll(at=False), "error no attested credential")
+        self.odota("ethernetd: AT:n id ei passkeyn", enroll(idlle=os.urandom(16)), "error not the attested")
+        self.odota("ethernetd: luonti kutsulla", enroll(), "ok ")
+        self.odota("ethernetd: kutsu kerran", enroll(), "error no such invitation")
+        self.odota("ethernetd: kirjautuminen", login(1), "ok ")
+        self.odota("ethernetd: sama laskuri", login(1), "error counter not above")
+        self.odota("ethernetd: ei UV:tä", login(2, flags=0x01), "error the user not verified")
+        self.odota("ethernetd: kirjautuminen 2", login(3), "ok ")
+
+    def asuser(self):
+        tk = self.tk
+        t = self.aja("auth/asuser cat /dev/user", stdin=(self.ta + "\n").encode(), aikaraja=60)
+        tk.ok("asuser: alicen istunto -> /dev/user alice", t.stdout.strip() == "alice", t)
+        k = "echo salaisuus >/usr/alice/s; chmod 600 /usr/alice/s; ls -l /usr/alice/s"
+        t = self.aja("auth/asuser rc -c " + _rc(k), stdin=(self.ta + "\n").encode(), aikaraja=60)
+        tk.ok("asuser: alice luo 600-tiedoston omistajana", " alice alice " in t.stdout
+              or (" alice " in t.stdout and "--rw-------" in t.stdout), t)
+        t = self.aja("auth/asuser rc -c 'cat /usr/alice/s; echo x >/usr/alice/b'",
+                     stdin=(self.tb + "\n").encode(), aikaraja=60)
+        tk.ok("asuser: bob ei lue alicen tiedostoa", "salaisuus" not in t.stdout and "permission denied"
+              in (t.stdout + t.stderr).lower(), t)
+        t = self.aja("test -e /usr/alice/b && echo on")
+        tk.ok("asuser: bob ei kirjoita alicen kotiin", "on" not in t.stdout, t)
+        t = self.aja("auth/asuser cat /dev/user", stdin=(b64u(os.urandom(32)) + "\n").encode(), aikaraja=60)
+        tk.ok("asuser: keksitty istunto hylätään", t.koodi != 0 and "alice" not in t.stdout, t)
+        t = self.aja("auth/asuser cat /dev/user", aikaraja=60)
+        tk.ok("asuser: ilman istuntoa hylätään", t.koodi != 0, t)
+        # ei-hostowner: alicena pyyntö ei mene läpi (accountd ei ota sitä)
+        k = "echo %s | auth/asuser cat /dev/user" % self.tb
+        t = self.aja("auth/asuser rc -c " + _rc(k), stdin=(self.ta + "\n").encode(), aikaraja=120)
+        tk.ok("asuser: aliceena asuser ei saa bobin avainta", "bob" not in t.stdout and t.koodi != 0, t)
+        t = self.aja("auth/asuser rc -c 'auth/account users'", stdin=(self.ta + "\n").encode(), aikaraja=120)
+        tk.ok("account: alicena ylläpitopyyntö ei mene läpi", "alice active" not in t.stdout and t.koodi != 0, t)
+        self.odota("logout: alice", self.kysy("logout " + self.ta), "ok")
+        t = self.aja("auth/asuser cat /dev/user", stdin=(self.ta + "\n").encode(), aikaraja=60)
+        tk.ok("asuser: päättynyt istunto hylätään", t.koodi != 0 and "alice" not in t.stdout, t)
+        self.odota("disable frank", self.account("disable", "frank"), "ok")
+        t = self.aja("auth/asuser cat /dev/user", stdin=(self.tf + "\n").encode(), aikaraja=60)
+        tk.ok("asuser: suljettu tili hylätään", t.koodi != 0 and "frank" not in t.stdout, t)
+
+    # --- Chromium ---
+
+    def selain(self, prf):
+        tk = self.tk
+        nimi = "cora" if prf else "dana"
+        koodi = self.account("invite", nimi, "3600", "lab").split(" ")[1]
+        profiili = tempfile.mkdtemp(prefix="chromium-", dir=self.a.tmpdir)
+        chrome = subprocess.Popen(["chromium", "--headless=new", "--no-sandbox", "--disable-gpu",
+                                   "--password-store=basic", "--user-data-dir=" + profiili,
+                                   "--remote-debugging-port=0", "--window-size=500,800", "about:blank"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        mika = "PRF" if prf else "ei PRF"
+        try:
+            dt = None
+            for _ in range(100):
+                try:
+                    dt = dt or int(open(os.path.join(profiili, "DevToolsActivePort")).readline())
+                    urllib.request.urlopen("http://127.0.0.1:%d/json" % dt)
+                    break
+                except Exception:
+                    time.sleep(0.2)
+            url = "http://localhost:%d/#invite=%s" % (self.httpportti, koodi)
+            t = json.loads(urllib.request.urlopen(urllib.request.Request(
+                "http://127.0.0.1:%d/json/new?%s" % (dt, urllib.parse.quote("about:blank", safe="")),
+                method="PUT")).read())
+            cdp = wasmapp.Cdp(t["webSocketDebuggerUrl"])
+            cdp.call("Page.enable")
+            cdp.call("Runtime.enable")
+            cdp.call("Network.enable")
+            cdp.call("WebAuthn.enable", enableUI=False)
+            sisa = cdp.call("WebAuthn.addVirtualAuthenticator", options={
+                "protocol": "ctap2", "ctap2Version": "ctap2_1", "transport": "internal",
+                "hasResidentKey": True, "hasUserVerification": True, "isUserVerified": True,
+                "hasPrf": prf, "automaticPresenceSimulation": True})["authenticatorId"]
+            # turva-avain (usb) vasta lisäysvaiheessa: tyhjä autentikaattori lopettaisi
+            # löydettävän kirjautumisen NotAllowediin ennen sisäistä
+            cdp.call("Page.navigate", url=url)
+
+            def odota(lauseke, mita, secs=60):
+                loppu = time.time() + secs
+                while time.time() < loppu:
+                    try:
+                        if cdp.js(lauseke):
+                            return True
+                    except RuntimeError:
+                        pass
+                    time.sleep(0.3)
+                st = cdp.js("document.getElementById('status') && document.getElementById('status').textContent")
+                tk.ok("%s (%s)" % (mita, mika), False, "sivu: %r; konsoli: %s" % (st, cdp.log[-5:]))
+                return False
+
+            def klikkaa(sel):
+                cdp.call("Runtime.evaluate", expression="document.querySelector(%s).click()" % json.dumps(sel),
+                         userGesture=True)
+
+            def tila():
+                return cdp.js("document.getElementById('status').textContent") or ""
+
+            if not odota("document.getElementById('enrollname') && "
+                         "document.getElementById('enrollname').textContent == %s" % json.dumps(nimi),
+                         "sivu näyttää kutsun nimen"):
+                return
+            tk.ok("selain (%s): kutsun nimi sivulla" % mika, True)
+            cdp.js("document.getElementById('enrolllabel').value = 'Työläppäri ' + 'ä'.repeat(40)")
+            klikkaa('#enroll button[data-hint="client-device"]')
+            if odota("document.getElementById('status').textContent.includes('is made')", "tili luotu"):
+                tk.ok("selain (%s): tili luotu passkeylla tällä laitteella" % mika, True, tila())
+                tk.ok("selain (%s): PRF-tieto" % mika, ("PRF" in tila()) == prf, tila())
+                tk.ok("selain (%s): kutsu pois osoitteesta" % mika, "invite" not in cdp.js("location.href"))
+            creds = cdp.call("WebAuthn.getCredentials", authenticatorId=sisa)["credentials"]
+            tk.ok("selain (%s): passkey sisäisessä autentikaattorissa, rp localhost" % mika,
+                  len(creds) == 1 and creds[0].get("rpId") == RP and creds[0].get("isResidentCredential"), creds)
+            odota("document.querySelectorAll('#creds li').length == 1", "lista: yksi passkey")
+            # evästeet pois: kirjautuminen passkeylla
+            cdp.call("Network.clearBrowserCookies")
+            cdp.call("Page.navigate", url="http://localhost:%d/" % self.httpportti)
+            odota("!document.getElementById('signin').hidden", "kirjautumissivu")
+            klikkaa('#signin button[data-hint="client-device"]')
+            if odota("document.getElementById('status').textContent.startsWith('Signed in as %s')" % nimi,
+                     "kirjautuminen"):
+                tk.ok("selain (%s): kirjautuminen evästeittä passkeylla" % mika, True)
+            # toinen passkey turva-avaimeen
+            ulko = cdp.call("WebAuthn.addVirtualAuthenticator", options={
+                "protocol": "ctap2", "ctap2Version": "ctap2_1", "transport": "usb",
+                "hasResidentKey": True, "hasUserVerification": True, "isUserVerified": True,
+                "hasPrf": prf, "automaticPresenceSimulation": True})["authenticatorId"]
+            cdp.js("document.getElementById('addlabel').value = 'avain'")
+            klikkaa('#account button[data-hint="security-key"]')
+            if odota("document.querySelectorAll('#creds li').length == 2", "toinen passkey"):
+                tk.ok("selain (%s): toinen passkey turva-avaimeen" % mika, True)
+            c2 = cdp.call("WebAuthn.getCredentials", authenticatorId=ulko)["credentials"]
+            tk.ok("selain (%s): passkey usb-autentikaattorissa" % mika, len(c2) == 1, c2)
+            # sama laite uudelleen: excludeCredentials estää
+            klikkaa('#account button[data-hint="client-device"]')
+            odota("document.getElementById('status').className == 'bad'", "sama laite uudelleen estetään", 30)
+            tk.ok("selain (%s): sama laite uudelleen estetään" % mika,
+                  cdp.js("document.querySelectorAll('#creds li').length") == 2, tila())
+            # asuser selaimen istunnolla
+            ev = cdp.call("Network.getCookies", urls=["http://localhost:%d/" % self.httpportti])["cookies"]
+            tok = [c["value"] for c in ev if c["name"] == "p2session"]
+            tk.ok("selain (%s): istuntoeväste SameSite=Strict" % mika,
+                  len(tok) == 1 and [c for c in ev if c["name"] == "p2session"][0].get("sameSite") == "Strict", ev)
+            if tok:
+                t = self.aja("auth/asuser cat /dev/user", stdin=(tok[0] + "\n").encode(), aikaraja=60)
+                tk.ok("selain (%s): asuser selaimen istunnolla -> %s" % (mika, nimi), t.stdout.strip() == nimi, t)
+            # poisto
+            cdp.call("Runtime.evaluate", expression="Array.from(document.querySelectorAll('#creds li'))"
+                     ".find((li) => li.textContent.includes('avain')).querySelector('button').click()",
+                     userGesture=True)
+            if odota("document.querySelectorAll('#creds li').length == 1", "poisto"):
+                tk.ok("selain (%s): passkey poistettu" % mika, True)
+            tk.ok("selain (%s): sivulla ei virheitä" % mika, not any("EXCEPTION" in x for x in cdp.log), cdp.log)
+            # kirjautuminen jäljellä olevalla toimii edelleen (turva-avain irrotettu)
+            cdp.call("WebAuthn.removeVirtualAuthenticator", authenticatorId=ulko)
+            cdp.call("Network.clearBrowserCookies")
+            cdp.call("Page.navigate", url="http://localhost:%d/" % self.httpportti)
+            odota("!document.getElementById('signin').hidden", "kirjautumissivu 2")
+            klikkaa('#signin button[data-hint="client-device"]')
+            ok1 = odota("document.getElementById('status').textContent.startsWith('Signed in as')", "kirjautuminen 2")
+            if ok1:
+                tk.ok("selain (%s): kirjautuminen jäljellä olevalla passkeylla" % mika, True)
+        finally:
+            chrome.kill()
+            chrome.wait()
+            shutil.rmtree(profiili, ignore_errors=True)
+
+    def aja_kaikki(self):
+        try:
+            self.http_kayntiin()
+            self.kaynnista()
+            self.kaanna()
+            self.palvelut()
+            self.protokolla()
+            self.ethernetd()
+            self.asuser()
+            for prf in (True, False):
+                self.selain(prf)
+        except (vm9.VirheVM, cpuvieras.Siirtovirhe, cpuvieras.Aikaraja) as e:
+            self.tk.ok("ajo keskeytyi", False, e)
+        finally:
+            try:
+                if self.v:
+                    try:
+                        print(self.accountd_loki()[-3000:] if self.tk.virheet else "", end="")
+                    except Exception:
+                        pass
+                    self.v.sammuta()
+            finally:
+                if self.v:
+                    self.v.siivoa()
+                if self.http:
+                    self.http.shutdown()
+                if not self.a.keep:
+                    shutil.rmtree(self.tyo, ignore_errors=True)
+
+
+def _rc(s):
+    return "'" + s.replace("'", "''") + "'"
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--image", required=True)
+    p.add_argument("--logdir")
+    p.add_argument("--tmpdir", default=os.environ.get("TMPDIR") or os.path.join(JUURI, "build", "test"))
+    p.add_argument("--keep", action="store_true")
+    a = p.parse_args()
+    os.makedirs(a.tmpdir, exist_ok=True)
+    tk = Tulos()
+    Testi(a, tk).aja_kaikki()
+    print("%d OK, %d FAIL%s" % (tk.ok_n, len(tk.virheet), (": " + ", ".join(tk.virheet)) if tk.virheet else ""))
+    sys.exit(1 if tk.virheet else 0)
+
+
+if __name__ == "__main__":
+    main()

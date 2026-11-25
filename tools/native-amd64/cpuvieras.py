@@ -219,7 +219,7 @@ class CpuVieras:
     """
 
     def __init__(self, levy, tyohak, loki, muoto="raw", testi_nicit=(), muisti="2048", cpu="2",
-                 laji="hd", kone="q35", provisiointi=("hd", "sdE1"), lisalevyt=()):
+                 laji="hd", kone="q35", provisiointi=("hd", "sdE1"), lisalevyt=(), lisaportit=()):
         self.tyohak = tyohak
         self.cpuportti = vapaa_portti()
         self.authportti = vapaa_portti()
@@ -236,9 +236,13 @@ class CpuVieras:
         fd = os.open(self.kiinnike, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         os.write(fd, data + b"\n" * (koko - len(data)))
         os.close(fd)
+        # lisaportit: vieraan TCP-portit, joille isännän 127.0.0.1:n vapaa
+        # portti (self.portit[vieras] = isäntä), esim. testin HTTP-palvelu
+        self.portit = {p: vapaa_portti() for p in lisaportit}
         verkko = ["-netdev", "user,id=ohj,restrict=on,"
                   "hostfwd=tcp:127.0.0.1:%d-:%d,hostfwd=tcp:127.0.0.1:%d-:%d"
-                  % (self.cpuportti, CPU_PORTTI, self.authportti, AUTH_PORTTI),
+                  % (self.cpuportti, CPU_PORTTI, self.authportti, AUTH_PORTTI)
+                  + "".join(",hostfwd=tcp:127.0.0.1:%d-:%d" % (h, v) for v, h in self.portit.items()),
                   "-device", "virtio-net-pci,netdev=ohj,mac=" + OHJAUS_MAC]
         for i, mac in enumerate(testi_nicit):
             verkko += ["-netdev", "hubport,id=t%d,hubid=%d" % (i, 10 + i),
