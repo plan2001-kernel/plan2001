@@ -1,0 +1,4 @@
+--- a/sys/src/mkfile
++++ b/sys/src/mkfile
+@@ -42,0 +43 @@
++	libwebauthn\

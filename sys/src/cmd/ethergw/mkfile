@@ -3,6 +3,7 @@
 # the wasm32 machines' network on a server (docs/network.md): ethernetd,
 # its gateway, and etherws, the WebSockets' end for it
 TARG=ethernetd etherws
+LIB=/$objtype/lib/libwebauthn.a
 BIN=/$objtype/bin/aux
 
 </sys/src/cmd/mkmany

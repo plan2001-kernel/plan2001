@@ -56,6 +56,7 @@
 #include <libsec.h>
 #include <thread.h>
 #include <ip.h>
+#include <webauthn.h>
 
 enum {
 	Stack	= 64*1024,
@@ -210,170 +211,38 @@ take(Bucket *b, double r, double burst, double n)
 	return 1;
 }
 
-/* base64url, without padding */
-static int
-unb64u(char *s, uchar *p, int n)
-{
-	char *t, *u;
-	int m;
-
-	m = strlen(s);
-	if(m == 0 || strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != m)
-		return -1;
-	t = malloc(m + 4);
-	if(t == nil)
-		return -1;
-	strcpy(t, s);
-	for(u = t; *u; u++)
-		if(*u == '-')
-			*u = '+';
-		else if(*u == '_')
-			*u = '/';
-	while(m % 4)
-		t[m++] = '=';
-	t[m] = 0;
-	m = dec64(p, n, t, m);
-	free(t);
-	return m;
-}
-
-static void
-b64u(char *s, int ns, uchar *p, int n)
-{
-	char *t;
-
-	enc64(s, ns, p, n);
-	for(t = s; *t; t++)
-		if(*t == '+')
-			*t = '-';
-		else if(*t == '/')
-			*t = '_';
-		else if(*t == '='){
-			*t = 0;
-			break;
-		}
-}
-
-static int
-isb64u(char *s, int min, int max)
-{
-	int n;
-
-	n = strlen(s);
-	return n >= min && n <= max && strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") == n;
-}
-
-/* clientDataJSON's "key":"value" (the browsers' serialization: no spaces; values without escapes we take) */
-static char*
-jsonstr(char *json, char *key)
-{
-	char *k, *p, *e;
-
-	k = smprint("\"%s\":\"", key);
-	p = strstr(json, k);
-	if(p == nil){
-		free(k);
-		return nil;
-	}
-	p += strlen(k);
-	free(k);
-	if((e = strchr(p, '"')) == nil)
-		return nil;
-	return smprint("%.*s", (int)(e-p), p);
-}
+/* base64url, without padding (libwebauthn's) */
+#define unb64u(s, p, n)	wab64udec(s, p, n)
+#define b64u(s, ns, p, n)	wab64uenc(s, ns, p, n)
+#define isb64u(s, min, max)	wab64uok(s, min, max)
 
 /* the page's word for what was asked, from where, for this challenge; nil if so */
 static char*
-clientok(char *client, char *type, char *chal)
+clientok(uchar *client, int nclient, char *type, char *chal)
 {
-	char *s;
-	int ok;
-
-	if((s = jsonstr(client, "type")) == nil)
-		return "no type";
-	ok = strcmp(s, type) == 0;
-	free(s);
-	if(!ok)
-		return "not what was asked";
-	if((s = jsonstr(client, "challenge")) == nil)
-		return "no challenge";
-	ok = strcmp(s, chal) == 0;
-	free(s);
-	if(!ok)
-		return "not this challenge";
-	if(strstr(client, "\"crossOrigin\":true") != nil)
-		return "cross-origin";
-	if((s = jsonstr(client, "origin")) == nil)
-		return "no origin";
-	ok = strcmp(s, authorigin) == 0;
-	free(s);
-	if(!ok)
-		return "not this site's origin";
-	return nil;
+	return waclient((char*)client, nclient, type, chal, &authorigin, 1);
 }
 
-/* authenticatorData: rpIdHash[32] flags[1] counter[4]; the user present and verified */
+/* authenticatorData: this rp's, the user present and verified */
 static char*
-authok(uchar *auth, int nauth)
+authok(uchar *auth, int nauth, WAauth *w)
 {
-	uchar h[SHA2_256dlen];
+	char *e;
 
-	if(nauth < 37)
-		return "bad authenticator data";
-	sha2_256((uchar*)rp, strlen(rp), h, nil);
-	if(memcmp(auth, h, sizeof h) != 0)
-		return "not this site's passkey";
-	if((auth[32] & 0x01) == 0)
-		return "no user present";
-	if((auth[32] & 0x04) == 0)
-		return "the user not verified";
-	return nil;
+	if((e = waparseauth(auth, nauth, w)) != nil)
+		return e;
+	return wacheckauth(w, rp, 1);
 }
 
-static ulong
-counter(uchar *auth)
-{
-	return (ulong)auth[33]<<24 | auth[34]<<16 | auth[35]<<8 | auth[36];
-}
-
-/* an SPKI's P-256 key (its last 65 bytes the point) */
-static ECpub*
-spkipub(char *spki, ECdomain *dom)
-{
-	uchar key[256];
-	ECpub *pub;
-	int n;
-
-	n = unb64u(spki, key, sizeof key);
-	if(n != 91 || key[26] != 4)
-		return nil;
-	ecdominit(dom, secp256r1);
-	if((pub = ecdecodepub(dom, key+26, 65)) == nil){
-		ecdomfree(dom);
-		return nil;
-	}
-	return pub;
-}
-
-/* the assertion's signature, ES256, over authenticatorData and sha256(clientDataJSON) */
+/* the assertion's signature, ES256, by the SPKI's key */
 static int
 verify(char *spki, uchar *auth, int nauth, uchar *client, int nclient, uchar *sig, int nsig)
 {
-	uchar h[SHA2_256dlen], d[SHA2_256dlen];
-	ECdomain dom;
-	ECpub *pub;
-	DigestState *ds;
-	char *e;
+	uchar pub[WApub];
 
-	if((pub = spkipub(spki, &dom)) == nil)
+	if(waspkipub(spki, pub) < 0)
 		return -1;
-	sha2_256(client, nclient, h, nil);
-	ds = sha2_256(auth, nauth, nil, nil);
-	sha2_256(h, sizeof h, d, ds);
-	e = X509ecdsaverifydigest(sig, nsig, d, sizeof d, &dom, pub);
-	ecpubfree(pub);
-	ecdomfree(&dom);
-	return e == nil ? 0 : -1;
+	return waverify(pub, auth, nauth, client, nclient, sig, nsig) == nil ? 0 : -1;
 }
 
 typedef struct Rec Rec;
@@ -517,28 +386,29 @@ invitation(char *code, char **why, int consume)
 static char*
 enroll(char **f, char *chal, char **namep)
 {
-	uchar auth[1024], client[4096];
-	int nauth, nclient, fd, n;
+	uchar auth[1024], client[4096], pub[WApub], id[WAmaxid];
+	int nauth, nclient, nid, fd, n;
 	char *why, *e, *path, *name;
-	ECdomain dom;
-	ECpub *pub;
+	WAauth w;
 	Rec r;
 
-	if(!isb64u(f[2], 16, 1024))
+	if(!isb64u(f[2], 16, 1024) || (nid = unb64u(f[2], id, sizeof id)) < 16)
 		return "bad passkey id";
-	if((pub = spkipub(f[3], &dom)) == nil)
+	if(waspkipub(f[3], pub) < 0)
 		return "not a P-256 key";
-	ecpubfree(pub);
-	ecdomfree(&dom);
 	nauth = unb64u(f[4], auth, sizeof auth);
-	nclient = unb64u(f[5], client, sizeof client - 1);
+	nclient = unb64u(f[5], client, sizeof client);
 	if(nauth < 37 || nclient <= 0)
 		return "bad passkey";
-	client[nclient] = 0;
-	if((e = clientok((char*)client, "webauthn.create", chal)) != nil)
+	if((e = clientok(client, nclient, "webauthn.create", chal)) != nil)
 		return e;
-	if((e = authok(auth, nauth)) != nil)
+	if((e = authok(auth, nauth, &w)) != nil)
 		return e;
+	/* the key and id are the authenticator's: its attested credential data */
+	if((w.flags & WAat) == 0)
+		return "no attested credential";
+	if(w.nid != nid || memcmp(w.id, id, nid) != 0 || memcmp(w.pub, pub, WApub) != 0)
+		return "not the attested passkey";
 
 	qlock(&invlk);
 	if((name = invitation(f[1], &why, 0)) == nil){
@@ -554,7 +424,7 @@ enroll(char **f, char *chal, char **namep)
 	}
 	r.name = name;
 	r.pubkey = f[3];
-	r.count = counter(auth);
+	r.count = w.count;
 	r.created = smprint("%ld", time(0));
 	n = writerec(fd, &r);
 	if(close(fd) < 0)
@@ -581,19 +451,19 @@ login(char **f, char *chal, char **namep)
 	int nauth, nclient, nsig, fd;
 	char *e, *path;
 	ulong count;
+	WAauth w;
 	Rec *r;
 
 	if(!isb64u(f[1], 16, 1024))
 		return "no such passkey";
 	nauth = unb64u(f[2], auth, sizeof auth);
-	nclient = unb64u(f[3], client, sizeof client - 1);
+	nclient = unb64u(f[3], client, sizeof client);
 	nsig = unb64u(f[4], sig, sizeof sig);
 	if(nauth < 37 || nclient <= 0 || nsig <= 0)
 		return "bad assertion";
-	client[nclient] = 0;
-	if((e = clientok((char*)client, "webauthn.get", chal)) != nil)
+	if((e = clientok(client, nclient, "webauthn.get", chal)) != nil)
 		return e;
-	if((e = authok(auth, nauth)) != nil)
+	if((e = authok(auth, nauth, &w)) != nil)
 		return e;
 
 	path = smprint("%s/cred/%s", dir, f[1]);
@@ -603,11 +473,11 @@ login(char **f, char *chal, char **namep)
 		free(path);
 		return "no such passkey";
 	}
-	count = counter(auth);
-	if((count != 0 || r->count != 0) && count <= r->count){
+	count = w.count;
+	if((e = wacounter(r->count, count)) != nil){
 		qunlock(&credlk);
 		free(path);
-		return "counter not above the last: a copied passkey?";
+		return e;
 	}
 	if(verify(r->pubkey, auth, nauth, client, nclient, sig, nsig) < 0){
 		qunlock(&credlk);

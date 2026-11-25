@@ -150,3 +150,8 @@ serial-console-shell.diff
 		in rio, with that shell running, the console window is an
 		ordinary one, not a second shell teed to the line.
 		2026-11-25.
+
+libwebauthn-mkfile.diff
+		sys/src/mkfile: libwebauthn among LIBS, the relying party's
+		WebAuthn checks (webauthn.h) that aux/ethernetd and
+		auth/accountd share.  2026-11-25.
