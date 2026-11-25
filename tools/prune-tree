@@ -194,6 +194,22 @@ def prune_distproto(path):
     path.write_text("".join(kept))
 
 
+def prune_dist_mkfile(path):
+    data = path.read_text()
+    header = data[:data.index("cd:V:")]
+    gzip = data[data.index("%.gz:D:"):data.index("%.386.iso:")]
+    pi3 = data[data.index("%.pi3.img:"):data.index("%.zynq.img:D:")]
+    disk = data[data.index("%.disk:D:"):data.index("binds:V:")]
+    old = "if(~ $target *.pi.img.* *.pi3.img.*){"
+    if disk.count(old) != 1:
+        raise SystemExit(f"prune-tree: Pi3 image rule changed in {path}")
+    disk = disk.replace(old, "if(~ $target *.pi3.img.*){")
+    start = disk.index("\tif not if(~ $target *.reform.img.*")
+    end = disk.index("\thjfs -f $d/fs", start)
+    disk = disk[:start] + disk[end:]
+    path.write_text(header + gzip + pi3 + disk + data[data.index("binds:V:"):])
+
+
 def main(root):
     src = root / "sys/src"
     shutil.copyfile(root / "386/include/ureg.h", root / "sys/include/realmode.h")
@@ -309,6 +325,7 @@ def main(root):
     authproto = root / "sys/lib/sysconfig/auth/authproto"
     authproto.write_text(authproto.read_text().replace("\t\tgs\t\t775 sys sys\n", ""))
     prune_distproto(root / "sys/lib/sysconfig/proto/distproto")
+    prune_dist_mkfile(root / "sys/lib/dist/mkfile")
     bootproto = root / "sys/lib/sysconfig/proto/9bootproto"
     bootproto.write_text("uid=sys\ngid=sys\ncfg\td775\n\tplan9.ini\t664\n")
 
