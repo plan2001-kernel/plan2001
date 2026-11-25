@@ -77,7 +77,7 @@ The user chooses what to start. Opening a URL starts that URL's system; selectin
 - The initial native AMD64 path is accepted only when UEFI firmware -> Plan2001 EFI loader -> valid BootInfo v1 -> **9front AMD64 kernel -> 9front init -> usable 9front userland** works, including an installed offline UEFI/ESP boot. Loader messages or coloured framebuffer marks alone do not meet acceptance.
 - The existing WASM32 build and browser boot must remain functional, including its existing UI, process execution, Rio input/touch semantics, OPFS and ISO/live workflow.
 - Run targeted builds and smoke/integration tests **locally**. For QEMU KVM with TCG fallback use `-machine accel=kvm:tcg` (or `-accel kvm -accel tcg` where supported), **not** `-accel kvm:tcg`. Include OVMF for AMD64 UEFI tests and Chromium for browser tests. Do not commit diagnostic artifacts. CI stays disabled.
-- ARM64 and RISC-V64 are separate later milestones, with explicit build/boot acceptance on their chosen QEMU platforms. Neither is a blocker for AMD64/WASM32 consolidation.
+- ARM64 is a current target: validate QEMU virt boot and bcm64/Pi4 builds locally. RISC-V64 remains a later milestone with its own build and boot acceptance.
 
 ## Continuous integration policy
 

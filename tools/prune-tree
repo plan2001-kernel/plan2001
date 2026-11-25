@@ -320,6 +320,35 @@ first appeared in 9front (December, 2013).
 """)
 
 
+def prune_page_man(path):
+    data = path.read_text()
+    start = data.index(".SH NAME\n")
+    end = data.index(".SH SYNOPSIS\n", start)
+    data = data[:start] + ".SH NAME\npage \\- view image files\n" + data[end:]
+    data = data.replace("] [\n.B -p\n.I ppi\n", "")
+    start = data.index(".SH DESCRIPTION\n")
+    end = data.index(".PP\nBy default", start)
+    data = data[:start] + (".SH DESCRIPTION\n.I Page\ndisplays image files in sequence, "
+                           "including Plan 9 and Inferno bitmaps and common raster formats.\n"
+                           "Without named files it reads one from standard input.\n") + data[end:]
+    start = data.index(".PP\nThe \n.B -p ")
+    end = data.index(".PP\nWhen viewing images", start)
+    data = data[:start] + data[end:]
+    start = data.index(".I Page\ncalls\n.IR gs (1)")
+    end = data.index(".SH EXAMPLES\n", start)
+    data = data[:start] + (".I Page\nuses image conversion programs such as those "
+                           "described in\n.IR jpg (1)\nfor raster graphics formats.\n") + data[end:]
+    start = data.index(".SH EXAMPLES\n")
+    end = data.index('.SH "SEE ALSO\n', start)
+    data = data[:start] + (".SH EXAMPLES\n.TP\n.L\n"
+                           "page /usr/inferno/icons/*.bit\n"
+                           "Browse the Inferno bitmap library.\n") + data[end:]
+    start = data.index('.SH "SEE ALSO\n')
+    end = data.index(".SH SOURCE\n", start)
+    data = data[:start] + '.SH "SEE ALSO\n.IR jpg (1)\n' + data[end:]
+    path.write_text(data)
+
+
 def main(root):
     src = root / "sys/src"
     old_compilers = ("1a", "1c", "1l", "2a", "2c", "2l", "5a", "5c", "5e", "5i", "5l",
@@ -468,6 +497,7 @@ def main(root):
     bzip = src / "cmd/bzip2/mkfile"
     replace(bzip, "bzip2recover.$O: bzip2recover.c\n\tpcc -D_POSIX_SOURCE -D_BSD_EXTENSION -c bzip2recover.c\n\n", "")
     prune_audio_man(root / "sys/man/1/audio")
+    prune_page_man(root / "sys/man/1/page")
     play = root / "rc/bin/play"
     for old in ("\t\tcase *ogg* *vorbis*\n\t\t\taudio/oggdec\n",
                 "\t\tcase *flac*\n\t\t\taudio/flacdec\n",
