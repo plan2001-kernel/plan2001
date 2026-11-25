@@ -79,6 +79,7 @@
 
 enum {
 	Stack	= 64*1024,
+	Maxsess	= 16,	/* sessions of one user: a new one ends the oldest beyond */
 	Chaltime	= 120,
 	Ntoken	= 32,
 	Nhandle	= 16,
@@ -221,23 +222,50 @@ aval(Attr *a, char *k)
 	return nil;
 }
 
-/* the whole file, made (excl: only if it is not there) or rewritten */
+/*
+ * the whole file, made (excl: only if it is not there) or rewritten.  A
+ * rewrite is one write over the old record, never truncated first (a
+ * crash or a full disk must not leave a credential without its key): a
+ * shorter record is padded with newlines, which readattrs skips.
+ */
 static int
 writefile(char *path, int excl, char *s)
 {
 	int fd, n;
+	vlong old;
+	Dir *d;
+	char *w;
 
 	if(excl)
 		fd = create(path, OWRITE|OEXCL, 0600);
-	else if((fd = open(path, OWRITE|OTRUNC)) < 0)
+	else if((fd = open(path, OWRITE)) < 0)
 		fd = create(path, OWRITE, 0600);
 	if(fd < 0)
 		return -1;
+	old = 0;
+	if(!excl && (d = dirfstat(fd)) != nil){
+		old = d->length;
+		free(d);
+	}
 	n = strlen(s);
-	if(write(fd, s, n) != n){
+	w = s;
+	if(old > n && old < 64*1024){
+		if((w = malloc(old)) == nil){
+			close(fd);
+			return -1;
+		}
+		memmove(w, s, n);
+		memset(w+n, '\n', old-n);
+		n = old;
+	}
+	if(pwrite(fd, w, n, 0) != n){
+		if(w != s)
+			free(w);
 		close(fd);
 		return -1;
 	}
+	if(w != s)
+		free(w);
 	return close(fd);
 }
 
@@ -616,6 +644,28 @@ endsessions(char *name, char *credh)
 	qunlock(&sesslk);
 }
 
+/* a user's sessions beyond Maxsess, the oldest first, and the ended: gone (sesslk held) */
+static void
+trimsessions(char *name)
+{
+	Sess *s, **l;
+	long now;
+	int n;
+
+	now = time(0);
+	n = 0;
+	for(l = &sessions; (s = *l) != nil; ){
+		/* the list is newest first */
+		if(s->expires <= now || strcmp(s->name, name) == 0 && ++n > Maxsess){
+			*l = s->next;
+			free(s->name);
+			free(s);
+			continue;
+		}
+		l = &s->next;
+	}
+}
+
 static void
 newsession(char *name, char *credh, char *tok, int ntok, long *expires)
 {
@@ -635,6 +685,7 @@ newsession(char *name, char *credh, char *tok, int ntok, long *expires)
 	qlock(&sesslk);
 	s->next = sessions;
 	sessions = s;
+	trimsessions(name);
 	qunlock(&sesslk);
 }
 
@@ -739,6 +790,20 @@ account(char *name)
 	a = readattrs(p);
 	free(p);
 	return a;
+}
+
+/* the account is there and enabled (not pending, not disabled) */
+static int
+accountactive(char *name)
+{
+	Attr *a;
+	char *v;
+	int ok;
+
+	a = account(name);
+	ok = a != nil && (v = aval(a, "state")) != nil && strcmp(v, "active") == 0;
+	freeattrs(a);
+	return ok;
 }
 
 static Attr*
@@ -1392,7 +1457,7 @@ pagereq(Conn *c, char **f, int nf)
 		return;
 	}
 err:
-	alog("%s: %s refused: %s", c->addr, nf > 0 ? f[0] : "-", why);
+	alog("%s: %q refused: %s", c->addr, nf > 0 ? f[0] : "-", why);
 	free(name);
 	sleep(1000);	/* slower guessing */
 	reply(c, "error %s", why);
@@ -1529,13 +1594,14 @@ setstate(char *name, char *state)
 	free(s);
 	free(p);
 	freeattrs(a);
+	/* a disabled account's sessions end even if keyfs fails below */
+	if(strcmp(state, "active") != 0)
+		endsessions(name, nil);
 	if(i < 0)
 		return "can not keep the account";
 	if(keyfswrite(name, "status", strcmp(state, "active") == 0 ? "ok" : "disabled",
 	   strcmp(state, "active") == 0 ? 2 : 8) < 0)
 		return "keyfs";
-	if(strcmp(state, "active") != 0)
-		endsessions(name, nil);
 	alog("%s %s", state, name);
 	return nil;
 }
@@ -1658,7 +1724,7 @@ adminreq(Conn *c, char **f, int nf)
 		why = "no such session";
 		if((name = findsession(f[1], nil, nil)) != nil){
 			why = "the account is not enabled";
-			if(keyenabled(name) && keyfsread(name, "status", buf, sizeof buf) != nil){
+			if(accountactive(name) && keyenabled(name) && keyfsread(name, "status", buf, sizeof buf) != nil){
 				s = pathf("%s/%s/aeskey", keys, name);
 				n = open(s, OREAD);
 				free(s);
@@ -1761,9 +1827,10 @@ threadmain(int argc, char **argv)
 {
 	char buf[256], *f[5], *p;
 	int ctl[2], fd, n, admin;
-	Dir *d;
+	Dir *d, *d2;
 	Conn *c;
 
+	quotefmtinstall();
 	ARGBEGIN{
 	case 'r':
 		rpid = EARGF(usage());
@@ -1844,6 +1911,7 @@ threadmain(int argc, char **argv)
 		}
 		p = smprint("/srv/%s", f[1]);
 		admin = 0;
+		d = nil;
 		if(strcmp(f[2], "admin") == 0){
 			/* only a pipe the host owner posted */
 			if((d = dirstat(p)) == nil || strcmp(d->uid, hostowner) != 0 || (d->mode & 077) != 0){
@@ -1852,10 +1920,24 @@ threadmain(int argc, char **argv)
 				alog("ctl: an admin connection not the host owner's");
 				continue;
 			}
-			free(d);
 			admin = 1;
 		}
 		fd = open(p, ORDWR);
+		if(fd >= 0 && admin){
+			/*
+			 * the same /srv entry before and after the open: one
+			 * removed and posted again by someone else has another
+			 * qid (srv's paths are not reused)
+			 */
+			d2 = dirstat(p);
+			if(d2 == nil || d2->qid.path != d->qid.path || strcmp(d2->uid, hostowner) != 0){
+				close(fd);
+				fd = -1;
+				werrstr("posted again while opened");
+			}
+			free(d2);
+		}
+		free(d);
 		free(p);
 		if(fd < 0){
 			alog("%s: %s: %r", f[3], f[1]);

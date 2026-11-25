@@ -1,9 +1,11 @@
 /*
  * A connection to auth/accountd as its own programs make one (as
- * aux/etherws does for a page): a pipe posted in /srv (SRV.PID, mode
- * 0600, the poster's: accountd takes an admin connection only from the
- * host owner's) and "conn SRV.PID admin -" written to /srv/SRV.  A
- * message is a write: T and its text; X alone ends the connection.
+ * aux/etherws does for a page): a pipe posted in /srv (SRV.PID.RANDOM,
+ * mode 0600, the poster's: accountd takes an admin connection only from
+ * the host owner's; the random part keeps others from guessing the name
+ * and posting their own) and "conn SRV.PID.RANDOM admin -" written to
+ * /srv/SRV.  A message is a write: T and its text; X alone ends the
+ * connection.
  */
 #include <u.h>
 #include <libc.h>
@@ -19,7 +21,7 @@ dialaccountd(char *srv)
 
 	if(pipe(p) < 0)
 		return -1;
-	snprint(name, sizeof name, "%s.%d", srv, getpid());
+	snprint(name, sizeof name, "%s.%d.%lud", srv, getpid(), truerand());
 	snprint(path, sizeof path, "/srv/%s", name);
 	if((srvfd = create(path, OWRITE|ORCLOSE, 0600)) < 0)
 		return -1;

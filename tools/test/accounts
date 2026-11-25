@@ -536,6 +536,16 @@ class Testi:
         self.odota("login: tyyppi create", l(alice, tyyppi="webauthn.create"), "error not what was asked")
         self.odota("login: AT väitteessä", l(alice, at=True), "error bad assertion")
         self.odota("login: väärä käyttäjäkahva", l(alice, kahva=b64u(os.urandom(16))), "error not this account's")
+        # syvälle sisäkkäinen clientDataJSON ennen allekirjoituksen tarkistusta (libjsonin rajaton rekursio)
+        w = self.ws()
+        try:
+            f, r = self.haaste(w, "challenge login")
+            r = r if f is None else w.ask("login %s %s %s %s -" % (
+                alice.id, b64u(alice.authdata(RP, 0x05, 0)), b64u(b"[" * 4050), b64u(b"\0" * 70)))
+        finally:
+            w.close()
+        self.odota("login: 4050-tasoinen JSON hylätään", r, "error bad client data")
+        self.odota("login: accountd vastaa syvän JSONin jälkeen", l(alice), "ok ")
         # laskurillinen avain: laskuri nousee, toisto hylätään
         bob = Passkey(laskuri=True)
         r = e(bob, kb)

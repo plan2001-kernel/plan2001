@@ -91,6 +91,35 @@ str(JSON *j, char *key)
  * webauthn.create or webauthn.get), this challenge, from one of the
  * origins, not from a frame of another site (crossOrigin, topOrigin).
  */
+/*
+ * clientDataJSON nests an object at most a level or two (tokenBinding);
+ * libjson recurses once per level with no bound, which a client's
+ * thousands of brackets would turn into a stack overflow in a proc of
+ * a few dozen KiB.  Brackets in strings are not nesting.
+ */
+static int
+shallow(char *s, int n, int max)
+{
+	int i, d, str;
+
+	d = str = 0;
+	for(i = 0; i < n; i++){
+		if(str){
+			if(s[i] == '\\')
+				i++;
+			else if(s[i] == '"')
+				str = 0;
+		}else if(s[i] == '"')
+			str = 1;
+		else if(s[i] == '{' || s[i] == '['){
+			if(++d > max)
+				return 0;
+		}else if(s[i] == '}' || s[i] == ']')
+			d--;
+	}
+	return 1;
+}
+
 char*
 waclient(char *json, int n, char *type, char *chal, char **origins, int norigins)
 {
@@ -98,7 +127,7 @@ waclient(char *json, int n, char *type, char *chal, char **origins, int norigins
 	JSON *j, *x;
 	int i;
 
-	if(n <= 0 || n > 16*1024 || memchr(json, 0, n) != nil)
+	if(n <= 0 || n > 16*1024 || memchr(json, 0, n) != nil || !shallow(json, n, 4))
 		return "bad client data";
 	if((s = malloc(n+1)) == nil)
 		return "no memory";
