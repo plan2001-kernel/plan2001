@@ -130,9 +130,9 @@ dircp $p2/rcroot /n/newfs/rc || die 'rc-kopio'
 rm -f /n/newfs/sys/man/1/gs
 rm -rf /n/newfs/amd64/include/ape /n/newfs/amd64/lib/ape /n/newfs/amd64/bin/ape
 rm -f /n/newfs/amd64/bin/gs /n/newfs/amd64/bin/pcc
-for(p in compress eqn grap pic spin)
+for(p in compress eqn grap pic spin vi)
 	rm -f /n/newfs/amd64/bin/$p
-for(p in antiword lpdaemon lpdsend lpsend cropmarks download g3p9bit grabit hardcopy p9bitpost postgif postprint postreverse posttek tcpostio text2post tr2post)
+for(p in 8prefix apm antiword lpdaemon lpdsend lpsend cropmarks download g3p9bit grabit hardcopy p9bitpost postgif postprint postreverse posttek tcpostio text2post tr2post)
 	rm -f /n/newfs/amd64/bin/aux/$p
 for(p in flacdec flacenc mp3enc oggdec oggenc)
 	rm -f /n/newfs/amd64/bin/audio/$p

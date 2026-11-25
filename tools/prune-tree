@@ -179,6 +179,7 @@ def prune_page(path):
 
 def main(root):
     src = root / "sys/src"
+    shutil.copyfile(root / "386/include/ureg.h", root / "sys/include/realmode.h")
     for name in ("386", "68000", "68020", "arm", "mips", "power", "power64", "sparc", "sparc64", "spim"):
         remove(root / name)
     for path in ("sys/src/ape", "sys/include/ape", "sys/lib/ghostscript",
@@ -194,12 +195,16 @@ def main(root):
                  "sys/man/1/troff2png", "sys/src/cmd/eqn", "sys/src/cmd/grap",
                  "sys/src/cmd/pic", "sys/src/cmd/spin", "sys/src/cmd/compress",
                  "sys/src/cmd/postscript", "sys/src/cmd/lp", "sys/src/cmd/aux/antiword",
-                 "sys/lib/lp", "sys/lib/postscript", "rc/bin/lp", "rc/bin/doc2ps",
+                 "sys/src/cmd/vi", "sys/src/cmd/aux/apm.c",
+                 "sys/lib/lp", "sys/lib/postscript", "sys/lib/antiword",
+                 "rc/bin/lp", "rc/bin/doc2ps",
                  "rc/bin/uncompress", "rc/bin/addpsfonts", "rc/bin/printfont",
                  "rc/bin/dpost", "rc/bin/postscript", "sys/src/cmd/bzip2/bzip2recover.c"):
         remove(root / path)
-    for path in ("sys/doc/ape.ms", "sys/doc/ape.ps", "sys/doc/spin.ms",
-                 "sys/doc/spin.ps", "sys/man/1/eqn", "sys/man/1/grap",
+    remove(src / "cmd/aux/8prefix.c")
+    for path in ("sys/doc/ape.ms", "sys/doc/ape.ps", "sys/doc/ape.pdf",
+                 "sys/doc/spin.ms", "sys/doc/spin.ps", "sys/doc/spin.pdf",
+                 "sys/man/1/eqn", "sys/man/1/grap",
                  "sys/man/1/pic", "sys/man/1/spin", "sys/man/1/lp",
                  "sys/man/8/lp"):
         remove(root / path)
@@ -213,9 +218,9 @@ def main(root):
     for obj in ("amd64", "arm64", "wasm32"):
         for part in ("include/ape", "lib/ape", "bin/ape", "bin/gs"):
             remove(root / obj / part)
-        for program in ("pcc", "compress", "eqn", "grap", "pic", "spin"):
+        for program in ("pcc", "compress", "eqn", "grap", "pic", "spin", "vi"):
             remove(root / obj / "bin" / program)
-        for program in ("antiword", "lpdaemon", "lpdsend", "lpsend", "cropmarks",
+        for program in ("8prefix", "apm", "antiword", "lpdaemon", "lpdsend", "lpsend", "cropmarks",
                         "download", "g3p9bit", "grabit", "hardcopy", "p9bitpost",
                         "postgif", "postprint", "postreverse", "posttek", "tcpostio",
                         "text2post", "tr2post"):
@@ -245,6 +250,10 @@ def main(root):
     replace(pcm, "../pc}", "shared}")
     replace(pcm, "cd ../pc", "cd shared")
     replace(pcm, "/386/include/ureg.h", "/amd64/include/ureg.h")
+    replace(pc64 / "shared/vgavesa.c", '"/386/include/ureg.h"', '<realmode.h>')
+    replace(src / "cmd/aux/vga/vesa.c", '</386/include/ureg.h>', '<realmode.h>')
+    for name in ("main.c", "loadcom.c"):
+        replace(src / "cmd/aux/realemu" / name, '"/386/include/ureg.h"', '<realmode.h>')
 
     bcm64 = src / "9/bcm64"
     bcm = src / "9/bcm"
@@ -283,6 +292,16 @@ def main(root):
     authproto.write_text(authproto.read_text().replace("\t\tgs\t\t775 sys sys\n", ""))
 
     replace(src / "cmd/aux/mkfile", "\tantiword\\\n", "")
+    replace(src / "cmd/aux/mkfile", "\t8prefix\\\n", "")
+    replace(src / "cmd/aux/mkfile", "\tapm\\\n", "")
+    dbsetup = src / "cmd/db/setup.c"
+    replace(dbsetup, "extern Mach mi386;", "extern Mach mamd64;")
+    replace(dbsetup, "mach = &mi386;", "mach = &mamd64;")
+    replace(src / "cmd/db/main.c", '"/386/9pc"', '"/amd64/9pc64"')
+    replace(src / "cmd/rdbfs.c", '"/386/9pc"', '"/amd64/9pc64"')
+    vmx9p = src / "cmd/vmx/9p.c"
+    replace(vmx9p, "extern Mach mi386, mamd64;", "extern Mach mamd64;")
+    replace(vmx9p, "mach = sizeof(uintptr) == 8 ? &mamd64 : &mi386;", "mach = &mamd64;")
     audio = src / "cmd/audio/mkfile"
     replace(audio, "LIBS=libogg libvorbis libFLAC libtags",
             "LIBS=libtags")
