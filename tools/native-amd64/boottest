@@ -292,6 +292,9 @@ def asennettu(e):
           "echo 'void main(void){ print(\"p2-userland-%d bootinfo-%d\\n\", 6*7, sizeof(BootInfo)); exits(nil); }'} >p2.c && "
           "6c p2.c && 6l -o p2 p2.6 && ./p2",
           lambda t: t.status == "" and "p2-userland-42 bootinfo-232" in t.stdout, aikaraja=120)
+    e.aja("verkko: muu käyttäjä (none) ajaa rc:n ja lukee otsakkeet ja /rc/lib",
+          "auth/none rc -c 'echo P2NONE `{cat /dev/user}; cat /sys/include/libc.h /rc/lib/rcmain | wc -l'",
+          lambda t: t.status == "" and t.stdout.startswith("P2NONE none") and int((t.stdout.split() + ["0"])[2]) > 100)
     postscript(e)
 
 

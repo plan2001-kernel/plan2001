@@ -108,8 +108,16 @@ class Passkey:
 def client(type, chal, origin=AUTHO):
 	return json.dumps({'type': type, 'challenge': chal, 'origin': origin, 'crossOrigin': False}, separators=(',', ':')).encode()
 
-def authdata(rp=RP, flags=0x05, count=0):
-	return hashlib.sha256(rp.encode()).digest() + bytes([flags]) + struct.pack('>I', count)
+def authdata(rp=RP, flags=0x05, count=0, pk=None):
+	"""with pk: its attested credential data (AT), as a create's"""
+	a = hashlib.sha256(rp.encode()).digest() + bytes([flags | (0x40 if pk else 0)]) + struct.pack('>I', count)
+	if pk:
+		n = pk.key.public_key().public_numbers()
+		cid = unb64u(pk.id)
+		# COSE_Key: {1: 2, 3: -7, -1: 1, -2: x, -3: y}
+		cose = bytes([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]) + n.x.to_bytes(32, 'big') + bytes([0x22, 0x58, 0x20]) + n.y.to_bytes(32, 'big')
+		a += bytes(16) + struct.pack('>H', len(cid)) + cid + cose
+	return a
 
 def auth(line_of):
 	"""an /auth exchange: line_of(challenge) is the page's line; the gateway's answer"""
@@ -128,7 +136,7 @@ def auth(line_of):
 	return a
 
 def enroll(pk, code, rp=RP, flags=0x05, type='webauthn.create', origin=AUTHO, chal=None):
-	return auth(lambda c: f'enroll {code} {pk.id} {pk.spki} {b64u(authdata(rp, flags, 0))} {b64u(client(type, chal or c, origin))}')
+	return auth(lambda c: f'enroll {code} {pk.id} {pk.spki} {b64u(authdata(rp, flags, 0, pk))} {b64u(client(type, chal or c, origin))}')
 
 def login(pk, count, signer=None, flags=0x05, id=None):
 	def line(c):

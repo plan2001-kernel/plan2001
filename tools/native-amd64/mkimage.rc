@@ -130,6 +130,9 @@ dircp $p2/syslib /n/newfs/sys/lib || die 'sys/lib-kopio'
 dircp $p2/sysdoc /n/newfs/sys/doc || die 'sys/doc-kopio'
 dircp $p2/sysman /n/newfs/sys/man || die 'sys/man-kopio'
 dircp $p2/rcroot /n/newfs/rc || die 'rc-kopio'
+# kaikkien käyttäjien on luettava rc:n alustus ja otsakkeet (newns, rc, 6c)
+ls -l /n/newfs/rc/lib/rcmain /n/newfs/rc/bin/termrc /n/newfs/sys/include/libc.h /n/newfs/sys/lib/yaccpar |
+	awk '{ if(substr($1, 9, 1) != "r") print }' | grep -s . && die 'järjestelmätiedostot eivät ole kaikkien luettavissa'
 rm -rf /n/newfs/amd64/include/ape /n/newfs/amd64/lib/ape /n/newfs/amd64/bin/ape
 rm -rf /n/newfs/amd64/bin/bitsy
 rm -f /n/newfs/amd64/bin/gs /n/newfs/amd64/bin/pcc

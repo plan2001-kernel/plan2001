@@ -1,14 +1,16 @@
 /*
  * etherws - a WebSocket to ethernetd (docs/network.md): GET /auth from the
  * auth origin's page (-A: its passkeys), GET /ether from the machine's
- * page (-E: its Ethernet card's frames).  One connection, on fd 0 and 1:
+ * page (-E: its Ethernet card's frames); and to auth/accountd: GET
+ * /account from the accounts' page (-C: its passkeys and sessions, with
+ * -a accountd's srvname), when -C is given.  One connection, on fd 0 and 1:
  * rc-httpd's request (-r: $request and $reqlines, as webterm -r takes
  * them), else read here (aux/listen1, the tests).  The page's Origin must
  * be the path's; a request without one is not a page's, and is refused.
  *
- * ethernetd is reached through /srv: a pipe of this connection's is
- * posted (/srv/SRVNAME.PID, mode 0660: the host owner's, ORCLOSE), and
- * "conn SRVNAME.PID KIND ADDR" written to /srv/SRVNAME; on the pipe a
+ * ethernetd (or accountd) is reached through /srv: a pipe of this
+ * connection's is posted (/srv/SRVNAME.PID, mode 0660: the host owner's,
+ * ORCLOSE), and "conn SRVNAME.PID KIND ADDR" written to /srv/SRVNAME; on the pipe a
  * message is a write, its first byte T (text) or B (binary), as the
  * WebSocket's; X alone from ethernetd ends the connection.  What comes from the page: masked frames with FIN (no
  * fragments), a text at most 8K, a binary message an Ethernet frame (14
@@ -16,6 +18,7 @@
  * (the caller's: the browser's address), else $net/remote's, else -.
  *
  *	aux/etherws [-r] -A authorigin -E machineorigin [-s srvname]
+ *		[-C accountorigin [-a accountsrv]]
  */
 #include <u.h>
 #include <libc.h>
@@ -30,8 +33,9 @@ enum {
 };
 
 static char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-static char *authorigin, *machineorigin;
+static char *authorigin, *machineorigin, *accountorigin;
 static char *srvname = "ethernetd";
+static char *accountsrv = "accountd";
 static int fromhttpd;
 
 static void
@@ -262,23 +266,23 @@ remote(void)
 	return *a ? a : "-";
 }
 
-/* this connection's pipe to ethernetd */
+/* this connection's pipe to ethernetd (or accountd: srvname) */
 static int
-dialethernetd(char *kind)
+dialsrv(char *svc, char *kind)
 {
 	char name[64], path[80], *addr;
 	int p[2], fd, ctl;
 
 	if(pipe(p) < 0)
 		return -1;
-	snprint(name, sizeof name, "%s.%d", srvname, getpid());
+	snprint(name, sizeof name, "%s.%d", svc, getpid());
 	snprint(path, sizeof path, "/srv/%s", name);
 	if((fd = create(path, OWRITE|ORCLOSE, 0660)) < 0)
 		return -1;
 	if(fprint(fd, "%d", p[0]) < 0)
 		return -1;
 	close(p[0]);
-	snprint(path, sizeof path, "/srv/%s", srvname);
+	snprint(path, sizeof path, "/srv/%s", svc);
 	if((ctl = open(path, OWRITE)) < 0)
 		return -1;
 	addr = remote();
@@ -292,14 +296,14 @@ dialethernetd(char *kind)
 static void
 usage(void)
 {
-	fprint(2, "usage: aux/etherws [-r] -A authorigin -E machineorigin [-s srvname]\n");
+	fprint(2, "usage: aux/etherws [-r] -A authorigin -E machineorigin [-s srvname] [-C accountorigin [-a accountsrv]]\n");
 	exits("usage");
 }
 
 void
 main(int argc, char **argv)
 {
-	char *hdr, *path, *e, *up, *o, *kind, *want;
+	char *hdr, *path, *e, *up, *o, *kind, *want, *srv;
 	int fd, pid, ppid;
 
 	ARGBEGIN{
@@ -314,6 +318,12 @@ main(int argc, char **argv)
 		break;
 	case 's':
 		srvname = EARGF(usage());
+		break;
+	case 'C':
+		accountorigin = EARGF(usage());
+		break;
+	case 'a':
+		accountsrv = EARGF(usage());
 		break;
 	default:
 		usage();
@@ -331,7 +341,12 @@ main(int argc, char **argv)
 	path = strdup(path);
 	*e = ' ';
 	kind = want = nil;
-	if(strcmp(path, "/auth") == 0){
+	srv = srvname;
+	if(strcmp(path, "/account") == 0 && accountorigin != nil){
+		kind = "account";
+		want = accountorigin;
+		srv = accountsrv;
+	}else if(strcmp(path, "/auth") == 0){
 		kind = "auth";
 		want = authorigin;
 	}else if(strcmp(path, "/ether") == 0){
@@ -344,7 +359,7 @@ main(int argc, char **argv)
 		reply("426 Upgrade Required");
 	if((o = header(hdr, "Origin")) == nil || strcmp(o, want) != 0)
 		reply("403 Forbidden");
-	if((fd = dialethernetd(kind)) < 0)
+	if((fd = dialsrv(srv, kind)) < 0)
 		reply("503 Service Unavailable");
 	wsaccept(hdr);
 	/* two processes, nothing shared between them but the connection; either's end is both's */

@@ -1,0 +1,18 @@
+</$objtype/mkfile
+
+TARG=\
+	accountd\
+	account\
+	asuser\
+
+OFILES=\
+	conn.$O\
+
+HFILES=\
+	conn.h\
+	/sys/include/webauthn.h\
+
+LIB=/$objtype/lib/libwebauthn.a
+
+BIN=/$objtype/bin/auth
+</sys/src/cmd/mkmany
