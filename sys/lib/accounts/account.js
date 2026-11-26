@@ -101,6 +101,7 @@ async function enroll(hint) {
 		history.replaceState(null, '', location.pathname);	// the invitation is used up
 		await show(who);
 		status(`The account ${who} is made${cr.prf ? ' (the passkey has PRF)' : ''}.`);
+		proceed();
 	} finally { c.close(); }
 }
 
@@ -117,6 +118,7 @@ async function login(hint) {
 		keep(tok, Number(expires));
 		await show(who);
 		status(`Signed in as ${who}.`);
+		proceed();
 	} finally { c.close(); }
 }
 
@@ -160,6 +162,12 @@ async function show(name) {
 		li.append(span, b);
 		ul.append(li);
 	}
+}
+
+// a service that sent the user here puts its link (#continue) on the page: back there once signed in
+function proceed() {
+	const next = $('continue');
+	if (next) location.assign(next.href);
 }
 
 async function run(fn) {

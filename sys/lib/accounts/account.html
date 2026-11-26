@@ -20,6 +20,9 @@ main { max-width: 34rem; margin: 0 auto; }
 h1 { font-size: 1.3rem; }
 button { font: inherit; padding: .55rem .9rem; margin: .2rem .3rem .2rem 0; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); cursor: pointer; }
 button.main { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+/* a service's link back to itself (#continue): the page goes there once signed in */
+a#continue { display: inline-block; padding: .55rem .9rem; border-radius: 6px; background: var(--accent); color: var(--bg); text-decoration: none; }
+summary { cursor: pointer; margin: .5rem 0; }
 input { font: inherit; padding: .45rem; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--fg); width: 100%; box-sizing: border-box; }
 section[hidden] { display: none; }
 #status { min-height: 1.5em; margin-top: 1rem; }
@@ -54,7 +57,7 @@ small { opacity: .75; }
 
 <section id="account" hidden>
 <p>Signed in as <b id="accountname"></b>. <button id="logout">Sign out</button></p>
-<h2>Passkeys</h2>
+<details><summary>Passkeys</summary>
 <ul id="creds"></ul>
 <label>Name for a new passkey <input id="addlabel" maxlength="64" placeholder="e.g. phone"></label>
 <p>
@@ -62,6 +65,7 @@ small { opacity: .75; }
 <button data-hint="hybrid" data-op="add">Add: a phone (QR code)</button>
 <button data-hint="security-key" data-op="add">Add: a security key</button>
 </p>
+</details>
 </section>
 
 <p id="status" role="status"></p>
