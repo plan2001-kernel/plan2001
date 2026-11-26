@@ -1,6 +1,8 @@
+diff --git a/sys/src/9/pc/memory.c b/sys/src/9/pc/memory.c
+index 8b6cf8620308dfdede5b086d0e89025ea55423e1..857ec20edc9c576483cb924b01a715685a0372cc 100644
 --- a/sys/src/9/pc/memory.c
 +++ b/sys/src/9/pc/memory.c
-@@ -341,13 +341,45 @@
+@@ -341,13 +341,45 @@ mtrrexclude(int type, char *expect)
  	}
  }
  
@@ -47,7 +49,7 @@
  	/* passed by bootloader */
  	if((s = getconf("*e820")) == nil)
  		if((s = getconf("e820")) == nil)
-@@ -369,20 +401,10 @@
+@@ -369,20 +401,10 @@ e820scan(void)
  		top  = strtoull(s, &s, 16);
  		if(*s != ' ' && *s != 0)
  			break;

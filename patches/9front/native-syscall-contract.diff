@@ -1,3 +1,5 @@
+diff --git a/sys/src/9/port/mksystab b/sys/src/9/port/mksystab
+index 93831211ed36d325644878423cad2f23eaa306a0..7e877f3ae2261b4d67072feac5c44962a848f6aa 100755
 --- a/sys/src/9/port/mksystab
 +++ b/sys/src/9/port/mksystab
 @@ -1,50 +1,29 @@
@@ -79,6 +81,8 @@
 + }
 + print "};\nint nsyscall = sizeof systab/sizeof systab[0];"
 +}'
+diff --git a/sys/src/9/port/portmkfile b/sys/src/9/port/portmkfile
+index 48739b94635a7140b6353c99ce682f2041636a18..39601652b8ea48139c31b88eef96225974715e69 100644
 --- a/sys/src/9/port/portmkfile
 +++ b/sys/src/9/port/portmkfile
 @@ -1,4 +1,6 @@
@@ -89,7 +93,7 @@
  ^($PORTFILES)\.$O:R:	../port/\1.c
  	$CC $CFLAGS -I. ../port/$stem1.c
  
-@@ -42,7 +44,7 @@
+@@ -42,7 +44,7 @@ nuke:V:	clean
  
  %.$O:	/$objtype/include/u.h ../port/lib.h mem.h dat.h fns.h io.h ../port/pci.h ../port/error.h ../port/portdat.h ../port/portfns.h
  

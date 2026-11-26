@@ -1,0 +1,33 @@
+# The patch stack over upstream/9front.lock's COMMIT, applied in this order
+# by tools/upstream (tools/tree, tools/treebranch).  Each patch names the
+# exact blobs it was made from and makes (git diff --full-index); patches to
+# the same file follow each other in this order.  README says what each does.
+#
+# patch				class		upstream status
+# general 9front fixes: local, to offer upstream with the owner's consent
+hjfs-auth.diff			fix		local; upstream candidate
+arp-first-request.diff		fix		local; upstream candidate
+sdvirtio-scsi-lun.diff		fix		local; upstream candidate
+kbdfs-cooked-input.diff		fix		local; upstream candidate
+rcpu-script-read.diff		fix		local; upstream candidate
+tcp-splice.diff			backport	9front 026e87832 890656a50 d683e5c0c
+# WASM32 architecture
+libc-9syscall-wasm32.diff	wasm32		local
+libthread-wasm32.diff		wasm32		local
+spawn-wasm32.diff		wasm32		local
+riow-spawn.diff			wasm32		local
+syscall-tab.diff		wasm32		local
+native-syscall-contract.diff	wasm32		local
+touchscreen.diff		wasm32		local
+inst-bootsetup-9fat.diff	wasm32		local
+# UEFI boot and BootInfo v1
+efi-loader.diff			uefi		local
+pc64-uefi-bootinfo.diff		uefi		local
+pc-memory-bootinfo.diff		uefi		local
+pc-screen-bootinfo.diff		uefi		local
+arm64-uefi-bootinfo.diff	uefi		local
+bcm64-uefi-bootinfo.diff	uefi		local
+# Plan2001 integration: serial console, accounts
+kbdfs-serial-console.diff	integration	local
+serial-console-shell.diff	integration	local
+libwebauthn-mkfile.diff		integration	local

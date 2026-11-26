@@ -1,6 +1,8 @@
+diff --git a/sys/src/9/boot/bootrc b/sys/src/9/boot/bootrc
+index c55e4dad9c7aac2173288b808730966b62f786a8..5ad2fe2aed1da0e59924138787eecf7ef14bb4bd 100755
 --- a/sys/src/9/boot/bootrc
 +++ b/sys/src/9/boot/bootrc
-@@ -173,12 +173,13 @@
+@@ -173,12 +173,13 @@ fn main{
  	exec $init
  }
  
@@ -16,9 +18,11 @@
  
  	if(! ~$#kbmap 0){
  		if(test -f /sys/lib/kbmap/$kbmap){
+diff --git a/rc/bin/termrc b/rc/bin/termrc
+index 2505ab0d8ef24248c242bd42eb2eeda9d0d42b43..fabd3c5e41d30cd62dac663764f33f396ed1dd31 100755
 --- a/rc/bin/termrc
 +++ b/rc/bin/termrc
-@@ -96,4 +96,30 @@
+@@ -96,4 +96,30 @@ if(~ $terminal *reform*){
  	reform/audio
  }
  
@@ -49,9 +53,11 @@
 +}
 +
  dontkill '^(9660srv|cfs|cs|cwfs.*|disk|dns|dossrv|ether|factotum|gefs|hjfs|ipconfig|kb|kfs|mntgen|paqfs|reboot|usbd|venti|wpa)$'
+diff --git a/rc/bin/console b/rc/bin/console
+index 87f24a7267ae3d2d7dfcbe20ec4b0793330f17e2..335a3dab90a63c7409dded1bb75e5cce28956a47 100755
 --- a/rc/bin/console
 +++ b/rc/bin/console
-@@ -8,6 +8,9 @@
+@@ -8,6 +8,9 @@ if(! ~ $#a 0){
  	if(! ~ $a /* '#'*)
  		a=/dev/eia^$a
  	if(test -e /dev/kbd){

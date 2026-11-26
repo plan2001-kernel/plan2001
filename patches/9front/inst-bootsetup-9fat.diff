@@ -1,12 +1,26 @@
+diff --git a/rc/bin/inst/bootsetup b/rc/bin/inst/bootsetup
+index 90d620bc8a6ed8b634b04a876d8e04b97ec6e012..756e69a1f3b5ce12eab42c3b8fca758d9667644f 100755
 --- a/rc/bin/inst/bootsetup
 +++ b/rc/bin/inst/bootsetup
-@@ -59 +59 @@
+@@ -56,12 +56,12 @@ case go
+ 				echo -n $"i'='
+ 				cat $i
+ 				echo
 -			} | grep -v '^(\*acpi=0x|\*bootscreen=|\*e820=|apm0=|bootfile=|bootargs=|cdboot=|nvram=|mouseport=|monitor=|vgasize=)'
 +			} | grep -v '^(\*acpi=0x|\*bootscreen=|\*e820=|\*sdW[0-9]+=|init=|apm0=|bootfile=|bootargs=|cdboot=|iso=|nvram=|mouseport=|monitor=|vgasize=)'
-@@ -64 +64 @@
+ 		} >/tmp/plan9.ini
+ 	}
+ 
+ 	# clean state
 -	rm -f /tmp/oldplan9.ini /tmp/pbs.bak
 +	rm -f /tmp/oldplan9.ini
-@@ -82,18 +82,3 @@
+ 	unmount /n/9fat >[2]/dev/null
+ 
+ 	if(! test -f /srv/dos)
+@@ -79,36 +79,13 @@ case go
+ 		}
+ 	}
+ 
 -	# always make backup of old bootsector
 -	logprog dd -bs 512 -count 1 -if $9fat -of /tmp/pbs.bak
 -
@@ -28,7 +42,10 @@
 +	if(~ $need9fatformat yes){
 +		log Initializing Plan 9 FAT partition.
 +		logprog disk/format -r 2 -d -l PLAN9 $9fat
-@@ -104,8 +88,0 @@
+ 	}
+ 
+ 	logprog mount -c /srv/dos /n/9fat $9fat
+ 
 -	if(test -f /386/9bootfat) {
 -		logprog rm -f /n/9fat/9bootfat
 -		logprog cp /386/9bootfat /n/9fat/9bootfat
@@ -37,7 +54,13 @@
 -		logprog chmod +al /n/9fat/9bootfat
 -	}
 -
-@@ -121,0 +99,7 @@
+ 	# copy config
+ 	logprog rm -f /n/9fat/plan9.ini
+ 	logprog cp /tmp/plan9.ini /n/9fat/plan9.ini
+@@ -119,8 +96,15 @@ case go
+ 		logprog cp /$cputype/$bootfile /n/9fat/$bootfile
+ 	}
+ 
 +	# copy the machine's other boot files (wasm32: its kernel's boot
 +	# file system and the page that is its firmware)
 +	for(i in /$cputype/9fat/*){
@@ -45,10 +68,19 @@
 +			logprog cp $i /n/9fat/
 +	}
 +
-@@ -123 +107 @@
+ 	# copy efi bootloader
 -	for(i in /386/*.efi){
 +	for(i in /$cputype/*.efi){
-@@ -133,3 +116,0 @@
+ 		if(test -f $i) {
+ 			logprog mkdir -p /n/9fat/efi/boot
+ 			logprog cp $i /n/9fat/efi/boot/
+@@ -130,9 +114,6 @@ case go
+ 	# copy in backups
+ 	if(test -f /tmp/oldplan9.ini)
+ 		logprog cp /tmp/oldplan9.ini /n/9fat
 -	if(test -f /tmp/pbs.bak)
 -		logprog cp /tmp/pbs.bak /n/9fat
 -
+ 	logprog unmount /n/9fat
+ 
+ 	disk=`{basename `{basename -d $9fat}}

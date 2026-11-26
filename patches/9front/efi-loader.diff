@@ -1,0 +1,2197 @@
+diff --git a/sys/src/boot/efi/aa64.s b/sys/src/boot/efi/aa64.s
+index f000b783da678b545b7d10e02f0eeac23cc1c99c..d7e7eafd9da10ac92704774c9de86d83425c9258 100644
+--- a/sys/src/boot/efi/aa64.s
++++ b/sys/src/boot/efi/aa64.s
+@@ -1,6 +1,8 @@
+ #define	SYSREG(op0,op1,Cn,Cm,op2)	SPR(((op0)<<19|(op1)<<16|(Cn)<<12|(Cm)<<8|(op2)<<5))
+ #define	SCTLR_EL1			SYSREG(3,0,1,0,0)
+ 
++#define CTR_EL0 SYSREG(3,3,0,0,1)
++
+ #define NSH	(1<<2 | 3)
+ #define NSHST	(1<<2 | 2)
+ #define	SY	(3<<2 | 3)
+@@ -14,9 +16,6 @@ _base:
+ 	BL	rebase(SB)
+ 	MOV	R0, R28
+ 
+-	MOV	$argsbuf<>(SB), R0
+-	MOV	R0, confaddr(SB)
+-
+ 	MOV	R3, R0
+ 	MOV	R4, 0x08(FP)
+ 	B	efimain(SB)
+@@ -39,57 +38,55 @@ TEXT eficall(SB), 1, $-4
+ 	MOV	0x40(FP), R7
+ 	B	(R8)
+ 
+-TEXT mmudisable<>(SB), 1, $-4
+-#define SCTLRCLR \
+-	/* RES0 */	( 3<<30 \
+-	/* RES0 */	| 1<<27 \
+-	/* UCI */	| 1<<26 \
+-	/* EE */	| 1<<25 \
+-	/* RES0 */	| 1<<21 \
+-	/* E0E */	| 1<<24 \
+-	/* WXN */	| 1<<19 \
+-	/* nTWE */	| 1<<18 \
+-	/* RES0 */	| 1<<17 \
+-	/* nTWI */	| 1<<16 \
+-	/* UCT */	| 1<<15 \
+-	/* DZE */	| 1<<14 \
+-	/* RES0 */	| 1<<13 \
+-	/* RES0 */	| 1<<10 \
+-	/* UMA */	| 1<<9 \
+-	/* SA0 */	| 1<<4 \
+-	/* SA */	| 1<<3 \
+-	/* A */		| 1<<1 )
+-#define SCTLRSET \
+-	/* RES1 */	( 3<<28 \
+-	/* RES1 */	| 3<<22 \
+-	/* RES1 */	| 1<<20 \
+-	/* RES1 */	| 1<<11 )
+-#define SCTLRMMU \
+-	/* I */		( 1<<12 \
+-	/* C */		| 1<<2 \
+-	/* M */		| 1<<0 )
+-
+-	/* initialise SCTLR, MMU and caches off */
+-	ISB	$SY
+-	MRS	SCTLR_EL1, R0
+-	BIC	$(SCTLRCLR | SCTLRMMU), R0
+-	ORR	$SCTLRSET, R0
+-	ISB	$SY
+-	MSR	R0, SCTLR_EL1
+-	ISB	$SY
+-
+-	DSB	$NSHST
+-	TLBI	R0, 0,8,7,0	/* VMALLE1 */
+-	DSB	$NSH
+-	ISB	$SY
+-	RETURN
+-
++/*
++ * Enter the kernel after cleaning firmware cache writes, Plan2001 Boot
++ * ABI v1, ARM64 entry (sys/include/bootinfo.h): X0 = BootInfo, X1 = 0.
++ * jump(entry, bootinfo), called by archjump() in archaa64.c.
++ */
+ TEXT jump(SB), 1, $-4
++	MSR	$0xF, DAIFSet
+ 	MOV	R0, R3
+-	MOV	R1, R4
+-	BL	mmudisable<>(SB)
++	MOV	0x08(FP), R4
++	BL	cachehandoff<>(SB)
+ 	MOV	R4, R0
++	MOV	$0, R1
+ 	B	(R3)
+ 
+-GLOBL	confaddr(SB), $8
+-GLOBL	argsbuf<>(SB), $0x1000
++/* Clean QEMU L1/L2 data caches before the kernel disables its MMU.
++ * The frozen cache.v8.s supplies the set/way implementation. */
++TEXT cachehandoff<>(SB), 1, $-4
++	MOV	LR, R20
++	MOV	R3, R21
++	MOV	R4, R22
++	BL	cachedwbinv(SB)
++	BL	l2cacheuwbinv(SB)
++	BL	cachesync(SB)
++	MOV	R21, R3
++	MOV	R22, R4
++	RET	R20
++
++/* Clean an image range to PoC; CTR_EL0 gives the minimum D-cache line. */
++TEXT cacheclean(SB), 1, $-4
++	MOV	8(FP), R1
++	ADD	R0, R1
++	MRS	CTR_EL0, R2
++	LSR	$16, R2
++	AND	$15, R2
++	MOV	$4, R5
++	LSL	R2, R5
++	SUB	$1, R5, R6
++	BIC	R6, R0
++_clean:
++	DC	R0, 3,7,10,1
++	ADD	R5, R0
++	CMP	R1, R0
++	BLT	_clean
++	DSB	$SY
++	RETURN
++
++TEXT cachesync(SB), 1, $-4
++	DSB	$SY
++	IC	R0, 0,7,5,0
++	DSB	$SY
++	ISB	$SY
++	RETURN
+diff --git a/sys/src/boot/efi/efi.c b/sys/src/boot/efi/efi.c
+index 42d28ffea2b3ddc1eff3ff1306d5231f22125db1..50fb78e0070271d5504ca876ec868a9ae05157c4 100644
+--- a/sys/src/boot/efi/efi.c
++++ b/sys/src/boot/efi/efi.c
+@@ -1,6 +1,7 @@
+ #include <u.h>
+ #include "fns.h"
+ #include "efi.h"
++#include "mem.h"
+ 
+ UINTN MK;
+ EFI_HANDLE IH;
+@@ -13,14 +14,57 @@ void (*stop)(void);
+ 
+ /*
+  * on ia32 and amd64, we use IMAGE_FILE_RELOCS_STRIPPED which
+- * disables relocations, so this is a no-op.
++ * disables relocations, so rebase() is a no-op.
+  *
+- * on arm64, the EFI loader can move our code, so we need to
+- * update some of our stored addresses (such as callbacks)
+- * which assume we are loaded at our requested base address.
++ * on arm64, the EFI loader can move our code, so we need to update
++ * some of our stored addresses which assume we are loaded at our
++ * requested base address: a function's (the callbacks, see efimain())
++ * and an uninitialised (bss) global's taken as a value.  Found on QEMU
++ * virt with AAVMF: &mapbuf came out as its link-time address while the
++ * address of initialised data (a GUID, a string) was already right.
++ * So nothing here hands the firmware the address of a bss global:
++ * bootmapinit() passes a local instead.
+  */
+ extern void *rebase(void *addr);
+ 
++/*
++ * 7l addresses initialised data within 4 KiB of setSB through R28, which
++ * aa64.s rebases, but data further away by its link-time address.  The
++ * firmware moves the image without relocations, so eg a string literal
++ * far into the data segment arrives at its link-time address.  Translate
++ * only addresses inside the loader's own link-time image (IMAGEBASE in
++ * the mkfile, SizeOfImage from the loaded PE header), and only when the
++ * loaded image does not overlap it; anything else is returned unchanged.
++ * On AMD64 the image is not moved (rebase() is the identity).
++ */
++enum {
++	LinkBase = 0x8000,
++};
++
++void*
++linkfix(void *p)
++{
++	uchar *h, *pe;
++	uvlong a, base, size;
++	ulong off;
++
++	a = (uvlong)(uintptr)p;
++	base = (uvlong)(uintptr)rebase((void*)LinkBase);
++	if(base == LinkBase || a < LinkBase)
++		return p;
++	h = (uchar*)(uintptr)base;
++	off = h[0x3c] | h[0x3d]<<8 | h[0x3e]<<16 | (ulong)h[0x3f]<<24;
++	if(off > 0x200 - (24+60))	/* aout2efi: headers in the first 0x200 bytes */
++		return p;
++	pe = h + off;
++	if(pe[0] != 'P' || pe[1] != 'E')
++		return p;
++	size = pe[24+56] | pe[24+57]<<8 | pe[24+58]<<16 | (ulong)pe[24+59]<<24;
++	if(a - LinkBase >= size || (base < LinkBase+size && LinkBase < base+size))
++		return p;
++	return rebase(p);
++}
++
+ void
+ putc(int c)
+ {
+@@ -47,74 +91,363 @@ usleep(int us)
+ 	eficall(ST->BootServices->Stall, (UINTN)us);
+ }
+ 
++/*
++ * Claim [pa, pa+len) at the given EFI memory type via AllocateAddress (=2).
++ * pa must be page-aligned: AllocateAddress rejects anything else (and
++ * silently - the request is simply invalid, not "denied"). Returns non-zero
++ * if it fails.
++ */
++static int
++efiallocx(uvlong pa, uvlong len, int memtype)
++{
++	uvlong a;
++
++	a = pa;
++	return eficall(ST->BootServices->AllocatePages, (UINTN)2, (UINTN)memtype,
++		(UINTN)((len + 4095) / 4096), &a) != 0;
++}
++
++/*
++ * Claim [pa, pa+len) as loader code.  Firmware marks free memory no-execute,
++ * which matters as the kernel is entered with the firmware's page tables
++ * still active.  Used for the kernel's own memory range, which is executed.
++ */
++int
++efialloc(uvlong pa, uvlong len)
++{
++	return efiallocx(pa, len, EfiLoaderCode);
++}
++
++/*
++ * Release pages efialloc() claimed, eg after a later failure: without this
++ * a retry (efimain's loop, on a bad read or a rejected kernel) finds the
++ * same range already allocated and fails immediately instead of trying
++ * again.
++ */
+ void
+-unload(void)
++efifree(uvlong pa, uvlong len)
++{
++	eficall(ST->BootServices->FreePages, (UINTN)pa, (UINTN)((len + 4095) / 4096));
++}
++
++/*
++ * The BootInfo blob the kernel is entered with (Plan2001 Boot ABI v1, see
++ * sys/include/bootinfo.h): one allocation, wherever the firmware's
++ * allocator puts it (efimain()), holding the header (bi), the plan9.ini
++ * text (confaddr, see sub.c), print()'s captured text (logbuf, sub.c) and
++ * the final memory map (bootexit()).  Nothing is copied anywhere: the
++ * kernel is handed its address as its ISA's entry ABI says (archjump()).
++ */
++enum {
++	ConfCap = 8*1024,	/* plan9.ini text, including the NUL */
++	LogCap = 4*1024,	/* print()'s captured text */
++};
++static BootInfo *bi;
++static void bootinfohdr(void);
++static uchar *blob;
++static ulong blobsize, mmapcap;
++static uvlong bloballocated;
++uchar *fdtsrc;		/* the firmware's device tree, if any (fdtfind()) */
++ulong fdtsize;
++char *confaddr;
++
++/*
++ * Allocate len bytes wherever the firmware's allocator wants to put them
++ * (AllocateAnyPages = 0), of the given EFI memory type. Returns the
++ * physical address, or 0 on failure - firmware never hands out page 0.
++ */
++static uvlong
++efiallocany(uvlong len, int memtype)
++{
++	uvlong a;
++
++	a = 0;
++	if(eficall(ST->BootServices->AllocatePages, (UINTN)0, (UINTN)memtype,
++		(UINTN)((len + 4095) / 4096), &a) != 0)
++		return 0;
++	return a;
++}
++
++/*
++ * Do not put the final UEFI memory map on the firmware-provided stack.
++ * 96 KiB is a large automatic object and old firmware is not required to
++ * provide enough spare stack for it. Allocate it before the final map is
++ * requested, so its allocation is itself present in that map.
++ */
++enum {
++	MapBufSize = 96*1024,
++	/*
++	 * Same grid as sys/src/9/port/bootfb.c's (Size/Gap/Margin), continued
++	 * by it at slot LoaderMarks (its own constant, kept in sync by
++	 * comment, same as this one): one shared top-left marker row
++	 * spanning the whole boot, not two separate marker areas.
++	 */
++	MarkSize = 8,
++	MarkGap = 2,
++	MarkMargin = 2,
++};
++static uchar *mapbuf;
++
++/*
++ * One colour per stage: 1=EBS start, 2=EBS done, 3=jump.  The kernel's
++ * own squares follow in the same row (sys/src/9/port/bootfb.c).
++ */
++static ulong markcolor[3] = {
++	0x0000FF,	/* EBS start: blue */
++	0x00FFFF,	/* EBS done: cyan */
++	0xFFFF00,	/* jump: yellow */
++};
++
++int
++bootmapinit(void)
++{
++	void *p;	/* a local: see rebase() above */
++
++	p = nil;
++	if(eficall(ST->BootServices->AllocatePool, (UINTN)EfiLoaderData,
++		(UINTN)MapBufSize, &p) != 0 || p == nil)
++		return -1;
++	mapbuf = p;
++	return 0;
++}
++
++/* Snapshot used for preflight; it is refreshed again by bootexit(). */
++int
++bootmemorymap(void **map, uvlong *bytes, uvlong *stride)
+ {
+-	eficall(ST->BootServices->ExitBootServices, IH, MK);
++	UINTN size, key, ent;
++	UINT32 version;
++
++	if(mapbuf == nil)
++		return -1;
++	size = MapBufSize;
++	ent = sizeof(EFI_MEMORY_DESCRIPTOR);
++	version = 1;
++	if(eficall(ST->BootServices->GetMemoryMap, &size, mapbuf, &key, &ent, &version) != 0)
++		return -1;
++	*map = mapbuf;
++	*bytes = size;
++	*stride = ent;
++	return 0;
++}
++
++uvlong
++bootblobsize(void)
++{
++	return blobsize;
++}
++
++/* keep [pa, pa+len) from the firmware's allocator as loader data */
++int
++bootreserve(uvlong pa, uvlong len)
++{
++	return efiallocx(pa, len, EfiLoaderData);
++}
++
++/*
++ * Rehome the provisional config/log blob only after the image layout is
++ * known. Config and log pointers, including sub.c's end pointer, move too.
++ */
++int
++bootblobmove(uvlong pa, uvlong len)
++{
++	uvlong old, oldlen;
++	int n;
++
++	if(len < blobsize || len > ~(uvlong)0 - 4095)
++		return -1;
++	if(bootreserve(pa, len) != 0)
++		return -1;
++	n = conflen();
++	old = (uvlong)blob;
++	oldlen = bloballocated;
++	memmove((void*)(uintptr)pa, blob, blobsize);
++	blob = (uchar*)(uintptr)pa;
++	bloballocated = len;
++	bi = (BootInfo*)blob;
++	confaddr = (char*)blob + bi->configoff;
++	logbuf = (char*)blob + bi->logoff;
++	confrelocate(n);
++	efifree(old, oldlen);
++	return 0;
++}
++
++/*
++ * UEFI text output is gone after ExitBootServices. Leave visible progress
++ * markers at the top-left of a 32-bit GOP framebuffer instead: one before
++ * ExitBootServices, two after it returns, three before archjump - slots 0..2
++ * of the shared marker row bootfb.c continues from slot 3 (its
++ * LoaderMarks; see MarkSize's comment above).
++ */
++static void*
++fbmarkaddr(int stage)
++{
++	UINT32 x;
++
++	if(bi->fbbase == 0 || bi->fbdepth != 32 || bi->fbstride == 0
++	|| bi->fbwidth == 0 || bi->fbheight < MarkMargin+MarkSize
++	|| stage < 1)
++		return nil;
++	x = MarkMargin + (stage-1)*(MarkSize+MarkGap);
++	if(x+MarkSize > bi->fbwidth)
++		return nil;
++	return (UINT32*)(uintptr)bi->fbbase + (uvlong)MarkMargin*bi->fbstride + x;
+ }
+ 
+ void
+-memconf(char **cfg)
+-{
+-	static uchar memtype[EfiMaxMemoryType] = {
+-		[EfiReservedMemoryType]		2,
+-		[EfiLoaderCode]			1,
+-		[EfiLoaderData]			1,
+-		[EfiBootServicesCode]		2,
+-		[EfiBootServicesData]		2,
+-		[EfiRuntimeServicesCode]	2,
+-		[EfiRuntimeServicesData]	2,
+-		[EfiConventionalMemory]		1,
+-		[EfiUnusableMemory]		2,
+-		[EfiACPIReclaimMemory]		3,
+-		[EfiACPIMemoryNVS]		4,
+-		[EfiMemoryMappedIO]		2,
+-		[EfiMemoryMappedIOPortSpace]	2,
+-		[EfiPalCode]			2,
+-	};
++fbmark(int stage)
++{
++	volatile UINT32 *p;
++	volatile UINT32 *row;
++	ulong c;
++	int x, y;
++
++	p = fbmarkaddr(stage);
++	if(p == nil)
++		return;
++	c = stage>=1 && stage<=3? markcolor[stage-1]: 0x00ff00ff;
++	if(memcmp(bi->fbchan, "x8b8g8r8", 8) == 0)
++		c = (c & 0x00FF00) | (c>>16 & 0xFF) | (c & 0xFF)<<16;
++	for(y = 0; y < MarkSize; y++){
++		row = p + (uvlong)y*bi->fbstride;
++		for(x = 0; x < MarkSize; x++)
++			row[x] = c;
++	}
++}
++
++/*
++ * Fetch the final memory map and leave boot services, retrying with a fresh
++ * map if the firmware reports that it changed, as the specification requires.
++ * No printing between GetMemoryMap and ExitBootServices: it changes the map.
++ * Returns non-zero if boot services could not be left; they are still usable
++ * then.  On success the map is recorded in the BootInfo, adjacent entries of
++ * the same type and attributes merged, and no boot service may be used again.
++ */
++int
++bootexit(void)
++{
+ 	UINTN mapsize, entsize;
+ 	EFI_MEMORY_DESCRIPTOR *t;
+-	uchar mapbuf[96*1024], *p, m;
++	uchar *p;
+ 	UINT32 entvers;
+-	char *s;
++	BootMem *m, *mem;
++	ulong n;
++	int try;
++
++	if(mapbuf == nil)
++		return -3;
++	for(try = 0; try < 4; try++){
++		print("[P2 L25] GetMemoryMap + ExitBootServices attempt\n");
++		mapsize = MapBufSize;
++		entsize = sizeof(EFI_MEMORY_DESCRIPTOR);
++		entvers = 1;
++		if(eficall(ST->BootServices->GetMemoryMap, &mapsize, mapbuf, &MK, &entsize, &entvers))
++			return -1;
++		if(entsize < sizeof(EFI_MEMORY_DESCRIPTOR))
++			return -1;
++		if(eficall(ST->BootServices->ExitBootServices, IH, MK) == 0)
++			goto Left;
++		print("[P2 L25] ExitBootServices rejected stale map; retrying\n");
++	}
++	return -2;
++
++Left:
++	/*
++	 * The map goes into the blob's own section, sized in efimain() for
++	 * as many entries as mapbuf can hold at the smallest descriptor
++	 * size, so it always fits: no fixed limit, no truncation.
++	 */
++	mem = (BootMem*)(blob + bi->mmapoff);
++	n = 0;
++	for(p = mapbuf; mapsize >= entsize; p += entsize, mapsize -= entsize){
++		t = (EFI_MEMORY_DESCRIPTOR*)p;
++		if(t->NumberOfPages == 0)
++			continue;
++		m = nil;
++		if(n > 0){
++			m = &mem[n-1];
++			if(m->type != t->Type || m->attr != (UINT32)t->Attribute
++			|| m->base + m->len != t->PhysicalStart)
++				m = nil;
++		}
++		if(m != nil){
++			m->len += t->NumberOfPages * 4096ULL;
++			continue;
++		}
++		if(n >= mmapcap)
++			break;	/* cannot happen, see above */
++		m = &mem[n++];
++		m->base = t->PhysicalStart;
++		m->len = t->NumberOfPages * 4096ULL;
++		m->type = t->Type;
++		m->attr = (UINT32)t->Attribute;
++	}
++	bi->mmapcount = n;
++	return 0;
++}
+ 
+-	mapsize = sizeof(mapbuf);
+-	entsize = sizeof(EFI_MEMORY_DESCRIPTOR);
+-	entvers = 1;
+-	if(eficall(ST->BootServices->GetMemoryMap, &mapsize, mapbuf, &MK, &entsize, &entvers))
+-		return;
++/*
++ * Wall clock time from the runtime service, callable before boot services
++ * end.  civilsecs converts a Gregorian date to seconds since 1970-01-01,
++ * using days_from_civil (Howard Hinnant, public domain) for the date part;
++ * GetTime() returns local time, and per the UEFI spec Localtime = UTC -
++ * TimeZone (minutes), so TimeZone is added to local to recover UTC.
++ * TimeZone may be unspecified (already UTC, the common case for firmware
++ * that keeps the RTC in UTC).
++ */
++static uvlong
++civilsecs(EFI_TIME *t)
++{
++	int y, era, yoe, doy, doe;
++	long days;
+ 
+-	/* only called to get MK for ExitBootServices() */
+-	if(cfg == nil)
+-		return;
++	y = t->Year - (t->Month <= 2);
++	era = (y >= 0? y: y-399) / 400;
++	yoe = y - era*400;
++	doy = (153*(t->Month + (t->Month > 2? -3: 9)) + 2)/5 + t->Day-1;
++	doe = yoe*365 + yoe/4 - yoe/100 + doy;
++	days = era*146097L + doe - 719468;
+ 
+-	s = *cfg;
+-	for(p = mapbuf; mapsize >= entsize; p += entsize, mapsize -= entsize){
+-		t = (EFI_MEMORY_DESCRIPTOR*)p;
++	return (uvlong)days*24*3600 + t->Hour*3600 + t->Minute*60 + t->Second;
++}
+ 
+-		m = 0;
+-		if(t->Type < EfiMaxMemoryType)
+-			m = memtype[t->Type];
++static void
++timeconf(void)
++{
++	EFI_TIME t;
+ 
+-		if(m == 0)
+-			continue;
++	if(eficall(ST->RuntimeServices->GetTime, &t, nil))
++		return;
++	bi->epoch = civilsecs(&t);
++	if(t.TimeZone != EfiUnspecifiedTimeZone)
++		bi->epoch += t.TimeZone*60;
++}
+ 
+-		if(s == *cfg)
+-			memmove(s, "*e820=", 6), s += 6;
+-		s = hexfmt(s, 1, m), *s++ = ' ';
+-		s = hexfmt(s, 16, t->PhysicalStart), *s++ = ' ';
+-		s = hexfmt(s, 16, t->PhysicalStart + t->NumberOfPages * 4096ULL), *s++ = ' ';
+-	}
+-	*s = '\0';
+-	if(s > *cfg){
+-		s[-1] = '\n';
+-		/* print(*cfg); -- no printing allowed, can change MK */
+-		*cfg = s;
+-	}
++/*
++ * Entropy from the firmware's RNG, if it has one; otherwise rngseedlen stays
++ * 0 and the kernel's own entropy collection is unaffected.
++ */
++static void
++rngconf(void)
++{
++	static EFI_GUID EFI_RNG_PROTOCOL_GUID = {
++		0x3152bca5, 0xeade, 0x433d,
++		0x86, 0x2e, 0xc0, 0x1c,
++		0xdc, 0x29, 0x1f, 0x44,
++	};
++	EFI_RNG_PROTOCOL *rng;
++	UINTN len;
++
++	rng = nil;
++	if(eficall(ST->BootServices->LocateProtocol, &EFI_RNG_PROTOCOL_GUID, nil, &rng) || rng == nil)
++		return;
++	len = sizeof(bi->rngseed);
++	if(eficall(rng->GetRNG, rng, nil, len, bi->rngseed) == 0)
++		bi->rngseedlen = len;
+ }
+ 
+ static void
+-acpiconf(char **cfg)
++acpiconf(void)
+ {
+ 	static EFI_GUID ACPI_20_TABLE_GUID = {
+ 		0x8868e871, 0xe4f1, 0x11d3,
+@@ -128,7 +461,7 @@ acpiconf(char **cfg)
+ 	};
+ 	EFI_CONFIGURATION_TABLE *t;
+ 	uintptr pa;
+-	char *s;
++	char buf[32], *s;
+ 	int n;
+ 
+ 	pa = 0;
+@@ -143,17 +476,16 @@ acpiconf(char **cfg)
+ 		t++;
+ 	}
+ 
++	bi->acpi = pa;
+ 	if(pa){
+-		s = *cfg;
+-		memmove(s, "*acpi=0x", 8), s += 8;
++		s = buf;
++		memmove(s, "acpi=0x", 7), s += 7;
+ 		s = hexfmt(s, 0, pa), *s++ = '\n';
+ 		*s = '\0';
+-		print(*cfg);
+-		*cfg = s;
++		print(buf);
+ 	}
+ }
+ 
+-
+ static int
+ topbit(ulong mask)
+ {
+@@ -178,8 +510,46 @@ lowbit(ulong mask)
+ 	return bit;
+ }
+ 
++/*
++ * Decode a mode's pixel format into per-channel bitmasks.  Returns the
++ * total bit depth (mr|mg|mb|mx's top bit), or 0 if the format is unusable
++ * (eg PixelBltOnly, which has no linear framebuffer at all, or a
++ * PixelBitMask mode whose masks are somehow all zero).
++ */
++static int
++pixmasks(EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info, ulong *mr, ulong *mg, ulong *mb, ulong *mx)
++{
++	switch(info->PixelFormat){
++	default:
++		return 0;	/* unsupported, eg PixelBltOnly */
++
++	case PixelRedGreenBlueReserved8BitPerColor:
++		*mr = 0x000000ff;
++		*mg = 0x0000ff00;
++		*mb = 0x00ff0000;
++		*mx = 0xff000000;
++		break;
++
++	case PixelBlueGreenRedReserved8BitPerColor:
++		*mb = 0x000000ff;
++		*mg = 0x0000ff00;
++		*mr = 0x00ff0000;
++		*mx = 0xff000000;
++		break;
++
++	case PixelBitMask:
++		*mr = info->PixelInformation.RedMask;
++		*mg = info->PixelInformation.GreenMask;
++		*mb = info->PixelInformation.BlueMask;
++		*mx = info->PixelInformation.ReservedMask;
++		break;
++	}
++
++	return topbit(*mr | *mg | *mb | *mx);
++}
++
+ static void
+-screenconf(char **cfg)
++screenconf(void)
+ {
+ 	static EFI_GUID EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID = {
+ 		0x9042a9de, 0x23dc, 0x4a38,
+@@ -193,13 +563,16 @@ screenconf(char **cfg)
+ 	EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
+ 	ulong mr, mg, mb, mx, mc;
+ 	int i, bits, depth;
+-	char *s;
++	char buf[96], *s;
+ 
+ 	Count = 0;
+ 	Handles = nil;
++	print("[P2 L06] GOP: locating handles\n");
+ 	if(eficall(ST->BootServices->LocateHandleBuffer,
+-		ByProtocol, &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, nil, &Count, &Handles))
++		ByProtocol, &EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, nil, &Count, &Handles)){
++		print("[P2 L06] GOP: LocateHandleBuffer failed\n");
+ 		return;
++	}
+ 
+ 	for(i=0; i<Count; i++){
+ 		gop = nil;
+@@ -211,34 +584,7 @@ screenconf(char **cfg)
+ 			continue;
+ 		if((info = gop->Mode->Info) == nil)
+ 			continue;
+-
+-		switch(info->PixelFormat){
+-		default:
+-			continue;	/* unsupported */
+-
+-		case PixelRedGreenBlueReserved8BitPerColor:
+-			mr = 0x000000ff;
+-			mg = 0x0000ff00;
+-			mb = 0x00ff0000;
+-			mx = 0xff000000;
+-			break;
+-
+-		case PixelBlueGreenRedReserved8BitPerColor:
+-			mb = 0x000000ff;
+-			mg = 0x0000ff00;
+-			mr = 0x00ff0000;
+-			mx = 0xff000000;
+-			break;
+-
+-		case PixelBitMask:
+-			mr = info->PixelInformation.RedMask;
+-			mg = info->PixelInformation.GreenMask;
+-			mb = info->PixelInformation.BlueMask;
+-			mx = info->PixelInformation.ReservedMask;
+-			break;
+-		}
+-
+-		if((depth = topbit(mr | mg | mb | mx)) == 0)
++		if((depth = pixmasks(info, &mr, &mg, &mb, &mx)) == 0)
+ 			continue;
+ 
+ 		/* make sure we have linear framebuffer */
+@@ -249,16 +595,32 @@ screenconf(char **cfg)
+ 
+ 		goto Found;
+ 	}
++	print("[P2 L06] GOP: no usable linear framebuffer\n");
+ 	return;
+ 
+ Found:
+-	s = *cfg;
+-	memmove(s, "*bootscreen=", 12), s += 12;
+-	s = decfmt(s, 0, info->PixelsPerScanLine), *s++ = 'x';
+-	s = decfmt(s, 0, info->VerticalResolution), *s++ = 'x';
+-	s = decfmt(s, 0, depth), *s++ = ' ';
+-
+-	while(depth > 0){
++	/*
++	 * Deliberately not switching to the native/largest GOP mode here
++	 * (tried in commit a93c397, reverted): on real hardware with a
++	 * minimal GOP implementation (confirmed on a Dell Precision T5600,
++	 * MaxMode=3 - a BMC-class video device), SetMode() can hang the
++	 * firmware forever instead of returning an error. That happens
++	 * before ExitBootServices, so there is no way to time out a
++	 * synchronous DXE call that never returns - unlike a failed
++	 * SetMode (which the UEFI spec guarantees leaves gop->Mode
++	 * untouched), a hung one is unrecoverable. So: just use whatever
++	 * mode is already active, exactly as before that commit.
++	 */
++	bi->fbbase = gop->Mode->FrameBufferBase;
++	bi->fbsize = gop->Mode->FrameBufferSize;
++	bi->fbwidth = info->HorizontalResolution;
++	bi->fbheight = info->VerticalResolution;
++	bi->fbstride = info->PixelsPerScanLine;
++	bi->fbdepth = depth;
++
++	/* channel descriptor, eg x8r8g8b8 */
++	s = bi->fbchan;
++	while(depth > 0 && s < bi->fbchan + sizeof(bi->fbchan) - 4){
+ 		if(depth == topbit(mr)){
+ 			mc = mr;
+ 			*s++ = 'r';
+@@ -278,49 +640,262 @@ Found:
+ 		s = decfmt(s, 0, bits);
+ 		depth -= bits;
+ 	}
+-	*s++ = ' ';
+-
+-	*s++ = '0', *s++ = 'x';
+-	s = hexfmt(s, 0, gop->Mode->FrameBufferBase), *s++ = '\n';
+ 	*s = '\0';
+ 
+-	print(*cfg);
+-	*cfg = s;
++	s = buf;
++	memmove(s, "fb=", 3), s += 3;
++	s = decfmt(s, 0, bi->fbwidth), *s++ = 'x';
++	s = decfmt(s, 0, bi->fbheight), *s++ = 'x';
++	s = decfmt(s, 0, bi->fbdepth), *s++ = ' ';
++	memmove(s, "stride ", 7), s += 7;
++	s = decfmt(s, 0, bi->fbstride), *s++ = ' ';
++	memmove(s, bi->fbchan, strlen(bi->fbchan)), s += strlen(bi->fbchan);
++	memmove(s, " 0x", 3), s += 3;
++	s = hexfmt(s, 0, bi->fbbase), *s++ = '\n';
++	*s = '\0';
++	print(buf);
++	print("[P2 L06] GOP: active mode recorded; no SetMode call\n");
+ }
+ 
+ void
+-eficonfig(char **cfg)
++eficonfig(void)
+ {
+-	/* memconf(cfg); -- must be called right before unload() */
+-	acpiconf(cfg);
+-	screenconf(cfg);
++	print("[P2 L05] BootInfo: initialise\n");
++	bootinfohdr();
++
++	/* the memory map is added by bootexit(), right before leaving boot services */
++	print("[P2 L05] ACPI: probe\n");
++	acpiconf();
++	screenconf();
++	archconf(bi);
++	print("[P2 L08] RTC: read\n");
++	timeconf();
++	print(bi->epoch != 0? "[P2 L08] RTC: ok\n": "[P2 L08] RTC: unavailable\n");
++	print("[P2 L09] RNG: probe\n");
++	rngconf();
++	print(bi->rngseedlen != 0? "[P2 L09] RNG: ok\n": "[P2 L09] RNG: unavailable\n");
++	print("[P2 L10] BootInfo: initial fields complete\n");
+ }
+ 
++/*
++ * Allocate the blob anywhere the ISA's kernel lets it be (archblobok(),
++ * eg archx64.c: not where the kernel itself goes).  Firmware usually
++ * allocates top-down, so the first try is taken; pages rejected are held
++ * until a good range is found, so that the firmware does not offer them
++ * again, and then given back.
++ */
++enum {
++	BlobTries = 8,
++};
++
++static uvlong
++bloballoc(uvlong len)
++{
++	uvlong a, bad[BlobTries];
++	int i, n;
++
++	a = 0;
++	for(n = 0; n < BlobTries; n++){
++		if((a = efiallocany(len, EfiLoaderData)) == 0 || archblobok(a, len))
++			break;
++		bad[n] = a;
++		a = 0;
++	}
++	for(i = 0; i < n; i++)
++		efifree(bad[i], len);
++	return a;
++}
++
++/*
++ * The firmware's flattened device tree, if it gives one (ARM64 and RISC-V
++ * firmware usually does, PC firmware only ACPI): found in the configuration
++ * table, checked for its magic and size, and later copied whole into the
++ * blob's own section (efimain()), so that it is owned, relocated and kept
++ * the same way as the rest of the blob.  A bad or oversized one is left
++ * out, with a message: the hardware may still be described by ACPI.
++ */
++enum {
++	FdtMagic = 0xd00dfeed,
++	FdtMax = 2*1024*1024,	/* EDK2 pads QEMU virt's tree to 1 MB + 4 KB */
++};
++
++static ulong
++be32(uchar *p)
++{
++	return (ulong)p[0]<<24 | p[1]<<16 | p[2]<<8 | p[3];
++}
++
++static void
++fdtfind(void)
++{
++	static EFI_GUID DEVICE_TREE_GUID = {
++		0xb1b621d5, 0xf19c, 0x41a5,
++		0x83, 0x0b, 0xd9, 0x15,
++		0x2c, 0x69, 0xaa, 0xe0,
++	};
++	EFI_CONFIGURATION_TABLE *t;
++	uchar *p;
++	int n;
++
++	t = ST->ConfigurationTable;
++	n = ST->NumberOfTableEntries;
++	for(; --n >= 0; t++){
++		if(memcmp(&t->VendorGuid, &DEVICE_TREE_GUID, sizeof(EFI_GUID)) != 0)
++			continue;
++		p = t->VendorTable;
++		if(p == nil || be32(p) != FdtMagic || be32(p+4) < 40 || be32(p+4) > FdtMax){
++			print("[P2 L02] FDT: ignored, bad header or too large\n");
++			return;
++		}
++		fdtsrc = p;
++		fdtsize = be32(p+4);
++		return;
++	}
++}
++
++/*
++ * The blob's fixed part: magic, version and where its sections are.
++ * Called at the start (efimain()) and again from eficonfig() whenever
++ * the configuration is cleared, as that zeroes the header.
++ */
++
++static void
++bootinfohdr(void)
++{
++	memset(bi, 0, sizeof(*bi));
++	bi->magic = BootInfoMagic;
++	bi->version = BootInfoVersion;
++	bi->headersize = sizeof(*bi);
++	bi->totalsize = blobsize;
++	bi->configoff = (sizeof(*bi) + 7) & ~7;
++	bi->logoff = bi->configoff + ConfCap;
++	bi->fdtoff = bi->logoff + LogCap;
++	/* ARM64 defers copying until plan9.ini selects a platform and the board
++	 * FDT can be validated. Other targets retain their established handoff. */
++	bi->fdtlen = archfdtdefer()? 0: fdtsize;
++	/*
++	 * 9frontin käynnistys ei käytä GE/O:n prosessimanifestia:
++	 * manifestoff ja manifestlen jäävät nolliksi (puuttuu).
++	 */
++	bi->mmapoff = bi->fdtoff + ((fdtsize + 7) & ~7);
++	bi->mmapentsize = sizeof(BootMem);
++}
++
++char*
++bootfdtcopy(void)
++{
++	if(fdtsrc == nil || fdtsize == 0)
++		return "firmware did not provide an FDT";
++	if(bi == nil || blob == nil || bi->fdtoff > blobsize || fdtsize > blobsize-bi->fdtoff)
++		return "FDT does not fit the BootInfo allocation";
++	memmove(blob + bi->fdtoff, fdtsrc, fdtsize);
++	bi->fdtlen = fdtsize;
++	return nil;
++}
++
++/*
++ * The blob's last fields, set once nothing is printed or configured any
++ * more: called from bootkern() (sub.c) after bootexit() succeeded, right
++ * before archjump() hands the kernel the blob.
++ */
++void*
++bootinfofinish(void)
++{
++	bi->configlen = conflen();
++	bi->loglen = logused;
++	return bi;
++}
++
++
+ EFI_STATUS
+ efimain(EFI_HANDLE ih, EFI_SYSTEM_TABLE *st)
+ {
+ 	char path[MAXPATH], *kern;
+ 	void *f;
++	uvlong la;
+ 
+ 	IH = ih;
+ 	ST = st;
+ 
++	/*
++	 * The BootInfo blob, before the very first print() so that its
++	 * capture buffer (the blob's log section) misses nothing: wherever
++	 * the firmware's allocator puts it (AllocateAnyPages), its size fixed
++	 * here - the memory map section holds as many entries as mapbuf
++	 * (bootmapinit) can at the smallest descriptor size.  T5600: a fixed
++	 * low address can still be EfiBootServicesCode the firmware is
++	 * running, which is why nothing about the handoff is at a fixed
++	 * address any more (Plan2001 Boot ABI v1, sys/include/bootinfo.h).
++	 */
++	if(archfdtallowed())
++		fdtfind();
++	mmapcap = MapBufSize / sizeof(EFI_MEMORY_DESCRIPTOR);
++	blobsize = PGROUND(((sizeof(BootInfo) + 7) & ~7) + ConfCap + LogCap + ((fdtsize + 7) & ~7) + mmapcap*sizeof(BootMem));
++	if((la = bloballoc(blobsize)) == 0){
++		print("[P2 L02] FATAL: cannot allocate the BootInfo blob\n");
++		for(;;)
++			;
++	}
++	bloballocated = blobsize;
++	blob = (uchar*)la;
++	memset(blob, 0, blobsize);
++	bi = (BootInfo*)blob;
++	bootinfohdr();
++	confaddr = (char*)blob + bi->configoff;
++	logbuf = (char*)blob + bi->logoff;
++	logcap = LogCap;
++	if(fdtsize != 0 && !archfdtdefer())
++		memmove(blob + bi->fdtoff, fdtsrc, fdtsize);
++	print("[P2 L01] Plan2001 loader 2026-09-25 boot-abi-1\n");
++	tracehex("[P2 L02] BootInfo blob at 0x", la);
++	tracehex("[P2 L02] BootInfo blob bytes=0x", blobsize);
++	if(bi->fdtlen != 0)
++		tracehex("[P2 L02] FDT copied into the blob, bytes=0x", fdtsize);
++
++	print("[P2 L03] memory-map buffer: AllocatePool 96 KiB\n");
++	if(bootmapinit() != 0){
++		print("[P2 L03] FATAL: cannot allocate memory-map buffer\n");
++		for(;;)
++			;
++	}
++	print("[P2 L03] memory-map buffer: ready\n");
++
++	/*
++	 * Plan2001 is UEFI-only: boot exclusively from the Simple File System
++	 * volume this image was itself loaded from (fsinit(), which also
++	 * falls back to scanning other SFS volumes for plan9.ini if that
++	 * specific one doesn't have it - see fs.c). No PXE or ISO9660
++	 * fallback: on real firmware, isoinit()'s BlockIO/PVD scan alone
++	 * cost tens of seconds to a minute of boot time (confirmed on a Dell
++	 * Precision T5600), and neither ever applies to how Plan2001 is
++	 * actually deployed (a USB/ESP volume). A missing boot filesystem is
++	 * fatal and reported plainly, not silently chained to another probe.
++	 */
+ 	f = nil;
+-	if(pxeinit(&f) && isoinit(&f) && fsinit(&f))
+-		print("no boot devices\n");
++	print("[P2 L04] boot filesystem: open\n");
++	if(fsinit(&f) != 0){
++		print("[P2 L04] FATAL: boot filesystem unavailable\n");
++		for(;;)
++			;
++	}
++	print("[P2 L04] boot filesystem: ready\n");
+ 
++	print("[P2 L11] rebase boot-device callbacks\n");
+ 	open = rebase(open);
+ 	read = rebase(read);
+ 	close = rebase(close);
+ 	if(stop) stop = rebase(stop);
+ 
+ 	for(;;){
++		print("[P2 L12] configure kernel path\n");
+ 		kern = configure(f, path);
++		print("[P2 L13] open kernel\n");
+ 		f = open(kern);
+ 		if(f == nil){
+ 			print("not found\n");
+ 			continue;
+ 		}
++		print("[P2 L13] kernel opened\n");
+ 		print(bootkern(f));
+ 		print("\n");
+ 		close(f);
+diff --git a/sys/src/boot/efi/efi.h b/sys/src/boot/efi/efi.h
+index aa411c63b77d96392bcc7895ebe07ac22a7b6fd2..6086cd89373f0247060fdff9edf1ba0075b25c04 100644
+--- a/sys/src/boot/efi/efi.h
++++ b/sys/src/boot/efi/efi.h
+@@ -2,14 +2,18 @@ typedef ushort	CHAR16;
+ 
+ typedef uchar	UINT8;
+ typedef ushort	UINT16;
+-typedef ulong	UINT32;
++typedef uint	UINT32;		/* 32 bits on both x64 and arm64 */
+ typedef uvlong	UINT64;
+ typedef UINT8	BOOLEAN;
+ 
+ typedef uintptr	UINTN;
+ 
+ typedef void*	EFI_HANDLE;
++#ifdef PLAN2001_EFI_GCC
++typedef UINTN	EFI_STATUS;	/* native UINTN on x64 UEFI */
++#else
+ typedef UINT32	EFI_STATUS;
++#endif
+ 
+ enum {
+ 	AllHandles,
+@@ -140,8 +144,14 @@ typedef struct {
+ 	UINT32	Reserved;
+ } EFI_TABLE_HEADER;
+ 
++#ifdef PLAN2001_EFI_GCC
++#define EFI_TABLEHDR	EFI_TABLE_HEADER hdr;
++#else
++#define EFI_TABLEHDR	EFI_TABLE_HEADER;
++#endif
++
+ typedef struct {
+-	EFI_TABLE_HEADER;
++	EFI_TABLEHDR
+ 
+ 	void		*RaiseTPL;
+ 	void		*RestoreTPL;
+@@ -202,7 +212,7 @@ typedef struct {
+ } EFI_BOOT_SERVICES;
+ 
+ typedef struct {
+-	EFI_TABLE_HEADER;
++	EFI_TABLEHDR
+ 
+ 	void		*GetTime;
+ 	void		*SetTime;
+@@ -231,7 +241,7 @@ typedef struct {
+ } EFI_CONFIGURATION_TABLE;
+ 
+ typedef struct {
+-	EFI_TABLE_HEADER;
++	EFI_TABLEHDR
+ 
+ 	CHAR16		*FirmwareVendor;
+ 	UINT32		FirmwareRevision;
+@@ -252,5 +262,29 @@ typedef struct {
+ 	EFI_CONFIGURATION_TABLE	*ConfigurationTable;
+ } EFI_SYSTEM_TABLE;
+ 
++
++typedef struct {
++	UINT16	Year;
++	UINT8	Month;
++	UINT8	Day;
++	UINT8	Hour;
++	UINT8	Minute;
++	UINT8	Second;
++	UINT8	Pad1;
++	UINT32	Nanosecond;
++	short	TimeZone;
++	UINT8	Daylight;
++	UINT8	Pad2;
++} EFI_TIME;
++
++enum {
++	EfiUnspecifiedTimeZone = 0x07FF,
++};
++
++typedef struct {
++	void	*GetInfo;
++	void	*GetRNG;
++} EFI_RNG_PROTOCOL;
++
+ extern EFI_SYSTEM_TABLE *ST;
+ extern EFI_HANDLE IH;
+diff --git a/sys/src/boot/efi/fns.h b/sys/src/boot/efi/fns.h
+index 727934a0bb531b614f94181cb6bdd030ebecfb19..615c957eabb2d007656ff60fc83f72587af69c2b 100644
+--- a/sys/src/boot/efi/fns.h
++++ b/sys/src/boot/efi/fns.h
+@@ -1,3 +1,6 @@
++#include <bootinfo.h>
++#include "image.h"
++
+ enum {
+ 	MAXPATH = 128,
+ };
+@@ -5,10 +8,31 @@ enum {
+ extern char hex[];
+ 
+ void usleep(int t);
+-void jump(void *pc, void *arg);
++/* the ISA side of the loader: archx64.c for bootx64.efi, archaa64.c for bootaa64.efi */
++void archconf(BootInfo *bi);
++char *archinit(void);
++char *archimage(BootImage*);
++void archrelease(void);
++int archfdtallowed(void);
++int archfdtdefer(void);
++char *bootfdtcopy(void);
++extern uchar *fdtsrc;
++extern ulong fdtsize;
++int bootmemorymap(void**, uvlong*, uvlong*);
++uvlong bootblobsize(void);
++int bootblobmove(uvlong, uvlong);
++int bootreserve(uvlong, uvlong);
++void confrelocate(int);
++uvlong archentry(uvlong entry);
++ulong archdataround(void);
++int archblobok(uvlong pa, uvlong len);
++int archentryok(uvlong entry);
++int archelfmachine(void);
++void archcacheclean(uvlong pa, uvlong len);
++void archcachesync(void);
++char *archcheck(void);
++void archjump(void *entry, void *bootinfo);
+ 
+-int pxeinit(void **pf);
+-int isoinit(void **pf);
+ int fsinit(void **pf);
+ 
+ void* (*open)(char *name);
+@@ -17,7 +41,17 @@ void (*close)(void *f);
+ void (*stop)(void);
+ 
+ int readn(void *f, void *data, int len);
+-void unload(void);
++int bootmapinit(void);
++int bootexit(void);
++void *bootinfofinish(void);
++int conflen(void);
++int efialloc(uvlong pa, uvlong len);
++void efifree(uvlong pa, uvlong len);
++void fbmark(int stage);
++
++extern char *confaddr;
++extern char *logbuf;
++extern int logcap, logused;
+ 
+ int getc(void);
+ void putc(int c);
+@@ -29,14 +63,23 @@ int strlen(char *s);
+ char *strchr(char *s, int c);
+ char *strrchr(char *s, int c);
+ void print(char *s);
++void *linkfix(void*);
+ 
+ char *configure(void *f, char *path);
+ char *bootkern(void *f);
+ char *findconf(char*);
+ 
+ char *hexfmt(char *s, int i, uvlong a);
++void tracehex(char *label, uvlong value);
+ char *decfmt(char *s, int i, ulong a);
+ 
++#ifdef PLAN2001_EFI_GCC
++uintptr eficall_n(void *proc, int n, ...);
++#define EFI_NARG(...) EFI_NARG_(__VA_ARGS__, 12,11,10,9,8,7,6,5,4,3,2,1,0)
++#define EFI_NARG_(...) EFI_NARG__(__VA_ARGS__)
++#define EFI_NARG__(_1,_2,_3,_4,_5,_6,_7,_8,_9,_10,_11,_12,N,...) N
++#define eficall(proc, ...) eficall_n((proc), EFI_NARG(__VA_ARGS__), __VA_ARGS__)
++#else
+ uintptr eficall(void *proc, ...);
+-void eficonfig(char **cfg);
+-void memconf(char**);
++#endif
++void eficonfig(void);
+diff --git a/sys/src/boot/efi/fs.c b/sys/src/boot/efi/fs.c
+index a6caf1b518effe8cb9d9d9b9c2a3c80043f3bf55..ee36751cc2b71cc194d43364086f4eb2468d70ab 100644
+--- a/sys/src/boot/efi/fs.c
++++ b/sys/src/boot/efi/fs.c
+@@ -72,12 +72,54 @@ fsopen(char *name)
+ 	return fp;
+ }
+ 
++/*
++ * 4096 bytes/call (the stock upstream value) makes reading the kernel
++ * (several MB) thousands of synchronous EFI File.Read calls; each one costs
++ * real wall-clock time on slower real firmware. 64 KiB cuts that by 16x
++ * without changing the read()/readn() interface at all - Read() already
++ * returns however much it actually read in *size, short or not.
++ */
++/*
++ * The directory the loader was read from ("/EFI/plan2001"), from its
++ * LoadedImage's device path: the file path nodes (type 4, subtype 4,
++ * UCS-2; firmware may split the path into several), up to the last
++ * separator.  "" if there is none: then only the volume's root.
++ */
++static void
++imagedir(EFI_LOADED_IMAGE_PROTOCOL *image, char *dir, int ndir)
++{
++	uchar *p;
++	CHAR16 *w;
++	int len, i, n, slash;
++
++	n = 0;
++	p = image->FilePath;
++	for(i = 0; p != nil && i < 64; i++){
++		len = p[2] | p[3]<<8;
++		if(p[0] == 0x7f || len < 4)
++			break;
++		if(p[0] == 4 && p[1] == 4){
++			if(n > 0 && dir[n-1] != '/' && n < ndir-1)
++				dir[n++] = '/';
++			for(w = (CHAR16*)(p+4); (uchar*)w < p+len && *w != 0 && n < ndir-1; w++)
++				dir[n++] = *w == '\\' ? '/' : *w;
++		}
++		p += len;
++	}
++	dir[n] = 0;
++	slash = -1;
++	for(i = 0; i < n; i++)
++		if(dir[i] == '/')
++			slash = i;
++	dir[slash > 0 ? slash : 0] = 0;
++}
++
+ static int
+ fsread(void *f, void *data, int len)
+ {
+ 	UINTN size;
+ 
+-	size = len > 4096 ? 4096 : len;
++	size = len > 64*1024 ? 64*1024 : len;
+ 	if(eficall(((EFI_FILE_PROTOCOL*)f)->Read, f, &size, data))
+ 		return 0;
+ 	return (int)size;
+@@ -99,6 +141,7 @@ fsinit(void **pf)
+ 	void *f;
+ 	UINTN Count;
+ 	int i;
++	char path[MAXPATH];
+ 
+ 	image = nil;
+ 
+@@ -113,7 +156,19 @@ fsinit(void **pf)
+ 		eficall(fs->OpenVolume, fs, &root) == 0){
+ 
+ 		fsroot = root;
+-		f = fsopen("/plan9.ini");
++		/*
++		 * Plan2001: plan9.ini by the loader first, so that it can
++		 * live in a directory of another system's ESP
++		 * (\EFI\plan2001\, chainloaded by GRUB), then at the root
++		 */
++		imagedir(image, path, sizeof path - 12);
++		f = nil;
++		if(path[0] != 0){
++			memmove(path+strlen(path), "/plan9.ini", 11);
++			f = fsopen(path);
++		}
++		if(f == nil)
++			f = fsopen("/plan9.ini");
+ 		if(f != nil){
+ 			if(pf != nil)
+ 				*pf = f;
+@@ -153,6 +208,17 @@ fsinit(void **pf)
+ 				fsclose(f);
+ 			break;
+ 		}
++		/*
++		 * This volume has no plan9.ini: undo the fsroot assignment
++		 * above before trying the next one. Without this, fsroot
++		 * stays set to whatever volume was tried last even when
++		 * none of them had plan9.ini, and the "if(fsroot == nil)"
++		 * check just below never fires - fsinit() then reports
++		 * success with *pf never actually set. Confirmed reachable:
++		 * booting from an El Torito ISO9660 medium where no scanned
++		 * SFS volume has /plan9.ini at its root.
++		 */
++		fsroot = nil;
+ 	}
+ 	if(fsroot == nil)
+ 		return -1;
+diff --git a/sys/src/boot/efi/mem.h b/sys/src/boot/efi/mem.h
+index 18819590dad4edc0d915bc1d3de35f72e1758220..5409aad847d25641ab5a5dbea6c468467d0f781e 100644
+--- a/sys/src/boot/efi/mem.h
++++ b/sys/src/boot/efi/mem.h
+@@ -14,9 +14,12 @@
+ #define	PGROUND(s)	(((s)+(BY2PG-1))&~(BY2PG-1))
+ 
+ /*
+- * Fundamental addresses
++ * Physical range the kernel entry (_efi64 in sys/src/9/pc64/l.s) clears for
++ * its boot page tables and the boot processor's Mach: CPU0PML4 to CPU0END in
++ * sys/src/9/pc64/mem.h, minus KZERO.  Keep in sync.
+  */
+-#define CONFADDR	0x1200		/* info passed from boot loader */
++#define KBOOTLO		0x13000
++#define KBOOTHI		0x1C000
+ #define BIOSXCHG	0x6000		/* To exchange data with the BIOS */
+ 
+ #define SELGDT	(0<<3)	/* selector is in gdt */
+diff --git a/sys/src/boot/efi/mkfile b/sys/src/boot/efi/mkfile
+index e7c2230c02b98d6c717b1f7e81444ee1935834dc..06ed47d2ce48f1d60f80b0b6f9de5e372be6fcee 100644
+--- a/sys/src/boot/efi/mkfile
++++ b/sys/src/boot/efi/mkfile
+@@ -1,91 +1,39 @@
+-TARG=bootia32.efi bootx64.efi bootaa64.efi efiboot.fat
+-HFILES=fns.h mem.h
++TARG=bootx64.efi bootaa64.efi
++HFILES=fns.h mem.h image.h arm64layout.h
+ IMAGEBASE=0x8000
+ CFLAGS=-FTVw
+ PEFLAGS=$CFLAGS '-DIMAGEBASE='$IMAGEBASE
+ 
++# The loader boots only from the UEFI Simple File System volume it was
++# itself launched from (fs.c:fsinit()): 9front's PXE and ISO9660 sources,
++# and its 32-bit (ia32) loader, are not Plan2001's.
+ all:V: $TARG
+ 
+-install:V: $TARG
+-	cp bootia32.efi bootx64.efi efiboot.fat /386
+-	cp bootaa64.efi /arm64
+-
+-%.8:	%.s
+-	8a $PEFLAGS $stem.s
+-%.8:	%.c
+-	8c $CFLAGS $stem.c
+-bootia32.efi:	ia32.8 efi.8 fs.8 pxe.8 iso.8 sub.8
+-	8l -l -s -R1 -T0x8200 -o bootia32.out $prereq
+-	aux/aout2efi -Z$IMAGEBASE -o $target bootia32.out
+-%.8:	$HFILES
+-
++# inst/bootsetup kopioi /$cputype/*.efi ESP:lle tai 9fatille
++install:V: bootx64.efi
++	cp bootx64.efi /amd64
+ 
+ %.6:	%.s
+ 	6a $PEFLAGS $stem.s
+ %.6:	%.c
+ 	6c $CFLAGS $stem.c
+-bootx64.efi:	x64.6 efi.6 fs.6 pxe.6 iso.6 sub.6
++bootx64.efi:	x64.6 efi.6 fs.6 sub.6 archx64.6
+ 	6l -l -s -R1 -T0x8200 -o bootx64.out $prereq
+ 	aux/aout2efi -Z$IMAGEBASE -o $target bootx64.out
+ %.6:	$HFILES
+ 
+-
+ %.7:	%.s
+ 	7a $PEFLAGS $stem.s
+ %.7:	%.c
+ 	7c $CFLAGS $stem.c
+-bootaa64.efi:	aa64.7 efi.7 fs.7 pxe.7 iso.7 sub.7
++# bootaa64.efi: the same common loader, its ARM64 side in archaa64.c
++bootaa64.efi:	aa64.7 efi.7 fs.7 sub.7 archaa64.7 arm64layout.7 cacheaa64.7
+ 	7l -l -s -R1 -T0x8200 -o bootaa64.out $prereq
+ 	aux/aout2efi -Z$IMAGEBASE -o $target bootaa64.out
+ %.7:	$HFILES
+ 
+-
+-efiboot.fat:D:	bootia32.efi bootx64.efi bootaa64.efi
+-	s = $target.$pid
+-	rm -f $target
+-	dd -if /dev/zero -of $target -bs 1024 -count 1024
+-	disk/format -xd -t hard $target
+-	dossrv -f $target $s
+-	mount -c /srv/$s /n/esp
+-	mkdir /n/esp/efi
+-	mkdir /n/esp/efi/boot
+-	cp bootia32.efi /n/esp/efi/boot
+-	cp bootx64.efi /n/esp/efi/boot
+-	cp bootaa64.efi /n/esp/efi/boot
+-	unmount /n/esp
+-	rm /srv/$s
+-
+-
+-test.iso:D:	efiboot.fat
+-	rm -fr tmp
+-	mkdir tmp
+-	mkdir tmp/cfg
+-	mkdir tmp/386
+-	mkdir tmp/amd64
+-	cp efiboot.fat tmp/386
+-	cp /386/9bootiso tmp/386
+-	cp /sys/src/9/pc64/9pc64 tmp/amd64
+-	echo 'bootfile=/amd64/9pc64' >tmp/cfg/plan9.ini
+-	disk/mk9660 -B 386/9bootiso -E 386/efiboot.fat -p <{echo +} -s tmp $target
+-	rm -r tmp
+-
+-test.fat:D:	bootia32.efi bootx64.efi bootaa64.efi
+-	s = $target.$pid
+-	rm -f $target
+-	dd -if /dev/zero -of $target -bs 65536 -count 128
+-	disk/format -xd -t hard $target
+-	dossrv -f $target $s
+-	mount -c /srv/$s /n/esp
+-	mkdir /n/esp/efi
+-	mkdir /n/esp/efi/boot
+-	cp bootia32.efi /n/esp/efi/boot
+-	cp bootx64.efi /n/esp/efi/boot
+-	cp bootaa64.efi /n/esp/efi/boot
+-	cp /386/9pc /n/esp
+-	echo 'bootfile=9pc' >/n/esp/plan9.ini
+-	unmount /n/esp
+-	rm /srv/$s
+-
+-
+ clean:V:
+-	rm -f *.[678] *.out $TARG test.* 
++	rm -f *.[678] *.out $TARG
++
++cacheaa64.7: ../../9/arm64/cache.v8.s
++	7a -I../../9/arm64 -o $target ../../9/arm64/cache.v8.s
+diff --git a/sys/src/boot/efi/sub.c b/sys/src/boot/efi/sub.c
+index e441ca4910cc7e7e31d26cef450357a6dfd20285..7427108173f0c6e702a235c278f83a923ca15e8b 100644
+--- a/sys/src/boot/efi/sub.c
++++ b/sys/src/boot/efi/sub.c
+@@ -3,12 +3,43 @@
+ #include "fns.h"
+ #include "mem.h"
+ 
++#define ROUNDUP(x, n)	(((x) + (n)-1) & ~((uintptr)(n)-1))
++
+ char hex[] = "0123456789abcdef";
+ 
++void
++tracehex(char *label, uvlong value)
++{
++	char buf[96], *p;
++	int n;
++
++	label = linkfix(label);
++	p = buf;
++	n = strlen(label);
++	memmove(p, label, n);
++	p += n;
++	p = hexfmt(p, 0, value);
++	*p++ = '\n';
++	*p = '\0';
++	print(buf);
++}
++
++/*
++ * Capture buffer for print()'s own text: the BootInfo blob's log section,
++ * set up by efimain() (efi.c) before anything is printed.  Text past
++ * logcap is not captured, only shown.
++ */
++char *logbuf;
++int logcap;
++int logused;
++
+ void
+ print(char *s)
+ {
++	s = linkfix(s);
+ 	while(*s != 0){
++		if(logbuf != nil && logused < logcap)
++			logbuf[logused++] = *s;
+ 		if(*s == '\n')
+ 			putc('\r');
+ 		putc(*s++);
+@@ -96,17 +127,28 @@ memset(void *dst, int v, int n)
+ 	}
+ }
+ 
++/*
++ * Reads one line into buf, at most max bytes including the terminating nul.
++ * Returns the line length, 0 on eof/no more input, -1 if the line does not
++ * fit (nothing is written past buf+max in that case), and -2 if eof was
++ * reached after a nonempty line that did not end in LF.  A plan9.ini file
++ * must end in LF; a partial final line is not silently accepted.  max<=0
++ * always returns -1 without touching *buf.
++ */
+ static int
+-readline(void *f, char *buf)
++readline(void *f, char *buf, int max)
+ {
+ 	static char white[] = "\t ";
+-	char *p;
++	char *p, *e;
+ 
++	e = buf + max - 1;	/* leave room for the nul */
+ 	p = buf;
+ 	do{
+ 		if(f == nil)
+ 			putc('>');
+ 		for(;;){
++			if(p >= e)
++				return -1;
+ 			if(f == nil){
+ 				while((*p = getc()) == 0)
+ 					;
+@@ -122,7 +164,7 @@ readline(void *f, char *buf)
+ 					continue;
+ 				}
+ 			}else if(read(f, p, 1) <= 0)
+-				return 0;
++				return p == buf? 0: -2;
+ 			if(strchr("\r\n", *p) != nil)
+ 				break;
+ 			if(p == buf && strchr(white, *p) != nil)
+@@ -149,20 +191,33 @@ timeout(int ms)
+ 	return 0;
+ }
+ 
+-#define BOOTLINE	confaddr
+-#define BOOTLINELEN	64
+-#define BOOTARGS	(confaddr+BOOTLINELEN)
+-#define	BOOTARGSLEN	(4096-0x200-BOOTLINELEN)
++/* the plan9.ini text: the BootInfo blob's config section (efi.c) */
++#define CONF	confaddr
++#define	CONFLEN	(8*1024)	/* efi.c's ConfCap */
++#define	CONFEND	(CONF+CONFLEN)
+ 
+-extern char *confaddr;
+ static char *confend;
+ 
++/* bootblobmove() moved CONF: n is conflen() before the move */
++void
++confrelocate(int n)
++{
++	confend = CONF + n - 1;
++}
++
++/* bytes of plan9.ini text in CONF, with its terminating NUL */
++int
++conflen(void)
++{
++	return confend - CONF + 1;
++}
++
+ char*
+ findconf(char *s)
+ {
+ 	char *p, *e;
+ 	int n = strlen(s);
+-	for(p = BOOTARGS; p < confend; p = e+1){
++	for(p = CONF; p < confend; p = e+1){
+ 		for(e = p; e < confend && *e != '\n'; e++){
+ 			if(*e == '\0')
+ 				return nil;
+@@ -173,8 +228,9 @@ findconf(char *s)
+ 	return nil;
+ }
+ 
++/* buf is max bytes; too long a value is treated as not found, not truncated */
+ static char*
+-getconf(char *s, char *buf)
++getconf(char *s, char *buf, int max)
+ {
+ 	char *p, *e;
+ 
+@@ -183,6 +239,8 @@ getconf(char *s, char *buf)
+ 	p += strlen(s);
+ 	for(e = p; *e != '\n'; e++)
+ 		;
++	if(e - p >= max)
++		return nil;
+ 	memmove(buf, p, e - p);
+ 	buf[e - p] = '\0';
+ 	return buf;
+@@ -214,16 +272,33 @@ configure(void *f, char *path)
+ 	if(once){
+ 		once = 0;
+ Clear:
+-		memset(BOOTLINE, 0, BOOTLINELEN);
+-
+-		confend = BOOTARGS;
+-		memset(confend, 0, BOOTARGSLEN);
+-		eficonfig(&confend);
++		print("[P2 L12] clear configuration and collect UEFI data\n");
++		confend = CONF;
++		memset(confend, 0, CONFLEN);
++		eficonfig();
+ 	}
+ 	nowait = 1;
+ 	inblock = 0;
+ Loop:
+-	while(readline(f, line = confend+1) > 0){
++	for(;;){
++		line = confend+1;
++		n = readline(f, line, CONFEND - line);
++		if(n == 0)
++			break;
++		if(n == -2){
++			/*
++			 * The format requires a final LF.  Stop here rather than
++			 * silently dropping the last setting and booting with a
++			 * different configuration (for example the default CPU count).
++			 */
++			print("plan9.ini: missing final newline\n");
++			for(;;)
++				;
++		}
++		if(n < 0){
++			print("plan9.ini: line too long, ignoring the rest\n");
++			break;
++		}
+ 		if(*line == 0 || strchr("#;=", *line) != nil)
+ 			continue;
+ 		if(*line == '['){
+@@ -239,7 +314,7 @@ Loop:
+ 			continue;
+ 		}
+ 		if(memcmp("show", line, 5) == 0){
+-			print(BOOTARGS);
++			print(CONF);
+ 			continue;
+ 		}
+ 		if(memcmp("clear", line, 5) == 0){
+@@ -262,9 +337,10 @@ Loop:
+ 		*confend = 0;
+ 		print(s);
+ 	}
+-	kern = getconf("bootfile=", path);
++	kern = getconf("bootfile=", path, MAXPATH);
+ 
+ 	if(f != nil){
++		print("[P2 L12] plan9.ini read complete\n");
+ 		close(f);
+ 		f = nil;
+ 
+@@ -337,58 +413,386 @@ beswall(uvlong l)
+ 	return ((uvlong)p[0]<<56) | ((uvlong)p[1]<<48) | ((uvlong)p[2]<<40) | ((uvlong)p[3]<<32) | ((uvlong)p[4]<<24) | ((uvlong)p[5]<<16) | ((uvlong)p[6]<<8) | (uvlong)p[7];
+ }
+ 
++
++/*
++ * Restricted ELF64 native kernel loader.  Only ET_EXEC, little-endian, AMD64 or
++ * AArch64 program-header images are accepted; ET_DYN/relocatable images are
++ * rejected rather than guessed at.  PT_LOAD data is written to p_paddr and
++ * BSS is zeroed by the loader after platform and memory preflight.
++ */
++#ifndef KZERO
++#define KZERO 0xffffffff80000000ull	/* AMD64 kernel half; a.out path unchanged */
++#endif
++
++enum {
++	ElfMagic0 = 0x7f,
++	ElfClass64 = 2,
++	ElfData2LSB = 1,
++	ElfTypeExec = 2,
++	ElfMachineX86_64 = 62,
++	ElfMachineAArch64 = 183,
++	ElfPTLoad = 1,
++	ElfPFX = 1,
++	ElfMaxPh = 16,
++};
++
++/*
++ * ELF e_machine tulee ISA:n puolelta (archelfmachine(): archx64.c,
++ * archaa64.c): 9frontin kääntäjien esikääntäjässä ei ole #if:iä.
++ */
++
++typedef struct Elf64Ehdr Elf64Ehdr;
++typedef struct Elf64Phdr Elf64Phdr;
++struct Elf64Ehdr {
++	uchar	ident[16];
++	u16int	type;
++	u16int	machine;
++	u32int	version;
++	u64int	entry;
++	u64int	phoff;
++	u64int	shoff;
++	u32int	flags;
++	u16int	ehsize;
++	u16int	phentsize;
++	u16int	phnum;
++	u16int	shentsize;
++	u16int	shnum;
++	u16int	shstrndx;
++};
++struct Elf64Phdr {
++	u32int	type;
++	u32int	flags;
++	u64int	offset;
++	u64int	vaddr;
++	u64int	paddr;
++	u64int	filesz;
++	u64int	memsz;
++	u64int	align;
++};
++
++static int
++skipn(void *f, uvlong n)
++{
++	uchar buf[128];
++	int k;
++
++	while(n > 0){
++		k = n > sizeof buf? sizeof buf: n;
++		if(readn(f, buf, k) != k)
++			return -1;
++		n -= k;
++	}
++	return 0;
++}
++
++static char*
++bootelf(void *f, uchar *magic)
++{
++	Elf64Ehdr eh;
++	Elf64Phdr ph[ElfMaxPh];
++	BootImage im;
++	uvlong cur, entry;
++	uvlong lpa[ElfMaxPh], lsz[ElfMaxPh];
++	uchar *d;
++	int i, j, k, n, nload, found;
++	char *errmsg, *why;
++
++	errmsg = "bad ELF kernel";
++	memmove(&eh, magic, 4);
++	if(readn(f, (uchar*)&eh+4, sizeof eh - 4) != sizeof eh - 4)
++		return "short ELF header";
++	if(eh.ident[0] != ElfMagic0 || eh.ident[1] != 'E' ||
++	   eh.ident[2] != 'L' || eh.ident[3] != 'F')
++		return "bad ELF magic";
++	if(eh.ident[4] != ElfClass64 || eh.ident[5] != ElfData2LSB)
++		return "unsupported ELF class/endianness";
++	if(eh.type != ElfTypeExec || eh.machine != archelfmachine())
++		return "unsupported ELF type/machine";
++	if(eh.version != 1 || eh.ehsize < sizeof eh)
++		return "unsupported ELF version/header size";
++	if(eh.phentsize != sizeof(Elf64Phdr) || eh.phnum == 0 ||
++	   eh.phnum > ElfMaxPh)
++		return "unsupported ELF program headers";
++	if(eh.phoff < sizeof eh || eh.phoff > ~(uvlong)0 - eh.phnum*sizeof ph[0])
++		return "bad ELF program-header offset";
++	if(skipn(f, eh.phoff - sizeof eh) != 0)
++		return "short ELF program headers";
++	if(readn(f, ph, eh.phnum * sizeof ph[0]) != eh.phnum * sizeof ph[0])
++		return "short ELF program headers";
++	cur = eh.phoff + eh.phnum * sizeof ph[0];
++
++	/* sama sisääntulotilan tarkistus kuin a.out-polulla (bootkern()) */
++	if((why = archcheck()) != nil)
++		return why;
++
++	/* Preflight the complete image before claiming or writing any segment. */
++	memset(&im, 0, sizeof im);
++	im.format = ImageElf;
++	im.entry = eh.entry;
++	found = 0;
++	for(i = 0; i < eh.phnum; i++){
++		if(ph[i].type != ElfPTLoad)
++			continue;
++		if(ph[i].memsz == 0 || ph[i].filesz > ph[i].memsz || ph[i].paddr == 0 ||
++		   ph[i].paddr > ~(uvlong)0 - ph[i].memsz ||
++		   ph[i].vaddr > ~(uvlong)0 - ph[i].memsz ||
++		   ph[i].filesz > 0x7fffffff || ph[i].memsz > 0x7fffffff)
++			return "bad ELF load segment size/address";
++		if(ph[i].align != 0 && ((ph[i].align & (ph[i].align-1)) != 0 ||
++		   (ph[i].offset & (ph[i].align-1)) != (ph[i].vaddr & (ph[i].align-1))))
++			return "bad ELF segment alignment";
++		if(ph[i].offset < cur || ph[i].offset > ~(uvlong)0 - ph[i].filesz)
++			return "out-of-order/overflowing ELF segment";
++		for(j = 0; j < i; j++)
++			if(ph[j].type == ElfPTLoad &&
++			   ph[i].paddr < ph[j].paddr + ph[j].memsz &&
++			   ph[j].paddr < ph[i].paddr + ph[i].memsz)
++				return "overlapping ELF segments";
++		k = im.nseg++;
++		im.seg[k].pa = ph[i].paddr;
++		im.seg[k].va = ph[i].vaddr;
++		im.seg[k].filesz = ph[i].filesz;
++		im.seg[k].memsz = ph[i].memsz;
++		im.seg[k].flags = ph[i].flags;
++		if((ph[i].flags & ElfPFX) != 0 &&
++		   eh.entry >= ph[i].vaddr && eh.entry < ph[i].vaddr + ph[i].memsz)
++			found = 1;
++		cur = ph[i].offset + ph[i].filesz;
++	}
++	if(im.nseg == 0)
++		return "ELF kernel has no loadable segments";
++	if(!found || !archentryok(eh.entry))
++		return "ELF entry not in executable segment/kernel map";
++	/* the ISA's platform contract and the firmware's memory map (archaa64.c) */
++	if((why = archimage(&im)) != nil){
++		archrelease();
++		return why;
++	}
++	entry = im.entrypa;
++
++	cur = eh.phoff + eh.phnum * sizeof ph[0];
++	nload = 0;
++	k = 0;
++	for(i = 0; i < eh.phnum; i++){
++		if(ph[i].type != ElfPTLoad)
++			continue;
++		if(efialloc(ph[i].paddr, im.seg[k].allocsz) != 0){
++			errmsg = "cannot claim ELF segment memory";
++			goto bad;
++		}
++		lpa[nload] = ph[i].paddr;
++		lsz[nload++] = im.seg[k++].allocsz;
++		if(skipn(f, ph[i].offset - cur) != 0){
++			errmsg = "short ELF file before segment";
++			goto bad;
++		}
++		d = (uchar*)(uintptr)ph[i].paddr;
++		if(readn(f, d, ph[i].filesz) != ph[i].filesz){
++			errmsg = "short ELF segment data";
++			goto bad;
++		}
++		if(ph[i].memsz > ph[i].filesz)
++			memset(d + ph[i].filesz, 0, ph[i].memsz - ph[i].filesz);
++		cur = ph[i].offset + ph[i].filesz;
++	}
++	/*
++	 * The image was written through the firmware's caches.  Make it
++	 * visible to the kernel entry, which runs with the MMU and caches
++	 * off (ARM64; a no-op on AMD64), including the BSS the loader just
++	 * zeroed: a stale dirty line must not reappear as a page table.
++	 */
++	for(i = 0; i < nload; i++)
++		archcacheclean(lpa[i], lsz[i]);
++	archcachesync();
++
++	close(f);
++	print("[P2 L22] ELF kernel file closed\n");
++	print("[P2 L23] stop boot device\n");
++	if(stop) (*stop)();
++	fbmark(1);
++	n = bootexit();
++	if(n != 0){
++		if(n == -1)
++			print("[P2 L25] FATAL: GetMemoryMap failed\n");
++		else if(n == -2)
++			print("[P2 L25] FATAL: ExitBootServices failed after retries\n");
++		else
++			print("[P2 L25] FATAL: memory-map buffer missing\n");
++		for(;;)
++			;
++	}
++	fbmark(2);
++	fbmark(3);
++	archjump((void*)(uintptr)entry, bootinfofinish());
++	return errmsg;	/* not reached */
++
++bad:
++	for(i = 0; i < nload; i++)
++		efifree(lpa[i], lsz[i]);
++	archrelease();
++	return errmsg;
++}
++
+ char*
+ bootkern(void *f)
+ {
+ 	uchar *e, *d, *t;
+-	ulong n;
++	uvlong entry, textend, datapa, imglen;
++	BootImage im;
++	ulong n, ktext, elen, dround;
++	char *errmsg, *why;
+ 	Exec ex;
+ 
+-	if(readn(f, &ex, sizeof(ex)) != sizeof(ex))
++	/*
++	 * elen != 0 from the efialloc() below on marks the kernel's memory
++	 * range as claimed; every failure path from there on goes through
++	 * Error, which frees it again.  Without that a retry (efimain's
++	 * loop, eg after a transient read error) would find the same range
++	 * already allocated and fail immediately instead of trying again.
++	 */
++	e = nil;
++	elen = 0;
++	errmsg = "i/o error";
++	if((why = archinit()) != nil)
++		return why;
++
++	{
++		uchar magic[4];
++
++		if(readn(f, magic, sizeof magic) != sizeof magic)
++			return "bad header";
++		if(magic[0] == ElfMagic0 && magic[1] == 'E' &&
++		   magic[2] == 'L' && magic[3] == 'F')
++			return bootelf(f, magic);
++		memmove(&ex, magic, sizeof magic);
++	}
++	if(readn(f, (uchar*)&ex + 4, sizeof(ex) - 4) != sizeof(ex) - 4)
+ 		return "bad header";
++	print("[P2 L14] kernel header read\n");
+ 
+-	e = (uchar*)(beswal(ex.entry) & ~0xF0000000UL);
++	entry = beswal(ex.entry);
+ 	switch(beswal(ex.magic)){
+ 	case S_MAGIC:
+ 	case R_MAGIC:
+-		if(readn(f, &e, 8) != 8)
++		if(readn(f, &entry, 8) != 8)
+ 			goto Error;
+-		/* load low address */
+-		e = (uchar*)(beswall((uvlong)e) & 0x0FFFFFFFUL);
++		entry = beswall(entry);
+ 		break;
+ 	case I_MAGIC:
+ 		break;
+ 	default:
+ 		return "bad magic";
+ 	}
++	e = (uchar*)(uintptr)archentry(entry);	/* where the ISA's kernel goes, eg archx64.c */
++	tracehex("[P2 L15] kernel entry physical=0x", (uvlong)e);
++
++	/*
++	 * Firmware marks free memory no-execute; claim the kernel's range as
++	 * loader code so the firmware's page tables let it run.
++	 */
++	ktext = beswal(ex.text);
++	dround = archdataround();	/* where the ISA's linker starts data after text */
++	/* the image's extent without wrapping, then the platform's preflight */
++	if(ktext == 0 || (uvlong)e > ~(uvlong)0 - ktext - (dround-1))
++		return "overflowing kernel text";
++	textend = (uvlong)e + ktext;
++	datapa = (textend + dround-1) & ~((uvlong)dround-1);
++	if(datapa > ~(uvlong)0 - beswal(ex.data) - 4095)
++		return "overflowing kernel data";
++	imglen = PGROUND(datapa + beswal(ex.data));
++	if(imglen > ~(uvlong)0 - PGROUND((uvlong)beswal(ex.bss)))
++		return "overflowing kernel bss";
++	imglen += PGROUND((uvlong)beswal(ex.bss));
++	if(imglen < (uvlong)e || imglen - (uvlong)e > 0x7fffffff)
++		return "unsupported kernel image size";
++	elen = imglen - (uvlong)e;
++	memset(&im, 0, sizeof im);
++	im.format = ImageAout;
++	im.magic = beswal(ex.magic);
++	im.nseg = 1;
++	im.entry = entry;
++	im.seg[0].pa = (uvlong)e;
++	im.seg[0].va = entry;
++	im.seg[0].filesz = ktext;
++	im.seg[0].memsz = elen;
++	im.seg[0].flags = ImageExec;
++	if((why = archimage(&im)) != nil){
++		archrelease();
++		return why;
++	}
++
++	tracehex("[P2 L16] kernel text bytes=0x", ktext);
++	tracehex("[P2 L16] kernel data bytes=0x", beswal(ex.data));
++	tracehex("[P2 L16] kernel bss bytes=0x", beswal(ex.bss));
++	tracehex("[P2 L16] kernel allocation bytes=0x", elen);
++	if(efialloc((uvlong)e, elen) != 0){
++		elen = 0;
++		archrelease();
++		return "cannot claim the kernel's memory range";
++	}
++	print("[P2 L17] kernel memory claimed executable\n");
++	if((why = archcheck()) != nil){
++		errmsg = why;
++		goto Error;
++	}
++	print("[P2 L18] entry state checked\n");
+ 
+ 	t = e;
+ 	n = beswal(ex.text);
++	print("[P2 L19] load kernel text\n");
+ 	if(readn(f, t, n) != n)
+ 		goto Error;
+ 	t += n;
+-	d = (uchar*)PGROUND((uintptr)t);
++	d = (uchar*)ROUNDUP((uintptr)t, dround);
+ 	memset(t, 0, d - t);
+ 	n = beswal(ex.data);
++	print("[P2 L20] load kernel data\n");
+ 	if(readn(f, d, n) != n)
+ 		goto Error;
+ 	d += n;
+ 	t = (uchar*)PGROUND((uintptr)d);
+ 	t += PGROUND(beswal(ex.bss));
+ 	memset(d, 0, t - d);
++	print("[P2 L21] kernel loaded and bss cleared\n");
+ 
+ 	close(f);
++	print("[P2 L22] kernel file closed\n");
+ 
+ 	/* stop device */
++	print("[P2 L23] stop boot device\n");
+ 	if(stop) (*stop)();
++	print("[P2 L23] boot device stopped\n");
++
++	print("[P2 L24] framebuffer markers: top-left 1=EBS start 2=EBS done 3=jump, then the kernel's\n");
++	print("[P2 L24] boot\n");
++	fbmark(1);
++
++	/* the file is closed already, so there is nothing to return to */
++	n = bootexit();
++	if(n != 0){
++		if(n == -1)
++			print("[P2 L25] FATAL: GetMemoryMap failed\n");
++		else if(n == -2)
++			print("[P2 L25] FATAL: ExitBootServices failed after retries\n");
++		else
++			print("[P2 L25] FATAL: memory-map buffer missing\n");
++		for(;;)
++			;
++	}
++	fbmark(2);
+ 
+-	print("boot\n");
+-
+-	memconf(findconf("*e820=")?nil:&confend);
+-	unload();
+-
+-	jump(e, BOOTARGS);
++	/*
++	 * No print() from here on: ConOut is gone.  The kernel gets the
++	 * BootInfo blob where it is, its address in RDI (Plan2001 Boot ABI
++	 * v1, sys/include/bootinfo.h) - nothing is copied to any fixed
++	 * address.
++	 */
++	fbmark(3);
++	archjump(e, bootinfofinish());
+ 
+ Error:
+-	return "i/o error";
++	archrelease();
++	if(elen != 0)
++		efifree((uvlong)e, elen);
++	return errmsg;
+ }
+diff --git a/sys/src/boot/efi/x64.s b/sys/src/boot/efi/x64.s
+index f648c5a28e05e9505e69c62cd71fd366c2ed1fb6..3485b414a3ddfaae7c7c5e676897316961de3d9a 100644
+--- a/sys/src/boot/efi/x64.s
++++ b/sys/src/boot/efi/x64.s
+@@ -46,79 +46,39 @@ TEXT rebase(SB), 1, $-4
+ 
+ #include "mem.h"
+ 
+-TEXT jump(SB), 1, $-4
++/*
++ * Enter the kernel at its 64-bit entry (_efi64 in sys/src/9/pc64/l.s), in
++ * the mode we are in: long mode, firmware page tables.  bootkern has checked
++ * that this is safe.  Only the IDT is replaced, by an empty one, as the
++ * firmware's handlers are gone after ExitBootServices.  Plan2001 Boot ABI
++ * v1 (sys/include/bootinfo.h): RDI = BootInfo, RSI = 0, nothing else.
++ */
++TEXT jump64(SB), 1, $-4
++	MOVQ	bootinfo+8(FP), DI
++	XORL	SI, SI
+ 	CLI
+ 
+ 	/* load zero length idt */
+ 	MOVL	$_idtptr64p<>(SB), AX
+ 	MOVL	(AX), IDTR
+ 
+-	/* load temporary gdt */
+-	MOVL	$_gdtptr64p<>(SB), AX
+-	MOVL	(AX), GDTR
+-
+-	/* load CS with 32bit code segment */
+-	PUSHQ	$SELECTOR(3, SELGDT, 0)
+-	PUSHQ	$_warp32<>(SB)
+-	RETFQ
+-
+-MODE $32
+-
+-TEXT	_warp32<>(SB), 1, $-4
+-
+-	/* load 32bit data segments */
+-	MOVL	$SELECTOR(2, SELGDT, 0), AX
+-	MOVW	AX, DS
+-	MOVW	AX, ES
+-	MOVW	AX, FS
+-	MOVW	AX, GS
+-	MOVW	AX, SS
+-
+-	/* turn off paging */
+-	MOVL	CR0, AX
+-	ANDL	$0x7fffffff, AX		/* ~(PG) */
+-	MOVL	AX, CR0
+-
+-	MOVL	$0, AX
+-	MOVL	AX, CR3
+-
+-	/* disable long mode */
+-	MOVL	$0xc0000080, CX		/* Extended Feature Enable */
+-	RDMSR
+-	ANDL	$0xfffffeff, AX		/* Long Mode Disable */
+-	WRMSR
+-
+-	/* diable pae */
+-	MOVL	CR4, AX
+-	ANDL	$0xffffff5f, AX		/* ~(PAE|PGE) */
+-	MOVL	AX, CR4
+-
+ 	JMP	*BP
+ 
+-TEXT _gdt<>(SB), 1, $-4
+-	/* null descriptor */
+-	LONG	$0
+-	LONG	$0
+-
+-	/* (KESEG) 64 bit long mode exec segment */
+-	LONG	$(0xFFFF)
+-	LONG	$(SEGL|SEGG|SEGP|(0xF<<16)|SEGPL(0)|SEGEXEC|SEGR)
+-
+-	/* 32 bit data segment descriptor for 4 gigabytes (PL 0) */
+-	LONG	$(0xFFFF)
+-	LONG	$(SEGG|SEGB|(0xF<<16)|SEGP|SEGPL(0)|SEGDATA|SEGW)
++TEXT getcr3(SB), 1, $-4
++	MOVQ	CR3, AX
++	RET
+ 
+-	/* 32 bit exec segment descriptor for 4 gigabytes (PL 0) */
+-	LONG	$(0xFFFF)
+-	LONG	$(SEGG|SEGD|(0xF<<16)|SEGP|SEGPL(0)|SEGEXEC|SEGR)
++TEXT getcr4(SB), 1, $-4
++	MOVQ	CR4, AX
++	RET
+ 
+-TEXT _gdtptr64p<>(SB), 1, $-4
+-	WORD	$(4*8-1)
+-	QUAD	$_gdt<>(SB)
++TEXT rdtsc(SB), 1, $-4
++	RDTSC
++	SHLQ	$32, DX
++	ORQ	DX, AX
++	RET
+ 
+ TEXT _idtptr64p<>(SB), 1, $-4
+ 	WORD	$0
+ 	QUAD	$0
+ 
+-GLOBL	confaddr(SB), $8
+-DATA	confaddr(SB)/8, $CONFADDR

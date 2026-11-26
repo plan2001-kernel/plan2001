@@ -1,7 +1,7 @@
 #!/bin/bash
 # 9front-11952:n oma Pi3/Pi4-levykuva (9front-11952.pi3.img) vertailuksi:
 # vaihe (a) julkaisun omilla binääreillä, ohi tämän puun käännöksen.
-# Sama julkaisu kuin tools/release.conf; SHA256 julkaisuilmoituksesta
+# Sama julkaisu kuin upstream/9front.lockin BOOT_NAME; SHA256 julkaisuilmoituksesta
 # (http://9front.org/releases/2026/08/02/0/).  Purettu kuva välimuistiin,
 # ei koskaan laitteelle.
 #   tools/rpi4/stock	tulostaa kuvan polun

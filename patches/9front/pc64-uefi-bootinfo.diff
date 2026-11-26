@@ -1,0 +1,399 @@
+diff --git a/sys/src/9/pc64/fns.h b/sys/src/9/pc64/fns.h
+index ae475df68b38f860cbe37ae789f63237f4955955..ef9c19773d6d1418af2b978e5955c4076acf5c61 100644
+--- a/sys/src/9/pc64/fns.h
++++ b/sys/src/9/pc64/fns.h
+@@ -1,4 +1,5 @@
+ #include "../port/portfns.h"
++#include <bootinfo.h>
+ 
+ Dirtab*	addarchfile(char*, int, long(*)(Chan*,void*,long,vlong), long(*)(Chan*,void*,long,vlong));
+ void	archinit(void);
+@@ -168,11 +169,38 @@ void	vmxshutdown(void);
+ void*	vmap(uvlong, vlong);
+ void	vunmap(void*, vlong);
+ void	wbinvd(void);
+-void	writeconf(void);
+ int	wrmsr(int, vlong);
+ int	xchgw(ushort*, int);
+ void	rdrandbuf(void*, ulong);
+ 
++/* port/bootinfo.c: UEFI-loaderin BootInfo v1 (sys/include/bootinfo.h) */
++extern BootInfo*	bootinfo;
++extern uchar*	bootblob;	/* blobi itse, sen osiot; bootinfo on otsikon kopio */
++extern uintptr	bootinfopa;	/* l.s (_efi64): RDI sisääntulossa */
++void	bootinfoinit(void);
++BootMem*	bootmem(int);
++int	bootmemclass(u32int);
++char*	bootconfig(void);
++uchar*	bootfdt(ulong*);
++void	bootinforandinit(void);
++void	bootinfoclock(void);
++enum { BootInfoArch = BootArchAmd64 };	/* blobin on oltava tehty tälle ISA:lle */
++enum { BootClassRAM, BootClassACPI, BootClassReserved };
++
++/* pc64/bootarch.c: port/bootinfo.c:n ja port/bootfb.c:n AMD64-puoli */
++void*	bootearlymap(uvlong, uvlong);
++void*	fbmap(uvlong, uvlong);
++int	bootinfoment(int, uvlong*, uvlong*, int*);
++void	bootinforeserve(void);
++extern int	(*bootmement)(int, uvlong*, uvlong*, int*);	/* pc/memory.c */
++
++/* port/bootfb.c: käynnistysvaiheiden merkit kehyspuskurissa */
++enum { BMMain, BMMem, BMDevs, BMUser, BMExec, BMPanic };
++void	bootfbinit(void);
++void	bootmark(int);
++int	bootmarkheight(void);
++char*	bootlogtext(int*);
++
+ #define	userureg(ur)	(((ur)->cs & 3) == 3)
+ #define	KADDR(a)	kaddr(a)
+ #define PADDR(a)	paddr((void*)(a))
+diff --git a/sys/src/9/pc64/l.s b/sys/src/9/pc64/l.s
+index 83650d793e0299aa53204f053d3ee744743f7d28..7572ba2dd429a516e3b3ccab1838193e8a5bc56b 100644
+--- a/sys/src/9/pc64/l.s
++++ b/sys/src/9/pc64/l.s
+@@ -1,5 +1,20 @@
+ #include "mem.h"
+ 
++MODE $64
++
++/*
++ * UEFI-sisääntulo (Plan2001 BootInfo v1): tekstin ensimmäinen tavu, sillä
++ * loader (sys/src/boot/efi/sub.c bootkern()) lataa a.out-tekstin
++ * sisääntulo-osoitteeseen.  Pelkkä hyppy varsinaiseen koodiin
++ * _efi64main<> fyysisessä osoitteessa (firmware kartoittaa muistin
++ * identtisesti): 5 + 2 + 1 tavua, jotta alla olevan multiboot-otsakkeen
++ * 4 tavun tasaus säilyy (tools/native-amd64/build tarkistaa).
++ */
++TEXT _efi64(SB), 1, $-4
++	MOVL	$_efi64main<>-KZERO(SB), AX
++	BYTE	$0xFF; BYTE $0xE0	/* JMP* AX: tavuina, ettei 6l poista täytettä */
++	BYTE	$0x90	/* align */
++
+ MODE $32
+ 
+ #define DELAY		BYTE $0xEB; BYTE $0x00	/* JMP .+2 */
+@@ -234,6 +249,133 @@ _clearbss:
+ 
+ 	CALL	main(SB)
+ 
++/*
++ * UEFI-sisääntulo (Plan2001 BootInfo v1, sys/include/bootinfo.h): loader
++ * (sys/src/boot/efi/x64.s jump64) hyppää tähän 64-bittisessä tilassa
++ * firmwaren sivutauluilla, RDI = BootInfo-blobin fyysinen osoite,
++ * RSI = 0, keskeytykset pois ja IDT tyhjä, _efi64:n (tekstin alku,
++ * a.out-otsakkeen entry, mkfile: 6l -E_efi64) kautta.  Loader on tarkistanut
++ * (archx64.c archcheck()), että sivutus on 4-tasoinen eivätkä firmwaren
++ * sivutaulut ole alueella CPU0PML4..CPU0END, jonka tämä tyhjentää.
++ * Firmware kartoittaa fyysisen muistin identtisesti, joten tämä koodi
++ * ajetaan fyysisestä osoitteestaan, kunnes CR3 vaihtuu; sen jälkeen
++ * identtinen kartoitus kattaa vain ensimmäiset 2 MB, joissa tämä koodi on.
++ * Muuten sama kuin _warp64 ja _start64v yllä.
++ */
++TEXT _efi64main<>(SB), 1, $-4
++	CLI
++	CLD
++	MOVQ	DI, R13				/* BootInfo: talletetaan BSS:n nollauksen jälkeen */
++
++	MOVL	$_gdtptr64p<>-KZERO(SB), AX
++	MOVL	(AX), GDTR
++
++	MOVL	$SELECTOR(2, SELGDT, 0), AX
++	MOVW	AX, DS
++	MOVW	AX, ES
++	MOVW	AX, FS
++	MOVW	AX, GS
++	MOVW	AX, SS
++
++	/* CS = KESEG (64-bittinen koodi) kaukopaluulla */
++	MOVL	$SELECTOR(KESEG, SELGDT, 0), AX
++	PUSHQ	AX
++	MOVL	$_efi64pt<>-KZERO(SB), AX
++	PUSHQ	AX
++	RETFQ
++
++TEXT _efi64pt<>(SB), 1, $-4
++	/* tyhjennä Mach ja sivutaulut */
++	MOVL	$((CPU0END-CPU0PML4)>>2), CX
++	MOVL	$(CPU0PML4-KZERO), SI
++	MOVL	SI, DI
++	XORL	AX, AX
++	CLD
++	REP;	STOSL
++
++	MOVL	SI, AX				/* PML4 */
++	MOVL	AX, DX
++	ADDL	$(PTEACCESSED|PTEDIRTY|PTSZ|PTEWRITE|PTEVALID), DX	/* PDP at PML4 + PTSZ */
++	MOVL	DX, PML4O(0)(AX)		/* PML4E for double-map */
++	MOVL	DX, PML4O(KZERO)(AX)		/* PML4E for KZERO */
++
++	ADDL	$PTSZ, AX			/* PDP at PML4 + PTSZ */
++	ADDL	$PTSZ, DX			/* PD0 at PML4 + 2*PTSZ */
++	MOVL	DX, PDPO(0)(AX)			/* PDPE for double-map */
++	MOVL	DX, PDPO(KZERO)(AX)		/* PDPE for KZERO */
++
++	ADDL	$PTSZ, DX			/* PD1 */
++	MOVL	DX, PDPO(KZERO+GiB)(AX)
++
++	ADDL	$PTSZ, AX			/* PD0 at PML4 + 2*PTSZ */
++	MOVL	$(PTEACCESSED|PTEDIRTY|PTESIZE|PTEGLOBAL|PTEWRITE|PTEVALID), DX
++	MOVL	DX, PDO(0)(AX)			/* PDE for double-map */
++
++	/*
++	 * map from KZERO to end using 2MB pages; MemMin (memory.c) is in
++	 * BSS, so it is stored only after BSS is cleared (R12)
++	 */
++	ADDL	$PDO(KZERO), AX
++	MOVL	$end-KZERO(SB), CX
++	ADDL	$(PGLSZ(1)-1), CX
++	ANDL	$~(PGLSZ(1)-1), CX
++	MOVL	CX, R12
++	SHRL	$(1*PTSHIFT+PGSHIFT), CX
++efimemloop:
++	MOVL	DX, (AX)
++	ADDL	$PGLSZ(1), DX
++	ADDL	$8, AX
++	LOOP	efimemloop
++
++	MOVQ	SI, CR3				/* load the mmu */
++
++	MOVQ	CR4, AX
++	ANDL	$~0x00000010, AX			/* Page Size */
++	ORL	$0x000000A0, AX			/* Page Global, Phys. Address */
++	MOVQ	AX, CR4
++
++	MOVQ	CR0, DX
++	ANDL	$~0x6000000a, DX
++	ORL	$0x80010000, DX			/* Paging Enable, Write Protect */
++	MOVQ	DX, CR0
++
++	MOVQ	$_efi64v<>(SB), AX
++	JMP*	AX
++
++TEXT _efi64v<>(SB), 1, $-4
++	MOVQ	$_gdtptr64v<>(SB), AX
++	MOVL	(AX), GDTR
++
++	XORQ	AX, AX
++	MOVW	AX, DS				/* not used in long mode */
++	MOVW	AX, ES				/* not used in long mode */
++	MOVW	AX, FS
++	MOVW	AX, GS
++	MOVW	AX, SS				/* not used in long mode */
++
++	MOVW	AX, LDTR
++
++	MOVQ	$(CPU0MACH+MACHSIZE), SP
++	MOVQ	$(CPU0MACH), RMACH
++	MOVQ	AX, RUSER			/* up = 0; */
++
++	MOVQ	$edata(SB), DI
++	MOVQ	$end(SB), CX
++	SUBQ	DI, CX				/* end-edata bytes */
++	SHRQ	$2, CX				/* end-edata doublewords */
++
++	CLD
++	REP;	STOSL				/* clear BSS */
++
++	MOVQ	R13, bootinfopa(SB)		/* pc64/bootarch.c */
++	MOVL	R12, MemMin(SB)			/* see memory.c */
++
++	PUSHQ	AX				/* clear flags */
++	POPFQ
++
++	CALL	main(SB)
++	JMP	idle(SB)
++
+ /*
+  * Park a processor. Should never fall through a return from main to here,
+  * should only be called by application processors when shutting down.
+diff --git a/sys/src/9/pc64/main.c b/sys/src/9/pc64/main.c
+index 6504f7cd7e98e692e65a863e7d5d91ccce2546a3..5685df7f6f225354032b555d0869ef0c94ebb506 100644
+--- a/sys/src/9/pc64/main.c
++++ b/sys/src/9/pc64/main.c
+@@ -177,6 +177,13 @@ init0(void)
+ void
+ main(void)
+ {
++	bootmark(BMMain);
++	/*
++	 * BootInfo v1 (port/bootinfo.c) ennen kaikkea muuta: asetukset,
++	 * muistikartta ja ACPI tulevat UEFI-loaderin blobista.
++	 */
++	bootinfoinit();
++	bootmement = bootinfoment;	/* pc/memory.c e820scan() */
+ 	mach0init();
+ 	bootargsinit();
+ 	trapinit0();
+@@ -187,6 +194,7 @@ main(void)
+ 	print("\nPlan 9\n");
+ 	cpuidentify();
+ 	meminit0();
++	bootinforeserve();
+ 	archinit();
+ 	if(arch->clockinit)
+ 		arch->clockinit();
+@@ -198,6 +206,8 @@ main(void)
+ 	mathinit();
+ 	if(i8237alloc != nil)
+ 		i8237alloc();
++	bootfbinit();
++	bootmark(BMMem);
+ 	pcicfginit();
+ 	bootscreeninit();
+ 	printinit();
+@@ -205,16 +215,20 @@ main(void)
+ 	mmuinit();
+ 	if(arch->intrinit)
+ 		arch->intrinit();
++	bootinforandinit();	/* kaikkien suorittimien cpuidentify() jälkeen */
+ 	timersinit();
+ 	if(arch->clockenable)
+ 		arch->clockenable();
++	bootinfoclock();
+ 	procinit0();
+ 	initseg();
+ 	links();
+ 	chandevreset();
++	bootmark(BMDevs);
+ 	preallocpages();
+ 	pageinit();
+ 	userinit();
++	bootmark(BMUser);
+ 	schedinit();
+ }
+ 
+@@ -269,7 +283,16 @@ exit(int)
+ void
+ reboot(void *entry, void *code, ulong size)
+ {
+-	writeconf();
++	/*
++	 * rebootjump() ja rebootcode.s siirtävät uuteen ytimeen 32-bittisessä
++	 * suojatussa tilassa ja asetukset CONFADDR:ssa, mutta tämän ytimen
++	 * sisääntulo on _efi64 (l.s): 64-bittinen tila ja BootInfo RDI:ssä.
++	 * Uuden ytimen lataus (kexec) hylätään siksi ennen kuin laitteita tai
++	 * suorittimia ajetaan alas; tavallinen uudelleenkäynnistys
++	 * (rebootcmd ilman ydintä: exit()) toimii ennallaan.
++	 */
++	if(entry != nil || size != 0)
++		error("reboot: no 64-bit BootInfo handoff for a new kernel; use the UEFI loader");
+ 	vmxshutdown();
+ 
+ 	/*
+diff --git a/sys/src/9/pc64/mem.h b/sys/src/9/pc64/mem.h
+index 8b202d89a4821a0411711632f4cede36fad6c04f..3c88f438d1e07d723066c17cd7b861e10989504a 100644
+--- a/sys/src/9/pc64/mem.h
++++ b/sys/src/9/pc64/mem.h
+@@ -59,6 +59,13 @@
+ #define	KMAP		(0xfffffe0000000000ull)
+ #define KMAPSIZE	(2*MiB)
+ 
++/*
++ * BootInfo-blobin ikkuna (pc64/bootarch.c bootearlymap()): VMAP:n
++ * yläpuolella, KZERO:n alapuolella, samassa PML4-merkinnässä kuin KZERO.
++ */
++#define	BOOTMAPVA	(0xffffff8040000000ull)
++#define	BOOTMAPSIZE	(2*MiB)
++
+ /*
+  * Fundamental addresses
+  */
+diff --git a/sys/src/9/pc64/mkfile b/sys/src/9/pc64/mkfile
+index d61bef6cb06ba9e8d9a32e0e1ae5a1a9b87edd35..19e53b228b3eebb9296f294dd963c84b7ab9a647 100644
+--- a/sys/src/9/pc64/mkfile
++++ b/sys/src/9/pc64/mkfile
+@@ -17,6 +17,8 @@ PORT=\
+ 	alloc.$O\
+ 	allocb.$O\
+ 	auth.$O\
++	bootfb.$O\
++	bootinfo.$O\
+ 	cache.$O\
+ 	chan.$O\
+ 	dev.$O\
+@@ -56,6 +58,7 @@ OBJ=\
+ 	irq.$O\
+ 	trap.$O\
+ 	bootargs.$O\
++	bootarch.$O\
+ 	$CONF.root.$O\
+ 	$CONF.rootc.$O\
+ 	$DEVS\
+@@ -78,8 +81,9 @@ AUDIO=`{cd ../pc; echo devaudio.c audio*.c | sed 's/\.c/.'$O'/g'}
+ VGA=`{cd ../pc; echo devvga.c screen.c vga*.c | sed 's/\.c/.'$O'/g'}
+ SDEV=`{cd ../pc; echo sd*.c | sed 's/\.c/.'$O'/g'}
+ 
++# sisääntulo on UEFI-loaderin _efi64 (l.s, sys/include/bootinfo.h)
+ $p$CONF:	$OBJ $CONF.$O $LIB
+-	$LD -o $target -T$KTZERO -R4096 -l $prereq
++	$LD -o $target -T$KTZERO -R4096 -E_efi64 -l $prereq
+ 	size $target
+ 
+ install:V:	$p$CONF
+@@ -101,6 +105,11 @@ REPCH=`{echo $PCHEADERS | sed 's/\.h//g; s/ /|/g'}
+ ^($REPCH)\.h:R:	../pc/\1.h
+ 	cp $prereq .
+ 
++# BootInfo v1: asetukset (plan9.ini) tulevat blobista port/bootargs.c:n
++# kautta, ei pc/bootargs.c:n CONFADDR-alueelta
++bootargs.$O:	../port/bootargs.c
++	$CC $CFLAGS -I. -. ../port/bootargs.c
++
+ REPCC=`{../port/mkfilelist ../pc}
+ ^($REPCC)\.$O:R:	'../pc/\1.c'
+ 	$CC $CFLAGS -I. -. ../pc/$stem1.c
+@@ -124,17 +133,22 @@ archmp.$O archacpi.$O:		mp.h
+ 
+ sd53c8xx.$O:			../pc/sd53c8xx.i
+ ../pc/sd53c8xx.i:		../pc/sd53c8xx.n
+-	cd ../pc && mk sd53c8xx.i
++	aux/na $prereq >$target
+ 
+ etherm10g.$O:			../pc/etherm10g2k.i ../pc/etherm10g4k.i
+ ../pc/etherm10g%.i:		../pc/etherm10g%.fw
+-	cd ../pc && mk etherm10g$stem.i
++	{echo 'static char fw'^$stem^'[] = {'
++	 xd -1x $prereq |
++		sed -e 's/^[0-9a-f]+ //' -e '/^$/d' -e 's/ ([0-9a-f][0-9a-f])/0x\1,/g'
++	 echo '};'
++	} >$target
+ 
+ $SDEV pmmc.$O:			../port/sd.h
+ sdiahci.$O:			ahci.h
+ devaoe.$O sdaoe.$O:		../port/aoe.h
+ sdvirtio10.$O:			../port/virtio10.h
+ main.$O:			rebootcode.i
++bootarch.$O bootargs.$O bootinfo.$O bootfb.$O main.$O:	/sys/include/bootinfo.h
+ 
+ devusb.$O usbuhci.$O usbohci.$O usbehci.$O usbehcipc.$O usbxhci.$O: ../port/usb.h
+ usbehci.$O usbehcipc.$O:	usbehci.h
+diff --git a/sys/src/9/pc64/trap.c b/sys/src/9/pc64/trap.c
+index 25b4b4882300bb9cbe821e1e55188a35b670f729..b55dc08f7c3d4ed7659950de1f7ffd7e3bf1a82a 100644
+--- a/sys/src/9/pc64/trap.c
++++ b/sys/src/9/pc64/trap.c
+@@ -8,6 +8,7 @@
+ #include	"ureg.h"
+ #include	"../port/error.h"
+ #include	<trace.h>
++#include	"/sys/src/libc/9syscall/sys.h"	/* EXEC: bootmark(BMExec) */
+ 
+ extern int irqhandled(Ureg*, int);
+ extern void irqinit(void);
+@@ -247,6 +248,7 @@ _dumpstack(Ureg *ureg)
+ 	int x;
+ 	char *s;
+ 
++	bootmark(BMPanic);	/* punainen palkki käynnistyskehyspuskuriin */
+ 	if((s = getconf("*nodumpstack")) != nil && strcmp(s, "0") != 0){
+ 		iprint("dumpstack disabled\n");
+ 		return;
+@@ -424,6 +426,8 @@ syscall(Ureg* ureg)
+ 	scallnr = ureg->bp;	/* RARG */
+ 	if(dosyscall(scallnr, (Sargs*)(ureg->sp+BY2WD), &ureg->ax))
+ 		((void**)&ureg)[-1] = (void*)noteret;	/* loads RARG */
++	if(scallnr == EXEC && (vlong)ureg->ax != -1)
++		bootmark(BMExec);	/* ensimmäinen onnistunut exec on /boot/boot */
+ 	if((up->procctl || up->nnote) && donotify(ureg))
+ 		((void**)&ureg)[-1] = (void*)noteret;	/* loads RARG */
+ 	/* if we delayed sched because we held a lock, sched now */

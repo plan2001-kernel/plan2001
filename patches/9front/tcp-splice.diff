@@ -1,6 +1,8 @@
+diff --git a/sys/src/9/ip/tcp.c b/sys/src/9/ip/tcp.c
+index 71a0c6b97bf75f127b50ca2e4d99a89385deca44..c4eef5fc5f6a534c754e63fd7b22862f4c634765 100644
 --- a/sys/src/9/ip/tcp.c
 +++ b/sys/src/9/ip/tcp.c
-@@ -529,7 +529,8 @@
+@@ -529,7 +529,8 @@ tcpclose(Conv *c)
  		break;
  	case Established:
  		if(tcb->bypass != nil){
@@ -10,7 +12,7 @@
  			localclose(c, nil);
  			break;
  		}
-@@ -635,6 +636,10 @@
+@@ -635,6 +636,10 @@ tcpacktimer(void *arg)
  	Conv *s = (Conv*)arg;
  	Tcpctl *tcb = (Tcpctl*)s->ptcl;
  
@@ -21,7 +23,7 @@
  	qlock(s);
  	if(tcb->state != Closed && tcb->bypass == nil){
  		tcb->flags |= FORCE;
-@@ -1595,7 +1600,7 @@
+@@ -1595,7 +1600,7 @@ tcpbypass(void *arg, Block *b)
  
  	if(o == nil || ((Tcpctl*)o->ptcl)->bypass != c){
  		freeblist(b);

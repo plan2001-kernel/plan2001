@@ -343,10 +343,6 @@ import tarfile
 TAMA = os.path.dirname(os.path.abspath(__file__))
 JUURI = os.path.dirname(os.path.dirname(TAMA))
 
-# README.md / tools/release.conf: pinnattu 9front-11952 (purettu ISO)
-ISO_NIMI = "9front-11952.amd64.iso"
-ISO_SHA256 = "ee90b5e8a8d6b4ee8ad950322f91e338f698dae18c7f5e5800a650bbfa173fd9"
-
 # Codexin omistama yhteinen BootInfo v1 (README: Port boundaries)
 JAETUT = [
     "sys/include/bootinfo.h",
@@ -363,13 +359,17 @@ def oletus_ulos():
     return os.environ.get("PLAN2001_NATIVE_OUT", os.path.join(valimuisti(), "native-amd64"))
 
 
+def lukko():
+    arvot = {}
+    for rivi in open(os.path.join(JUURI, "upstream", "9front.lock")):
+        k, _, v = rivi.strip().partition("=")
+        if v and not k.startswith("#"):
+            arvot[k] = v
+    return arvot
+
+
 def release_sha():
-    conf = os.path.join(JUURI, "tools", "release.conf")
-    if os.path.exists(conf):
-        for rivi in open(conf):
-            if rivi.startswith("ISO_SHA256="):
-                return rivi.split("=", 1)[1].strip()
-    return ISO_SHA256
+    return lukko()["BOOT_ISO_SHA256"]
 
 
 def sha256(polku):
@@ -381,7 +381,8 @@ def sha256(polku):
 
 
 def etsi_iso(annettu=None):
-    """Pinnattu ISO välimuistista; SHA256:n on täsmättävä (README)."""
+    """Bootstrap-ISO välimuistista; SHA256:n on täsmättävä lukkoon."""
+    ISO_NIMI = lukko()["BOOT_ISO"]
     ehdokkaat = [annettu] if annettu else [
         os.path.join(os.environ.get("PLAN9WASM32_CACHE", os.path.expanduser("~/.cache/plan9-wasm32")), ISO_NIMI),
         os.path.join(valimuisti(), ISO_NIMI),
@@ -392,7 +393,7 @@ def etsi_iso(annettu=None):
             if sha256(p) != odotettu:
                 raise VirheVM("%s: SHA256 ei täsmää pinnattuun (%s)" % (p, odotettu))
             return os.path.realpath(p)
-    raise VirheVM("pinnattu %s puuttuu välimuistista (%s); tools/release hakee sen" %
+    raise VirheVM("pinnattu %s puuttuu välimuistista (%s); tools/upstream bootiso hakee sen" %
                   (ISO_NIMI, ", ".join(e for e in ehdokkaat if e)))
 
 

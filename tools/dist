@@ -64,32 +64,35 @@ sed "s|@VERSION@|$v|" "$w/sw.js" >"$fat/sw.js"
 out=$d/root
 rm -rf "$out"; mkdir -p "$out"
 git -C "$root" archive tree | tar -x -C "$out"
-# what 9front's ISO has that its git does not: the release's own files (lib/ndb, adm/timezone/local,
-# cfg, mail, sys/log, the manuals' indexes ...) - not the other machines' programs, libraries and
-# boot files, the source's made files, or its git
-rel=$("$here/release")
-git -C "$root" ls-tree -r --name-only refs/9front/front | python3 -I -c '
-import os, re, shutil, sys
-rel, tree, out, deny = sys.argv[1:]
-tracked = set(l.rstrip("\n") for l in sys.stdin)
-skip = re.compile(r"^((386|68000|68020|amd64|arm|arm64|mips|power|power64|sparc|sparc64|spim)/(?!include/|mkfile$)|sys/src/|acme/bin/amd64/|dist/|tmp/)")
-deny = [re.compile(l.strip()) for l in open(deny) if l.strip() and not l.startswith("#")]
-for dp, dn, fn in os.walk(rel):
-	dn.sort()
-	r = os.path.relpath(dp, rel)
-	r = "" if r == "." else r + "/"
-	if r and not os.path.isdir(os.path.join(tree, r)):
-		dn[:] = []
+# what 9front's dist root has that is not one of its source's files at that
+# path (sys/lib/dist/mkfile's binds: cfg, mail/lib, lib/ndb, adm/timezone and
+# usr from sys/lib/dist; distproto's empty logs) and the manuals' indexes
+# (sys/man/mkfile's indices: secindex), made from the tree as 9front's dist
+# build makes them
+python3 -I - "$tree" "$out" <<'PY'
+import os, shutil, sys
+tree, out = sys.argv[1:]
+dist = os.path.join(tree, "sys/lib/dist")
+for src, dst in (("cfg", "cfg"), ("mail/lib", "mail/lib"), ("ndb", "lib/ndb"), ("adm/timezone", "adm/timezone"), ("usr", "usr")):
+	if os.path.isdir(os.path.join(dist, src)):
+		shutil.copytree(os.path.join(dist, src), os.path.join(out, dst), dirs_exist_ok=True)
+stack = []
+for line in open(os.path.join(tree, "sys/lib/sysconfig/proto/distproto")):
+	if not line.strip() or line.lstrip().startswith("#"):
 		continue
-	if not fn and not dn and r and not skip.match(r):
-		os.makedirs(os.path.join(out, r), exist_ok=True)
-	for n in fn:
-		f = r + n
-		if f in tracked or skip.match(f) or not os.path.exists(os.path.join(tree, f)) or any(d.search("/" + f) for d in deny):
-			continue
-		os.makedirs(os.path.join(out, r), exist_ok=True)
-		shutil.copy2(os.path.join(rel, f), os.path.join(out, f))
-' "$rel" "$tree" "$out" "$here/dist.deny"
+	depth = len(line) - len(line.lstrip("\t"))
+	f = line.split()
+	del stack[depth:]
+	stack.append(f[0])
+	if len(f) >= 5 and f[4] == "/sys/lib/dist/empty":
+		p = os.path.join(out, *stack)
+		os.makedirs(os.path.dirname(p), exist_ok=True)
+		open(p, "a").close()
+PY
+for i in "$out"/sys/man/[0-9]; do
+	PATH=$PLAN9/bin:$PATH "$PLAN9/bin/rc" "$tree/sys/lib/man/secindex" "$i" >"$i/INDEX" ||
+		{ echo "dist: $i/INDEX" >&2; exit 1; }
+done
 mkdir -p "$out/tmp" "$out/dist/9front" "$out/usr/glenda/bin/wasm32" "$out/wasm32/bin"
 # /$objtype's directories as the pruned tree has them for amd64 (bin/games, bin/aux ...),
 # and acme's: where the machine's mk install puts what it builds

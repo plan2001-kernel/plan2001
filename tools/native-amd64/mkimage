@@ -128,10 +128,10 @@ def main():
             ("rc", os.path.join(a.sisaan, "rc")),
             ("kbdfs", os.path.join(a.sisaan, "kbdfs")),
             # sarjakonsolin oma kuori (patches/9front/serial-console-shell.diff)
-            ("termrc", os.path.join(vm9.JUURI, "rc/bin/termrc")),
-            ("console", os.path.join(vm9.JUURI, "rc/bin/console")),
-            ("plan9.ini", plan9ini(a.disk, a.console)),
         ] + vm9.source_jasenet(tyo, os.path.abspath(a.shared)) + [
+            ("termrc", os.path.join(tyo, "source/rc/bin/termrc")),
+            ("console", os.path.join(tyo, "source/rc/bin/console")),
+            ("plan9.ini", plan9ini(a.disk, a.console)),
             ("syslib", os.path.join(tyo, "source/sys/lib")),
             ("sysdoc", os.path.join(tyo, "source/sys/doc")),
             ("sysman", os.path.join(tyo, "source/sys/man")),

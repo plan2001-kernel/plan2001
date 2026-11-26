@@ -1,6 +1,8 @@
+diff --git a/sys/src/9/pc/sdvirtio.c b/sys/src/9/pc/sdvirtio.c
+index efa3ef55e172673e491bbcec5f3c6bf9db8d844b..5449750cd3252c00265d7b890d58da27a5019a63 100644
 --- a/sys/src/9/pc/sdvirtio.c
 +++ b/sys/src/9/pc/sdvirtio.c
-@@ -21,6 +21,7 @@
+@@ -21,6 +21,7 @@ typedef struct Vqueue Vqueue;
  typedef struct Vdev Vdev;
  
  typedef struct ScsiCfg ScsiCfg;
@@ -8,7 +10,7 @@
  
  /* device types */
  enum {
-@@ -121,6 +122,8 @@
+@@ -121,6 +122,8 @@ struct Vdev
  	Vqueue	*queue[16];
  
  	void	*cfg;	/* device specific config (for scsi) */
@@ -17,7 +19,7 @@
  
  	Vdev	*next;
  };
-@@ -130,6 +133,32 @@
+@@ -130,6 +133,32 @@ enum {
  	SENSESIZE	= 96,
  };
  
@@ -50,7 +52,7 @@
  struct ScsiCfg
  {
  	u32int	num_queues;
-@@ -394,32 +423,34 @@
+@@ -394,32 +423,34 @@ vioblkreq(Vdev *vd, int typ, void *a, long count, long secsize, uvlong lba)
  	return status;
  }
  
@@ -99,7 +101,7 @@
  
  	q = vd->queue[2];
  	ilock(q);
-@@ -440,10 +471,10 @@
+@@ -440,10 +471,10 @@ vioscsireq(SDreq *r)
  	d->len = 8+8+3+cfg->cdb_size;
  	d->flags = Next;
  
@@ -113,7 +115,7 @@
  		d->flags = Next;
  	}
  
-@@ -452,20 +483,42 @@
+@@ -452,20 +483,42 @@ vioscsireq(SDreq *r)
  	d->len = 4+4+2+2+cfg->sense_size;
  	d->flags = Write;
  
@@ -160,7 +162,7 @@
  
  	/* response+status */
  	r->status = resp[10];
-@@ -492,6 +545,181 @@
+@@ -492,6 +545,181 @@ vioscsireq(SDreq *r)
  
  }
  
@@ -342,7 +344,7 @@
  static long
  viobio(SDunit *u, int lun, int write, void *a, long count, uvlong lba)
  {
-@@ -569,8 +797,11 @@
+@@ -569,8 +797,11 @@ vioverify(SDunit *u)
  	Vdev *vd;
  
  	vd = u->dev->ctlr;
@@ -355,7 +357,7 @@
  
  	return 1;
  }
-@@ -588,6 +819,10 @@
+@@ -588,6 +819,10 @@ vioenable(SDev *sd)
  	snprint(name, sizeof(name), "%s (%s)", sd->name, sd->ifc->name);
  	intrenable(vd->pci->intl, viointerrupt, vd, vd->pci->tbdf, name);
  	outb(vd->port+Status, inb(vd->port+Status) | DriverOk);
@@ -366,7 +368,7 @@
  	return 1;
  }
  
-@@ -651,16 +886,17 @@
+@@ -651,16 +886,17 @@ viopnp(void)
  		cfg->max_target = ins(vd->port+Devspec+4*7+2);
  		cfg->max_lun = inl(vd->port+Devspec+4*8);
  
@@ -388,7 +390,7 @@
  		vd->cfg = cfg;
  
  		if((s = malloc(sizeof(*s))) == nil)
-@@ -668,7 +904,7 @@
+@@ -668,7 +904,7 @@ viopnp(void)
  		s->ctlr = vd;
  		s->idno = id++;
  		s->ifc = &sdvirtioifc;
@@ -397,6 +399,8 @@
  		if(h)
  			t->next = s;
  		else
+diff --git a/sys/src/9/port/sdvirtio10.c b/sys/src/9/port/sdvirtio10.c
+index d08e954dc762b96c865b0fe02e7bf270466944c5..b9041a7ee82aade33b652fd22228647f4cef1207 100644
 --- a/sys/src/9/port/sdvirtio10.c
 +++ b/sys/src/9/port/sdvirtio10.c
 @@ -28,6 +28,7 @@
@@ -407,7 +411,7 @@
  
  
  /* device types */
-@@ -62,6 +63,32 @@
+@@ -62,6 +63,32 @@ enum {
  	SENSESIZE	= 96,
  };
  
@@ -440,7 +444,7 @@
  enum {
  	Vscsi_num_queues = 0,
  	Vscsi_seg_max = 4,
-@@ -121,6 +148,8 @@
+@@ -121,6 +148,8 @@ struct Vdev
  	Vqueue	*queue[16];
  
  	Vio	dev;	/* device specific config (for scsi) */
@@ -449,7 +453,7 @@
  
  	/* registers */
  	Vio	cfg;
-@@ -440,30 +469,31 @@
+@@ -440,30 +469,31 @@ vioblkreq(Vdev *vd, int typ, void *a, long count, long secsize, uvlong lba)
  	return status;
  }
  
@@ -472,10 +476,10 @@
  	Vdesc *d;
 -	Vdev *vd;
 -	SDunit *u;
- 
+-
 -	u = r->unit;
 -	vd = u->dev->ctlr;
--
+ 
 -	memset(resp, 0, sizeof(resp));
 +	memset(resp, 0, 4+4+2+2+SENSESIZE);
  	memset(req, 0, sizeof(req));
@@ -496,7 +500,7 @@
  
  	q = vd->queue[2];
  	ilock(q);
-@@ -484,10 +514,10 @@
+@@ -484,10 +514,10 @@ vioscsireq(SDreq *r)
  	d->len = 8+8+3+vin32(&vd->dev, Vscsi_cdb_size);
  	d->flags = Next;
  
@@ -510,7 +514,7 @@
  		d->flags = Next;
  	}
  
-@@ -496,20 +526,42 @@
+@@ -496,20 +526,42 @@ vioscsireq(SDreq *r)
  	d->len = 4+4+2+2+vin32(&vd->dev, Vscsi_sense_size);
  	d->flags = Write;
  
@@ -557,7 +561,7 @@
  
  	/* response+status */
  	r->status = resp[10];
-@@ -536,6 +588,181 @@
+@@ -536,6 +588,181 @@ vioscsireq(SDreq *r)
  
  }
  
@@ -739,7 +743,7 @@
  static long
  viobio(SDunit *u, int lun, int write, void *a, long count, uvlong lba)
  {
-@@ -611,8 +838,11 @@
+@@ -611,8 +838,11 @@ vioverify(SDunit *u)
  	Vdev *vd;
  
  	vd = u->dev->ctlr;
@@ -752,7 +756,7 @@
  
  	return 1;
  }
-@@ -637,6 +867,10 @@
+@@ -637,6 +867,10 @@ vioenable(SDev *sd)
  		vout16(&vd->cfg, Vconf_queueenable, 1);
  	}
  	vout8(&vd->cfg, Vconf_status, vin8(&vd->cfg, Vconf_status) | DriverOk);
@@ -763,7 +767,7 @@
  
  	return 1;
  }
-@@ -690,23 +924,22 @@
+@@ -690,23 +924,22 @@ viopnp(void)
  
  		if(virtiomapregs(vd->pci, virtiocap(vd->pci, 4), Vscsi_sz, &vd->dev) == nil)
  			break;

@@ -1,6 +1,8 @@
+diff --git a/sys/src/9/ip/arp.c b/sys/src/9/ip/arp.c
+index 0d0aca2ef9282ff926c202857dd5352fcac2a9fd..d92f46c665079c9248998de3f7523c9e48b0451f 100644
 --- a/sys/src/9/ip/arp.c
 +++ b/sys/src/9/ip/arp.c
-@@ -153,6 +153,9 @@
+@@ -153,6 +153,9 @@ newarpent(Arp *arp, uchar *ip, Ipifc *ifc)
  	}
  	cleanarpent(arp, a);
  

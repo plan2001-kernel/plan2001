@@ -1,6 +1,8 @@
+diff --git a/sys/src/9/port/devmouse.c b/sys/src/9/port/devmouse.c
+index ac0f52939d37acea32522d86cd080eaadbb330a9..02dceea188d7c83e0739f3443dd7c215643c2762 100644
 --- a/sys/src/9/port/devmouse.c
 +++ b/sys/src/9/port/devmouse.c
-@@ -297,8 +297,9 @@
+@@ -297,8 +297,9 @@ mouseread(Chan *c, void *va, long n, vlong off)
  		}
  
  		b = buttonmap[m.buttons&7];
@@ -12,9 +14,11 @@
  
  		if (scrollswap)
  			if (b == 8)
+diff --git a/sys/src/cmd/rio/rio.c b/sys/src/cmd/rio/rio.c
+index 6ed77f8987a19223740cc7c7d3094fecba1c6f2f..e4af5695a3fbc7caeec8a36c4c5351cb4961266d 100644
 --- a/sys/src/cmd/rio/rio.c
 +++ b/sys/src/cmd/rio/rio.c
-@@ -31,6 +31,29 @@
+@@ -31,6 +31,29 @@ Image*	sweep(void);
  Image*	bandsize(Window*);
  Image*	drag(Window*);
  void		resized(void);
@@ -44,7 +48,7 @@
  Channel	*exitchan;	/* chan(int) */
  Channel	*winclosechan; /* chan(Window*); */
  Channel	*kbdchan;	/* chan(char*); */
-@@ -543,6 +566,27 @@
+@@ -543,6 +566,27 @@ mousethread(void*)
  			resized();
  			break;
  		case MMouse:
@@ -72,7 +76,7 @@
  			if(wkeyboard!=nil && (mouse->buttons & (1<<5))){
  				keyboardhide();
  				break;
-@@ -602,6 +646,8 @@
+@@ -602,6 +646,8 @@ mousethread(void*)
  					wsendctlmesg(winput, Reshaped, i->r, i);
  				}
  				wclose(winput);
@@ -81,7 +85,7 @@
  				continue;
  			}
  			w = wpointto(mouse->xy);
-@@ -618,11 +664,11 @@
+@@ -618,11 +664,11 @@ mousethread(void*)
  					}else if(mouse->buttons & 2){
  						if(winput && !winput->deleted && !winput->mouseopen){
  							incref(winput);
@@ -95,7 +99,7 @@
  				}else{
  					/* if button 1 event in the window, top the window and wait for button up. */
  					/* otherwise, top the window and pass the event on */
-@@ -634,9 +680,10 @@
+@@ -634,9 +680,10 @@ mousethread(void*)
  			break;
  
  		Drain:
@@ -108,7 +112,7 @@
  			goto Again;	/* recalculate mouse position, cursor */
  		}
  }
-@@ -754,10 +801,140 @@
+@@ -754,10 +801,140 @@ shortlabel(char *s)
  	return estrdup(buf);
  }
  
@@ -251,7 +255,7 @@
  
  	n = nhidden;
  	for(i=0; i<nwindow; i++){
-@@ -781,43 +958,55 @@
+@@ -781,43 +958,55 @@ button3menu(void)
  		free(menu3str[i]);
  		menu3str[i] = nil;
  	}
@@ -310,7 +314,7 @@
  	case Cut:
  		wsnarf(w);
  		wcut(w);
-@@ -865,6 +1054,21 @@
+@@ -865,6 +1054,21 @@ onscreen(Point p)
  	return p;
  }
  
@@ -332,7 +336,7 @@
  Image*
  sweep(void)
  {
-@@ -876,13 +1080,13 @@
+@@ -876,13 +1080,13 @@ sweep(void)
  	menuing = TRUE;
  	riosetcursor(&crosscursor);
  	while(mouse->buttons == 0)
@@ -348,7 +352,7 @@
  		if(!eqpt(mouse->xy, p)){
  			p = onscreen(mouse->xy);
  			r = canonrect(Rpt(p0, p));
-@@ -897,7 +1101,7 @@
+@@ -897,7 +1101,7 @@ sweep(void)
  				draw(i, insetrect(r, Selborder), cols[BACK], nil, ZP);
  			}
  		}
@@ -357,7 +361,7 @@
  	}
  	if(mouse->buttons != 0)
  		goto Rescue;
-@@ -917,7 +1121,7 @@
+@@ -917,7 +1121,7 @@ sweep(void)
  	i = nil;
  	flushimage(display, 1);
  	while(mouse->buttons)
@@ -366,7 +370,7 @@
  
   Return:
  	menuing = FALSE;
-@@ -972,13 +1176,13 @@
+@@ -972,13 +1176,13 @@ drag(Window *w)
  	d = subpt(w->screenr.max, w->screenr.min);
  	op = subpt(om, dm);
  	drawborder(Rect(op.x, op.y, op.x+d.x, op.y+d.y), sizecol);
@@ -382,7 +386,7 @@
  	}
  	r = Rect(op.x, op.y, op.x+d.x, op.y+d.y);
  	drawborder(r, nil);
-@@ -988,7 +1192,7 @@
+@@ -988,7 +1192,7 @@ drag(Window *w)
  	if(mouse->buttons!=0 || !goodrect(r) || eqrect(r, w->screenr)){
  		flushimage(display, 1);
  		while(mouse->buttons)
@@ -391,7 +395,7 @@
  		return nil;
  	}
  	return allocwindow(wscreen, r, Refbackup, DNofill);
-@@ -1018,7 +1222,7 @@
+@@ -1018,7 +1222,7 @@ bandsize(Window *w)
  			drawborder(r, sizecol);
  			or = r;
  		}
@@ -400,7 +404,7 @@
  	}
  	drawborder(or, nil);
  	if(!goodrect(or))
-@@ -1027,7 +1231,7 @@
+@@ -1027,7 +1231,7 @@ bandsize(Window *w)
  	|| abs(p.x-startp.x)+abs(p.y-startp.y) <= 1){
  		flushimage(display, 1);
  		while(mouse->buttons)
@@ -409,7 +413,7 @@
  		return nil;
  	}
  	return allocwindow(wscreen, or, Refbackup, DNofill);
-@@ -1037,22 +1241,24 @@
+@@ -1037,22 +1241,24 @@ Window*
  pointto(int wait)
  {
  	Window *w;
@@ -438,7 +442,7 @@
  		}
  		if(w != nil && wpointto(mouse->xy) != w)
  			w = nil;
-@@ -1075,16 +1281,19 @@
+@@ -1075,16 +1281,19 @@ delete(void)
  void
  confirmexit(void)
  {
@@ -462,9 +466,11 @@
  	}
  	send(exitchan, nil);
  Nope:
+diff --git a/sys/src/cmd/rio/fns.h b/sys/src/cmd/rio/fns.h
+index 8562c2cd97cd08215d4c9ea7bd5547d7e941d478..dcca105167354077cd33766405789467ba99c0e1 100644
 --- a/sys/src/cmd/rio/fns.h
 +++ b/sys/src/cmd/rio/fns.h
-@@ -20,8 +20,8 @@
+@@ -20,8 +20,8 @@ void	iconinit(void);
  void	*erealloc(void*, uint);
  void *emalloc(uint);
  char *estrdup(char*);
@@ -475,7 +481,7 @@
  void	cvttorunes(char*, int, Rune*, int*, int*, int*);
  /* was (byte*,int)	runetobyte(Rune*, int); */
  char* runetobyte(Rune*, int, int*);
-@@ -31,6 +31,11 @@
+@@ -31,6 +31,11 @@ void	timerinit(void);
  int	goodrect(Rectangle);
  int	inborder(Rectangle, Point);
  
@@ -487,9 +493,11 @@
  #define	runemalloc(n)		malloc((n)*sizeof(Rune))
  #define	runerealloc(a, n)	realloc(a, (n)*sizeof(Rune))
  #define	runemove(a, b, n)	memmove(a, b, (n)*sizeof(Rune))
+diff --git a/sys/src/cmd/rio/wind.c b/sys/src/cmd/rio/wind.c
+index 790beb61683021d4c294428d7f9f3b10590c4725..1eb1f0128f7f1e7844f505857cdb0332df045829 100644
 --- a/sys/src/cmd/rio/wind.c
 +++ b/sys/src/cmd/rio/wind.c
-@@ -1086,6 +1086,135 @@
+@@ -1086,6 +1086,135 @@ inmode(Rune r, int mode)
  	return (mode == 1) ? isalnum(r) : r && !isspace(r);
  }
  
@@ -625,7 +633,7 @@
  static void
  wstretchsel(Window *w, uint pt, uint *q0, uint *q1, int mode)
  {
-@@ -1149,8 +1278,51 @@
+@@ -1149,8 +1278,51 @@ wstretchsel(Window *w, uint pt, uint *q0, uint *q1, int mode)
  		(*q0)--;
  }
  
@@ -678,7 +686,7 @@
  {
  	uint q0, q1;
  	int b, x, y, dx, dy, mode, first;
-@@ -1172,7 +1344,7 @@
+@@ -1172,7 +1344,7 @@ wselect(Window *w)
  		clickcount = 0;
  	if(clickwin == w && clickcount >= 1 && w->mc.msec-clickmsec < 500){
  		mode = (clickcount > 2) ? 2 : clickcount;
@@ -687,7 +695,7 @@
  		wsetselect(w, q0, q1);
  		x = w->mc.xy.x;
  		y = w->mc.xy.y;
-@@ -1211,12 +1383,13 @@
+@@ -1211,12 +1383,13 @@ wselect(Window *w)
  	if(q0 == q1){
  		mode = (clickcount > 2) ? 2 : clickcount;
  		if(q0==w->q0 && clickwin==w && w->mc.msec-clickmsec<500)
@@ -702,7 +710,7 @@
  	while(w->mc.buttons){
  		w->mc.msec = 0;
  		b = w->mc.buttons;
-@@ -1476,7 +1649,7 @@
+@@ -1476,7 +1649,7 @@ wctlmesg(Window *w, int m, Rectangle r, void *p)
  }
  
  static void
@@ -711,7 +719,7 @@
  {
  	int but;
  
-@@ -1494,7 +1667,7 @@
+@@ -1494,7 +1667,7 @@ wmousectl(Window *w)
  		else if(ptinrect(w->mc.xy, w->scrollr) || (but > 3))
  			wscroll(w, but);
  		else if(but == 1)
@@ -720,7 +728,7 @@
  	}
  	wclose(w);
  }
-@@ -1504,7 +1677,7 @@
+@@ -1504,7 +1677,7 @@ winctl(void *arg)
  {
  	Rune *rp, *up, r;
  	uint qh, q0;
@@ -729,7 +737,7 @@
  	char *s, *t, part[3];
  	Window *w;
  	Mousestate *mp, m;
-@@ -1638,6 +1811,8 @@
+@@ -1638,6 +1811,8 @@ winctl(void *arg)
  			send(crm.c2, &pair);
  			continue;
  		case WMouse:
@@ -738,7 +746,7 @@
  			if(w->mouseopen) {
  				w->mouse.counter++;
  
-@@ -1653,7 +1828,7 @@
+@@ -1653,7 +1828,7 @@ winctl(void *arg)
  					lastb = w->mc.buttons;
  				}
  			} else

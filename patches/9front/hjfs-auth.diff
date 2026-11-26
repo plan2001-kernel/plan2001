@@ -1,6 +1,8 @@
+diff --git a/sys/src/cmd/hjfs/auth.c b/sys/src/cmd/hjfs/auth.c
+index cdf7023ff225c57fcc9751d6a7c0fc8b6a0a4c95..86bed9be47c77b5d06d6407987aa659a4a5ae251 100644
 --- a/sys/src/cmd/hjfs/auth.c
 +++ b/sys/src/cmd/hjfs/auth.c
-@@ -46,7 +46,7 @@
+@@ -46,7 +46,7 @@ validuser(char *n)
  	for(p = n; *p != 0; p++)
  		if((uchar) *p < ' ' || strchr("?=+-/:", *p) != nil)
  			return 0;
@@ -9,7 +11,7 @@
  }
  
  static void
-@@ -243,7 +243,7 @@
+@@ -243,7 +243,7 @@ static User *
  lookupuid(Fs *fs, short uid)
  {
  	User *u;
@@ -18,7 +20,7 @@
  
  	u = fs->udata;
  	i = 0;
-@@ -254,6 +254,7 @@
+@@ -254,6 +254,7 @@ lookupuid(Fs *fs, short uid)
  	}
  	if(j == 0)
  		return nil;
@@ -26,7 +28,7 @@
  	while(i < j){
  		k = (i + j) / 2;
  		if(u[k].uid < uid)
-@@ -261,7 +262,7 @@
+@@ -261,7 +262,7 @@ lookupuid(Fs *fs, short uid)
  		else
  			j = k;
  	}
@@ -35,7 +37,7 @@
  		return &u[i];
  	return nil;
  }
-@@ -293,7 +294,7 @@
+@@ -293,7 +294,7 @@ ingroup(Fs *fs, short uid, short gid, int leader)
  		else
  			j = k;
  	}

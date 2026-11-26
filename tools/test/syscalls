@@ -50,19 +50,24 @@ def main():
     ap.add_argument('--archives', type=pathlib.Path)
     args = ap.parse_args()
     release = pathlib.Path(subprocess.check_output([str(ROOT / 'tools/release')], text=True).strip())
-    # tämän puun kopio: tools/tree varmistaa, että se on patchattu julkaisun tiedosto
-    # (build/tree voi olla vanhentunut)
-    recipe = (ROOT / 'sys/src/cmd/syscall/mkfile').read_text()
+    # patchatut tiedostot kootusta puusta (build/tree voi olla vanhentunut)
+    with tempfile.TemporaryDirectory(prefix='syscalls-tree-') as puu:
+        subprocess.run([str(ROOT / 'tools/tree'), puu], check=True, stdout=subprocess.DEVNULL)
+        tarkista(release, pathlib.Path(puu), args)
+
+
+def tarkista(release, tree, args):
+    recipe = (tree / 'sys/src/cmd/syscall/mkfile').read_text()
     assert 'syscalls $objtype $SYSCALL defines' in recipe
     assert 'mktab.awk $SYSCALL' not in recipe
     print('PASS: cmd/syscall table uses the architecture-aware selector')
     golden = definitions((release / 'sys/src/libc/9syscall/sys.h').read_text())
-    header = ROOT / 'sys/src/libc/9syscall/sys.h'
-    selector = ROOT / 'sys/src/libc/9syscall/syscalls'
+    header = tree / 'sys/src/libc/9syscall/sys.h'
+    selector = tree / 'sys/src/libc/9syscall/syscalls'
     with tempfile.TemporaryDirectory(prefix='syscalls-') as td:
         td = pathlib.Path(td)
         generator = td / 'mksystab'
-        generator.write_text((ROOT / 'sys/src/9/port/mksystab').read_text().replace(
+        generator.write_text((tree / 'sys/src/9/port/mksystab').read_text().replace(
             '/sys/src/libc/9syscall', str(header.parent)))
         for arch in ['amd64', 'arm64', 'wasm32']:
             expected = dict(golden)
@@ -85,7 +90,7 @@ def main():
             subprocess.run(['cc', '-std=c11', '-Werror', '-c', *flags, str(source),
                             '-o', str(td / 'table.o')], check=True)
             public = subprocess.check_output(['cc', '-E', '-P', '-x', 'c', *flags,
-                                               str(ROOT / 'sys/include/libc.h')], text=True)
+                                               str(tree / 'sys/include/libc.h')], text=True)
             assert bool(re.search(r'\bspawn\(', public)) == (arch == 'wasm32'), arch
             print('PASS: ' + arch + ' syscall numbers, generated table and libc interface')
         assert rc(selector, ['unknown', header]).returncode != 0

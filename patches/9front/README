@@ -1,11 +1,17 @@
-Fixes to 9front's own code, as patches against the release the build
-takes (tools/release.conf: 9front-11952), to send upstream.  The patched
-file is in this tree too, at the same path, made from the release's copy
-with the diff:
-  cp build/release/sys/src/cmd/hjfs/auth.c sys/src/cmd/hjfs/auth.c
-  patch -p1 <patches/9front/hjfs-auth.diff
-tools/tree applies every patch to the release and fails when this tree's
-copy is not the result.
+Plan2001's changes to 9front's own files, as patches against the source
+upstream/9front.lock locks (COMMIT), applied in patches/9front/series's
+order by tools/upstream (tools/tree, tools/treebranch).  Each is made with
+git diff --full-index and names the exact blob it applies to and makes:
+it applies only to that file, with no fuzz or offset, or the assembly
+stops.  The patch is the only copy of a changed upstream file; this tree
+has new files only, and one at an upstream path stops the assembly.  To
+change a patched file, edit it in an assembled tree and make the patch
+anew against the locked file (tools/upstream assemble checks it).
+series gives each patch's class (fix, backport, wasm32, uefi,
+integration) and upstream status; fixes are candidates to offer 9front
+with the owner's consent.  tools/upstream check shows what a newer 9front
+changes; tools/upstream update rebases the stack onto it (three-way: old
+upstream, Plan2001's, new upstream) and stops on any conflict.
 
 hjfs-auth.diff	hjfs/auth.c: validuser measured a name as n - p, which is
 		never USERLEN or more, so any name passed and the strcpy()s
@@ -170,3 +176,24 @@ tcp-splice.diff
 		gives.  tcpacktimer() no longer takes the Conv lock while
 		qsetbypass() flushes during tcpsplice() (a deadlock).  These are
 		9front's 026e87832, 890656a50 and d683e5c0c.  2026-11-26.
+
+touchscreen.diff
+		port/devmouse.c keeps platform.js's touch bits (Touchbit,
+		Menureq, Longreq, Touchstart) in /dev/mouse; rio/rio.c turns a
+		tap on the desktop into its persistent button 3 menu and a long
+		press into its button 2 menu, and strips the bits before a
+		window sees the event.  WASM32's mobile Rio.
+
+efi-loader.diff
+		boot/efi: Plan2001's UEFI loader - BootInfo v1 for the kernel
+		(x64.s, aa64.s, efi.c, sub.c), 9front a.out and restricted ELF64
+		kernels, framebuffer stage marks, ARM64 platform selection
+		(efiplatform=qemu-virt|rpi4, efibootmap, efiscratch), and an
+		install target for /amd64 instead of /386.
+
+pc64-uefi-bootinfo.diff
+		9/pc64: the kernel entered by the EFI loader with BootInfo v1
+		(l.s's _efi64 entry at KTZERO, main.c's BootInfo memory, screen
+		and configuration, mem.h, trap.c, fns.h) and mkfile rules that
+		make sd53c8xx.i and the etherm10g firmware tables here rather
+		than in the pruned ../pc.

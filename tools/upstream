@@ -1,0 +1,619 @@
+#!/usr/bin/env python3
+"""
+Plan2001:n 9front-pohja: lukittu upstream-lähde (upstream/9front.lock) ja
+sen päälle koottava patch-pino (patches/9front/series).
+
+  tools/upstream source         lukitun COMMITin koskematon puu (välimuistista,
+                                haetaan tarvittaessa); tulostaa hakemiston
+  tools/upstream bootiso        käännöskoneen bootstrap-ISO (BOOT_*) välimuistiin
+                                SHA256-tarkistettuna; tulostaa polun
+  tools/upstream assemble HAK   HAK:ssa on koskematon COMMIT: patchit series-
+                                järjestyksessä, tämän puun uudet tiedostot,
+                                tools/prune-tree; pysähtyy kaikkeen odottamattomaan
+  tools/upstream refresh NIMI HAK
+                                patch NIMI uudelleen HAK:n (koottu, muokattu puu)
+                                tiedostoista: sama tiedostojoukko, lähtönä lukittu
+                                tiedosto ja sarjan aiemmat patchit
+  tools/upstream check [REV]    vain luku: ehdokas (oletus BRANCHin kärki), sen
+                                build-tila, muutokset, päällekkäisyydet patcheihin
+                                ja uusiin tiedostoihin, kolmitieyhdistämisen tulos
+  tools/upstream update [REV] [--resolved HAK]
+                                puhtaassa työpuussa ja muussa haarassa kuin main:
+                                patchit kolmitieyhdistämällä REV:n päälle ja lukko
+                                REV:iin; ei committia, ei pakotusta, ei asennusta.
+                                Ristiriidat build/upstream-update/PATCH/POLKU
+                                (.vanha, .plan2001, .uusi); käsin ratkaistu
+                                tiedosto HAK/PATCH/POLKU (ei ristiriitamerkkejä)
+                                käytetään seuraavalla ajolla
+
+Patch on tiedosto kerrallaan "diff --git" -muotoa, ja sen index-rivillä on
+koko lähtö- ja tulos-blobin tunniste (git diff --full-index).  Patch
+sovelletaan vain täsmälleen siihen tiedostoon, jota vasten se on tehty, ja
+tuloksen on oltava täsmälleen se blob: ei fuzzia, ei siirtymiä.  Saman
+tiedoston patchit ketjuuntuvat series-järjestyksessä.
+
+Välimuisti: $PLAN2001_CACHE/9front.git (oletus ~/.cache/plan2001).
+"""
+
+import hashlib
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+JUURI = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LUKKO = os.path.join(JUURI, "upstream", "9front.lock")
+PATCHIT = os.path.join(JUURI, "patches", "9front")
+SARJA = os.path.join(PATCHIT, "series")
+LUOKAT = {"fix", "backport", "wasm32", "uefi", "integration"}
+# tämän puun uudet tiedostot: vain nämä juuret kootaan 9frontin päälle
+OMAT = ("sys/", "rc/", "wasm32/")
+BUILDSIVU = "http://build.9front.org/"
+# tools/prune-tree:n move_shared: tuetun kohteen tarvitsemat jaetut lähteet
+SIIRROT = {"sys/src/9/pc/": "sys/src/9/pc64/shared/", "sys/src/9/bcm/": "sys/src/9/bcm64/shared/"}
+
+
+class Virhe(Exception):
+    pass
+
+
+def git(*args, cwd=None, syote=None, tarkista=True):
+    r = subprocess.run(("git",) + args, cwd=cwd, input=syote, capture_output=True)
+    if tarkista and r.returncode != 0:
+        raise Virhe("git %s: %s" % (" ".join(args), r.stderr.decode(errors="replace").strip()))
+    return r
+
+
+def lue_lukko(polku=LUKKO):
+    arvot = {}
+    for rivi in open(polku):
+        rivi = rivi.strip()
+        if rivi and not rivi.startswith("#"):
+            k, _, v = rivi.partition("=")
+            arvot[k] = v
+    for k in ("URL", "BRANCH", "COMMIT", "TREE"):
+        if not arvot.get(k):
+            raise Virhe("%s: %s puuttuu" % (polku, k))
+    for k in ("COMMIT", "TREE"):
+        if not re.fullmatch(r"[0-9a-f]{40}", arvot[k]):
+            raise Virhe("%s: %s ei ole kokonainen SHA" % (polku, k))
+    return arvot
+
+
+def valimuisti():
+    return os.path.join(os.environ.get("PLAN2001_CACHE", os.path.expanduser("~/.cache/plan2001")), "9front.git")
+
+
+def on_commit(rev):
+    return git("cat-file", "-e", rev + "^{commit}", cwd=valimuisti(), tarkista=False).returncode == 0
+
+
+def hae(lukko, pakota=False):
+    """Upstreamin haara välimuistiin: kanonisesta lähteestä, sen ollessa
+    tavoittamattomissa peilistä (commitin tunniste todentaa sisällön)."""
+    v = valimuisti()
+    if not os.path.isdir(v):
+        os.makedirs(os.path.dirname(v), exist_ok=True)
+        git("init", "-q", "--bare", v)
+    if not pakota and on_commit(lukko["COMMIT"]):
+        return None
+    virheet = []
+    for lahde in (lukko["URL"], lukko.get("MIRROR")):
+        if not lahde:
+            continue
+        r = git("fetch", "-q", "--no-tags", lahde, "+refs/heads/%s:refs/heads/%s" % (lukko["BRANCH"], lukko["BRANCH"]),
+                cwd=v, tarkista=False)
+        if r.returncode == 0:
+            return lahde
+        virheet.append("%s: %s" % (lahde, r.stderr.decode(errors="replace").strip()))
+    raise Virhe("upstreamia ei saatu haettua:\n  " + "\n  ".join(virheet))
+
+
+def tarkista_commit(lukko):
+    c = lukko["COMMIT"]
+    if not on_commit(c):
+        raise Virhe("lukittu %s puuttuu välimuistista %s (tools/upstream source hakee sen)" % (c, valimuisti()))
+    puu = git("rev-parse", c + "^{tree}", cwd=valimuisti()).stdout.decode().strip()
+    if puu != lukko["TREE"]:
+        raise Virhe("%s:n puu on %s, lukossa %s" % (c, puu, lukko["TREE"]))
+
+
+def source():
+    lukko = lue_lukko()
+    lahde = hae(lukko)
+    if lahde:
+        print("upstream: haettu %s" % lahde, file=sys.stderr)
+    tarkista_commit(lukko)
+    ulos = os.path.join(JUURI, "build", "upstream", lukko["COMMIT"])
+    merkki = os.path.join(ulos, ".plan2001-upstream")
+    if not os.path.exists(merkki):
+        shutil.rmtree(ulos, ignore_errors=True)
+        os.makedirs(ulos)
+        arkisto = git("-c", "tar.umask=0002", "archive", "--format=tar", lukko["COMMIT"], cwd=valimuisti()).stdout
+        subprocess.run(["tar", "-x", "-C", ulos], input=arkisto, check=True)
+        with open(merkki, "w") as f:
+            f.write(lukko["COMMIT"] + "\n")
+    return ulos
+
+
+def sha256(polku):
+    h = hashlib.sha256()
+    with open(polku, "rb") as f:
+        for lohko in iter(lambda: f.read(1 << 20), b""):
+            h.update(lohko)
+    return h.hexdigest()
+
+
+def bootiso():
+    """Bootstrap-julkaisun ISO: vain käännöskoneen ensimmäiset työkalut."""
+    lukko = lue_lukko()
+    nimi = lukko["BOOT_ISO"]
+    v = os.path.dirname(valimuisti())
+    for p in (os.path.join(os.environ.get("PLAN9WASM32_CACHE", os.path.expanduser("~/.cache/plan9-wasm32")), nimi),
+              os.path.join(v, nimi)):
+        if os.path.exists(p):
+            if sha256(p) != lukko["BOOT_ISO_SHA256"]:
+                raise Virhe("%s: SHA256 ei ole lukon BOOT_ISO_SHA256" % p)
+            return os.path.realpath(p)
+    p = os.path.join(v, nimi)
+    print("upstream: haetaan %s" % lukko["BOOT_URL"], file=sys.stderr)
+    subprocess.run(["curl", "-fL", "-o", p + ".gz.part", lukko["BOOT_URL"]], check=True)
+    if sha256(p + ".gz.part") != lukko["BOOT_ISO_GZ_SHA256"]:
+        raise Virhe("%s: SHA256 ei ole lukon BOOT_ISO_GZ_SHA256" % lukko["BOOT_URL"])
+    with open(p + ".part", "wb") as f:
+        subprocess.run(["gunzip", "-c", p + ".gz.part"], stdout=f, check=True)
+    if sha256(p + ".part") != lukko["BOOT_ISO_SHA256"]:
+        raise Virhe("%s: purettu SHA256 ei ole lukon BOOT_ISO_SHA256" % nimi)
+    os.rename(p + ".part", p)
+    os.unlink(p + ".gz.part")
+    return p
+
+
+# --- patchit
+
+def rivit_lf(data):
+    """Rivit vain LF:stä katkaistuina, kuten diff ja patch ne näkevät
+    (bytes.splitlines katkaisisi myös CR:stä)."""
+    return re.findall(rb"[^\n]*\n|[^\n]+$", data)
+
+
+def blob(data):
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+class Osa:
+    """Yhden tiedoston muutos patchissa."""
+
+    def __init__(self, polku, ennen, jalkeen, tila, rivit):
+        self.polku, self.ennen, self.jalkeen, self.tila, self.rivit = polku, ennen, jalkeen, tila, rivit
+
+
+def lue_patch(polku):
+    teksti = open(polku, "rb").read()
+    osat = []
+    for kpl in re.split(rb"(?m)^(?=diff --git )", teksti):
+        if not kpl.strip():
+            continue
+        if not kpl.startswith(b"diff --git "):
+            raise Virhe("%s: tekstiä ennen ensimmäistä 'diff --git' -riviä" % polku)
+        rivit = rivit_lf(kpl)
+        m = re.match(rb"index ([0-9a-f]{40})\.\.([0-9a-f]{40})(?: ([0-7]{6}))?\n", rivit[1])
+        if not m:
+            raise Virhe("%s: %s: index-rivillä ei ole kokonaisia blob-tunnisteita (git diff --full-index)" %
+                        (polku, rivit[0].decode(errors="replace").strip()))
+        if not (rivit[2].startswith(b"--- a/") and rivit[3].startswith(b"+++ b/")):
+            raise Virhe("%s: vain olemassa olevien tiedostojen muutoksia (uusi tiedosto kuuluu tämän puun tiedostoihin)" % polku)
+        p = rivit[3][6:].rstrip(b"\n").decode()
+        if rivit[2][6:].rstrip(b"\n").decode() != p:
+            raise Virhe("%s: %s: nimenmuutos" % (polku, p))
+        osat.append(Osa(p, m.group(1).decode(), m.group(2).decode(), (m.group(3) or b"100644").decode(), rivit[4:]))
+    if not osat:
+        raise Virhe("%s: tyhjä patch" % polku)
+    return osat
+
+
+def sovella(osa, data):
+    """Osan muutokset dataan täsmälleen: konteksti ja poistettavat rivit
+    paikoillaan, ei siirtymiä."""
+    vanha = rivit_lf(data)
+    uusi, i, k, rivit = [], 0, 0, osa.rivit
+    while k < len(rivit):
+        m = re.match(rb"@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@", rivit[k])
+        if not m:
+            raise Virhe("%s: odotettiin @@-riviä: %r" % (osa.polku, rivit[k][:60]))
+        alku, maara = int(m.group(1)), int(m.group(2) if m.group(2) is not None else 1)
+        alku = alku - 1 if maara else alku
+        if alku < i:
+            raise Virhe("%s: päällekkäiset hunkit" % osa.polku)
+        uusi += vanha[i:alku]
+        i, k = alku, k + 1
+        while k < len(rivit) and not rivit[k].startswith(b"@@"):
+            r = rivit[k]
+            teksti = r[1:]
+            if k + 1 < len(rivit) and rivit[k + 1].startswith(b"\\"):
+                teksti = teksti.rstrip(b"\n")
+                k += 1
+            if r[:1] in (b" ", b"-"):
+                if i >= len(vanha) or vanha[i] != teksti:
+                    raise Virhe("%s: rivi %d ei ole patchin odottama" % (osa.polku, i + 1))
+                if r[:1] == b" ":
+                    uusi.append(teksti)
+                i += 1
+            elif r[:1] == b"+":
+                uusi.append(teksti)
+            else:
+                raise Virhe("%s: tuntematon hunkin rivi %r" % (osa.polku, r[:60]))
+            k += 1
+    return b"".join(uusi + vanha[i:])
+
+
+def lue_sarja():
+    if not os.path.exists(SARJA):
+        raise Virhe("%s puuttuu" % SARJA)
+    nimet, luokat = [], {}
+    for n, rivi in enumerate(open(SARJA), 1):
+        rivi = rivi.split("#", 1)[0].split()
+        if not rivi:
+            continue
+        if len(rivi) < 2 or rivi[1] not in LUOKAT:
+            raise Virhe("series:%d: 'NIMI.diff LUOKKA [TILA]', LUOKKA %s" % (n, "|".join(sorted(LUOKAT))))
+        if rivi[0] in luokat:
+            raise Virhe("series:%d: %s kahdesti" % (n, rivi[0]))
+        nimet.append(rivi[0])
+        luokat[rivi[0]] = rivi[1]
+    tiedostot = sorted(f for f in os.listdir(PATCHIT) if f.endswith(".diff"))
+    puuttuu = sorted(set(tiedostot) - set(nimet))
+    ylim = sorted(set(nimet) - set(tiedostot))
+    if puuttuu or ylim:
+        raise Virhe("series ja patches/9front/*.diff eroavat: ei sarjassa %s; ei tiedostona %s" % (puuttuu, ylim))
+    return nimet
+
+
+def kirjoita(polku, data, tila="100644"):
+    os.makedirs(os.path.dirname(polku), exist_ok=True)
+    if os.path.lexists(polku):
+        os.unlink(polku)
+    with open(polku, "wb") as f:
+        f.write(data)
+    os.chmod(polku, 0o775 if tila == "100755" else 0o664)
+
+
+def omat_tiedostot():
+    r = git("ls-files", "-z", "--", *OMAT, cwd=JUURI).stdout.decode()
+    return sorted(f for f in r.split("\0") if f)
+
+
+def assemble(hak):
+    hak = os.path.abspath(hak)
+    tila, muutetut = {}, set()
+    for nimi in lue_sarja():
+        for osa in lue_patch(os.path.join(PATCHIT, nimi)):
+            p = os.path.join(hak, osa.polku)
+            if osa.polku not in tila:
+                if not os.path.isfile(p) or os.path.islink(p):
+                    raise Virhe("%s: %s ei ole upstreamissa" % (nimi, osa.polku))
+                tila[osa.polku] = open(p, "rb").read()
+            if blob(tila[osa.polku]) != osa.ennen:
+                raise Virhe("%s: %s ei ole se tiedosto, jota vasten patch on tehty (blob %s, odotettu %s)" %
+                            (nimi, osa.polku, blob(tila[osa.polku])[:12], osa.ennen[:12]))
+            uusi = sovella(osa, tila[osa.polku])
+            if blob(uusi) != osa.jalkeen:
+                raise Virhe("%s: %s: tulos ei ole patchin blob %s" % (nimi, osa.polku, osa.jalkeen[:12]))
+            tila[osa.polku] = uusi
+            muutetut.add(osa.polku)
+    for polku, data in tila.items():
+        p = os.path.join(hak, polku)
+        moodi = os.stat(p).st_mode
+        os.unlink(p)
+        with open(p, "wb") as f:
+            f.write(data)
+        os.chmod(p, moodi & 0o7777)
+    omat = omat_tiedostot()
+    tormaa = [f for f in omat if os.path.lexists(os.path.join(hak, f))]
+    if tormaa:
+        raise Virhe("tämän puun tiedosto korvaisi upstreamin tiedoston (tee siitä patch): " + ", ".join(tormaa))
+    for f in omat:
+        kohde = os.path.join(hak, f)
+        os.makedirs(os.path.dirname(kohde), exist_ok=True)
+        shutil.copy2(os.path.join(JUURI, f), kohde, follow_symlinks=False)
+    subprocess.run([os.path.join(JUURI, "tools", "prune-tree"), hak], check=True)
+    # karsinta saa siirtää jaetun tiedoston (SIIRROT) mutta ei poistaa tai muuttaa sitä
+    kadonneet = []
+    for f in sorted(muutetut | set(omat)):
+        if os.path.lexists(os.path.join(hak, f)):
+            continue
+        alku = next((a for a in SIIRROT if f.startswith(a)), None)
+        siirretty = alku and os.path.join(hak, SIIRROT[alku] + f[len(alku):])
+        odotettu = tila[f] if f in tila else open(os.path.join(JUURI, f), "rb").read()
+        if not (siirretty and os.path.isfile(siirretty) and open(siirretty, "rb").read() == odotettu):
+            kadonneet.append(f)
+    if kadonneet:
+        raise Virhe("tools/prune-tree poisti patchatun tai tämän puun tiedoston: " + ", ".join(kadonneet))
+    print("upstream: %s: %d patchia, %d muutettua upstream-tiedostoa, %d uutta tiedostoa" %
+          (hak, len(lue_sarja()), len(muutetut), len(omat)), file=sys.stderr)
+
+
+def refresh(nimi, hak):
+    lukko = lue_lukko()
+    tarkista_commit(lukko)
+    sarja = lue_sarja()
+    if nimi not in sarja:
+        raise Virhe("%s ei ole sarjassa" % nimi)
+    tila = {}
+    for n in sarja[:sarja.index(nimi)]:
+        for osa in lue_patch(os.path.join(PATCHIT, n)):
+            if osa.polku not in tila:
+                tila[osa.polku] = nayta(lukko["COMMIT"], osa.polku)
+            tila[osa.polku] = sovella(osa, tila[osa.polku])
+    teksti = b""
+    for osa in lue_patch(os.path.join(PATCHIT, nimi)):
+        ennen = tila[osa.polku] if osa.polku in tila else nayta(lukko["COMMIT"], osa.polku)
+        p = os.path.join(hak, osa.polku)
+        alku = next((a for a in SIIRROT if osa.polku.startswith(a)), None)
+        if not os.path.isfile(p) and alku:
+            p = os.path.join(hak, SIIRROT[alku] + osa.polku[len(alku):])
+        teksti += tee_osa(osa.polku, ennen, open(p, "rb").read(), tiedoston_tila(lukko["COMMIT"], osa.polku))
+    with open(os.path.join(PATCHIT, nimi), "wb") as f:
+        f.write(teksti)
+    print("upstream: %s tehty uudelleen; aja tools/tree (myöhemmät saman tiedoston patchit)" % nimi)
+
+
+# --- ehdokkaan tarkistus ja päivitys
+
+def nayta(rev, polku):
+    r = git("cat-file", "blob", "%s:%s" % (rev, polku), cwd=valimuisti(), tarkista=False)
+    return r.stdout if r.returncode == 0 else None
+
+
+def tiedoston_tila(rev, polku):
+    r = git("ls-tree", rev, "--", polku, cwd=valimuisti()).stdout.decode().split()
+    return r[0] if r else "100644"
+
+
+def tee_osa(polku, ennen, jalkeen, tila):
+    with tempfile.TemporaryDirectory() as t:
+        kirjoita(os.path.join(t, "a", polku), ennen, tila)
+        kirjoita(os.path.join(t, "b", polku), jalkeen, tila)
+        r = git("-c", "core.quotepath=off", "diff", "--no-index", "--no-prefix", "--full-index", "--no-color",
+                "--no-ext-diff", "--no-renames", "a/" + polku, "b/" + polku, cwd=t, tarkista=False)
+    if r.returncode not in (0, 1):
+        raise Virhe("git diff %s: %s" % (polku, r.stderr.decode(errors="replace")))
+    teksti = re.sub(rb"(?m)^(index [0-9a-f]{40}\.\.[0-9a-f]{40})$", rb"\1 " + tila.encode(), r.stdout)
+    return teksti
+
+
+def yhdista(oma, pohja, heidan):
+    with tempfile.TemporaryDirectory() as t:
+        nimet = []
+        for n, d in (("oma", oma), ("pohja", pohja), ("upstream", heidan)):
+            with open(os.path.join(t, n), "wb") as f:
+                f.write(d)
+            nimet.append(os.path.join(t, n))
+        r = subprocess.run(["git", "merge-file", "-p", "--diff3", "-L", "plan2001", "-L", "vanha upstream",
+                            "-L", "uusi upstream"] + nimet, capture_output=True)
+    if r.returncode < 0 or r.returncode > 127:
+        raise Virhe("git merge-file: %s" % r.stderr.decode(errors="replace"))
+    return r.stdout, r.returncode
+
+
+def uudelleenpohjaa(vanha, uusi, ratkaisut=None):
+    """Kolmitieyhdistäminen: A = vanha upstream, B = A + patchit,
+    C = uusi upstream.  Palauttaa (nimi, tila, teksti, ristiriidat, huomiot)."""
+    tulos, tila_a, tila_c = [], {}, {}
+    for nimi in lue_sarja():
+        osat, teksti, ristiriidat, huomiot, tyhjat = lue_patch(os.path.join(PATCHIT, nimi)), b"", [], [], 0
+        for osa in osat:
+            p = osa.polku
+            if p not in tila_a:
+                tila_a[p], tila_c[p] = nayta(vanha, p), nayta(uusi, p)
+            a, c = tila_a[p], tila_c[p]
+            if a is None or blob(a) != osa.ennen:
+                raise Virhe("%s: %s ei vastaa vanhaa upstreamia %s (patch ei ole lukon mukainen)" % (nimi, p, vanha[:12]))
+            b = sovella(osa, a)
+            tila_a[p] = b
+            if c is None:
+                ristiriidat.append((p, "poistettu upstreamissa", None, a, b, None))
+                continue
+            if a == c:
+                yhd, n = b, 0
+            else:
+                yhd, n = yhdista(b, a, c)
+                muut = git("log", "--format=%h %s", "%s..%s" % (vanha, uusi), "--", p, cwd=valimuisti()).stdout.decode().strip()
+                huomiot.append("%s: upstream muuttanut (%s)" % (p, "; ".join(muut.splitlines())))
+            if n:
+                r = ratkaisut and os.path.join(ratkaisut, nimi, p)
+                if not (r and os.path.isfile(r)):
+                    ristiriidat.append((p, "%d ristiriitaa" % n, yhd, a, b, c))
+                    continue
+                yhd = open(r, "rb").read()
+                if re.search(rb"(?m)^(<<<<<<<|\|\|\|\|\|\|\||>>>>>>>)( |$)", yhd):
+                    raise Virhe("%s: ratkaisussa on ristiriitamerkkejä" % r)
+                huomiot.append("%s: %d ristiriitaa ratkaistu käsin (%s)" % (p, n, r))
+            tila_c[p] = yhd
+            if yhd == c:
+                tyhjat += 1
+                huomiot.append("%s: muutos on jo upstreamissa" % p)
+                continue
+            teksti += tee_osa(p, c, yhd, tiedoston_tila(uusi, p))
+        if ristiriidat:
+            tila = "RISTIRIITA"
+        elif tyhjat == len(osat):
+            tila = "upstreamissa"
+        elif any("upstream muuttanut" in h for h in huomiot) or tyhjat:
+            tila = "uudelleenpohjattu"
+        else:
+            tila = "ennallaan"
+        tulos.append((nimi, tila, teksti, ristiriidat, huomiot))
+    return tulos
+
+
+def buildit():
+    """build.9front.org:n tulokset: {sha: (numero, pass|fail)}."""
+    try:
+        sivu = urllib.request.urlopen(BUILDSIVU, timeout=30).read().decode(errors="replace")
+    except OSError as e:
+        print("upstream: %s ei vastaa (%s)" % (BUILDSIVU, e), file=sys.stderr)
+        return {}
+    teksti = re.sub(r"<[^>]*>", " ", sivu)
+    return {m.group(2): (m.group(3), m.group(1))
+            for m in re.finditer(r"\[(pass|fail)\]\s+([0-9a-f]{40})\s+Build Logs\s+(\d+)", teksti)}
+
+
+def ehdokas(lukko, rev):
+    lahde = hae(lukko, pakota=True)
+    print("upstream: haettu %s" % lahde)
+    rev = rev or "refs/heads/" + lukko["BRANCH"]
+    r = git("rev-parse", "--verify", rev + "^{commit}", cwd=valimuisti(), tarkista=False)
+    if r.returncode:
+        raise Virhe("%s ei ole commit upstreamissa" % rev)
+    return r.stdout.decode().strip()
+
+
+def kuvaa(rev, b):
+    loki = git("log", "-1", "--format=%ci %s", rev, cwd=valimuisti()).stdout.decode().strip()
+    n = git("rev-list", "--count", rev, cwd=valimuisti()).stdout.decode().strip()
+    tila = b.get(rev)
+    return "%s build %s (%s) %s" % (rev, n, ("build.9front.org: %s" % tila[1]) if tila else "ei build.9front.org:n listalla", loki)
+
+
+def raportti(lukko, uusi):
+    vanha = lukko["COMMIT"]
+    b = buildit()
+    print("lukittu:  " + kuvaa(vanha, b))
+    print("ehdokas:  " + kuvaa(uusi, b))
+    if b and uusi in b and b[uusi][1] != "pass":
+        print("VAROITUS: ehdokkaan build ei ole onnistunut")
+    onnistuneet = [s for s, (n, t) in b.items() if t == "pass"]
+    if b and uusi not in b:
+        uusin = max(onnistuneet, key=lambda s: int(b[s][0]), default=None)
+        print("VAROITUS: ehdokkaalla ei ole buildia; uusin onnistunut: %s" % (kuvaa(uusin, b) if uusin else "-"))
+    if git("merge-base", "--is-ancestor", vanha, uusi, cwd=valimuisti(), tarkista=False).returncode:
+        print("VAROITUS: ehdokas ei ole lukitun jälkeläinen")
+    commitit = git("rev-list", "--count", "%s..%s" % (vanha, uusi), cwd=valimuisti()).stdout.decode().strip()
+    muutetut = [r.split("\t") for r in git("diff", "--name-status", "--no-renames", vanha, uusi,
+                                             cwd=valimuisti()).stdout.decode().splitlines()]
+    print("väli: %s committia, %d tiedostoa" % (commitit, len(muutetut)))
+    omat = set(omat_tiedostot())
+    tormaa = sorted(p for t, p in muutetut if t == "A" and p in omat)
+    if tormaa:
+        print("TÖRMÄYS: upstream lisäsi tämän puun tiedostot: " + ", ".join(tormaa))
+    return tormaa
+
+
+def check(rev=None):
+    lukko = lue_lukko()
+    uusi = ehdokas(lukko, rev)
+    tormaa = raportti(lukko, uusi)
+    if uusi == lukko["COMMIT"]:
+        print("lukko on ehdokkaassa")
+        return 0
+    ristiriitoja = 0
+    for nimi, tila, _, ristiriidat, huomiot in uudelleenpohjaa(lukko["COMMIT"], uusi):
+        print("%-28s %s" % (nimi, tila))
+        for h in huomiot:
+            print("    " + h)
+        for p, syy, *_ in ristiriidat:
+            print("    RISTIRIITA %s: %s" % (p, syy))
+            ristiriitoja += 1
+    return 1 if ristiriitoja or tormaa else 0
+
+
+def update(rev=None, ratkaisut=None):
+    if git("status", "--porcelain", "--untracked-files=no", cwd=JUURI).stdout.strip():
+        raise Virhe("työpuussa on muutoksia: update vaatii puhtaan työpuun")
+    haara = git("symbolic-ref", "-q", "--short", "HEAD", cwd=JUURI, tarkista=False).stdout.decode().strip()
+    if haara in ("", "main", "master"):
+        raise Virhe("update tehdään omassa haarassaan (nyt: %s)" % (haara or "irrallinen HEAD"))
+    lukko = lue_lukko()
+    uusi = ehdokas(lukko, rev)
+    if raportti(lukko, uusi):
+        raise Virhe("törmäävät tiedostot: siirrä ne patchiksi ennen päivitystä")
+    if uusi == lukko["COMMIT"]:
+        print("lukko on jo ehdokkaassa")
+        return 0
+    tulos = uudelleenpohjaa(lukko["COMMIT"], uusi, ratkaisut and os.path.abspath(ratkaisut))
+    ulos = os.path.join(JUURI, "build", "upstream-update")
+    shutil.rmtree(ulos, ignore_errors=True)
+    ristiriitoja = 0
+    for nimi, tila, _, ristiriidat, _ in tulos:
+        for p, syy, yhd, a, b, c in ristiriidat:
+            ristiriitoja += 1
+            for paate, d in (("", yhd), (".vanha", a), (".plan2001", b), (".uusi", c)):
+                if d is not None:
+                    kirjoita(os.path.join(ulos, nimi, p + paate), d)
+            print("RISTIRIITA %s: %s: %s (%s)" % (nimi, p, syy, os.path.join(ulos, nimi, p)))
+    if ristiriitoja:
+        print("update: %d ristiriitaa; seurattuihin tiedostoihin ei koskettu.  Korjaa patchit vanhaa "
+              "lukkoa vasten tai tee yhdistetty muutos käsin ja aja update uudelleen." % ristiriitoja)
+        return 1
+    poistetut = []
+    for nimi, tila, teksti, _, huomiot in tulos:
+        print("%-28s %s" % (nimi, tila))
+        for h in huomiot:
+            print("    " + h)
+        polku = os.path.join(PATCHIT, nimi)
+        if tila == "upstreamissa":
+            os.unlink(polku)
+            poistetut.append(nimi)
+        elif tila != "ennallaan":
+            with open(polku, "wb") as f:
+                f.write(teksti)
+    if poistetut:
+        rivit = open(SARJA).read().splitlines(keepends=True)
+        with open(SARJA, "w") as f:
+            f.writelines(r for r in rivit if r.split("#", 1)[0].split()[:1] not in [[n] for n in poistetut])
+    b = buildit().get(uusi)
+    puu = git("rev-parse", uusi + "^{tree}", cwd=valimuisti()).stdout.decode().strip()
+    n = git("rev-list", "--count", uusi, cwd=valimuisti()).stdout.decode().strip()
+    teksti = open(LUKKO).read()
+    for k, v in (("COMMIT", uusi), ("TREE", puu), ("BUILD", b[0] if b else n),
+                 ("BUILD_STATUS", b[1] if b else "unknown")):
+        teksti = re.sub(r"(?m)^%s=.*$" % k, "%s=%s" % (k, v), teksti)
+    with open(LUKKO, "w") as f:
+        f.write(teksti)
+    print("update: lukko %s, %d patchia poistettu (%s).  Päivitä patches/9front/README, katselmoi "
+          "git diff, aja tools/tree ja kohteiden käännökset ennen committia." %
+          (uusi[:12], len(poistetut), ", ".join(poistetut) or "-"))
+    return 0
+
+
+def main(argv):
+    if not argv or argv[0] not in ("source", "bootiso", "assemble", "refresh", "check", "update"):
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    try:
+        if argv[0] == "source":
+            print(source())
+        elif argv[0] == "bootiso":
+            print(bootiso())
+        elif argv[0] == "assemble":
+            if len(argv) != 2:
+                raise Virhe("käyttö: tools/upstream assemble HAK")
+            assemble(argv[1])
+        elif argv[0] == "refresh":
+            if len(argv) != 3:
+                raise Virhe("käyttö: tools/upstream refresh NIMI HAK")
+            refresh(argv[1], argv[2])
+        elif argv[0] == "check":
+            return check(*argv[1:2])
+        else:
+            arg = argv[1:]
+            ratkaisut = None
+            if "--resolved" in arg:
+                i = arg.index("--resolved")
+                if i + 1 >= len(arg):
+                    raise Virhe("--resolved HAK")
+                ratkaisut = arg[i + 1]
+                del arg[i:i + 2]
+            return update(*arg[:1], ratkaisut=ratkaisut)
+    except Virhe as e:
+        print("upstream: %s" % e, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
