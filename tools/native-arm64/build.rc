@@ -1,25 +1,27 @@
 #!/bin/rc
-# Cross-build frozen 9front ARM64 with its native 7c/7a/7l in the build VM.
+# Cross-build Plan2001's ARM64 from the locked 9front source
+# (upstream/9front.lock, tools/tree) with 7c/7a/7l built from that source
+# (tools/native-amd64/build: root.tar), in the build VM.  The bootstrap
+# ISO only gives native-rules.rc's dry run /arm; nothing built uses it.
 rfork ne
 p2=/tmp/p2
+r=$p2/root
 fn die { echo 'arm64 build: '^$"* >[1=2]; exit $"* }
 9660srv >[2]/dev/null
 mount /srv/9660 /n/dist /dev/sdE1/data || die ISO
-bind -b /n/dist/amd64/bin /bin
-bind /n/dist/amd64 /amd64
-bind /n/dist/lib /lib
-bind /n/dist/adm/timezone /adm/timezone
+test -f $r/sys/src/mkfile || die 'assembled tree missing'
+@{cd $r && tar xf $p2/root.tar amd64/bin amd64/lib} || die 'amd64 toolchain'
+test -x $r/amd64/bin/7c -a -x $r/amd64/bin/7l -a -x $r/amd64/bin/mk || die 'amd64 toolchain incomplete'
+bind -c $r/amd64 /amd64
+bind -bc $r/lib /lib
+bind $r/adm/timezone /adm/timezone
+bind -c $r/sys /sys
+bind -c $r/rc /rc
+bind /amd64/bin /bin
+bind -a /rc/bin /bin
 # tools/tree already verified and assembled these writable sources/headers.
-mkdir -p $p2/arm64
-bind $p2/src /sys/src
-bind /n/dist/rc /rc
-bind $p2/include /sys/include
-cp /n/dist/arm64/mkfile $p2/arm64/mkfile
-mkdir -p $p2/arm64/include
-dircp /n/dist/arm64/include $p2/arm64/include || die headers
-rm -rf $p2/arm64/include/ape
-mkdir -p $p2/arm64/lib $p2/arm64/bin
-bind -c $p2/arm64 /arm64
+mkdir -p $r/arm64/lib $r/arm64/bin
+bind -c $r/arm64 /arm64
 objtype=arm64
 if(~ $1 loaderonly){
  cd /sys/src/boot/efi

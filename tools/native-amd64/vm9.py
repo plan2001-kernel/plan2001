@@ -481,6 +481,16 @@ def aout_entry(polku):
     return magic, entry
 
 
+def puu_jasenet(tyohak, jaettu=JUURI, dist=False):
+    """Koko koottu puu (tools/tree) käännöskoneen juureksi: root/...;
+    dist: myös 9frontin dist-juuren tiedostot (tools/distfiles)."""
+    source_jasenet(tyohak, jaettu)
+    puu = os.path.join(tyohak, "source")
+    if dist:
+        subprocess.check_call([os.path.join(JUURI, "tools", "distfiles"), puu, puu])
+    return [("root", puu)]
+
+
 def source_jasenet(tyohak, jaettu=JUURI):
     """Build from the same verified patch/overlay assembly as tools/tree."""
     tree = os.path.join(tyohak, "source")

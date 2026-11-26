@@ -1,13 +1,15 @@
 #!/bin/rc
-# Raspberry Pi 4 (bcm64) -käännös 9front-11952-koneessa (tools/rpi4/build).
-# 9frontin oma työkaluketju: mk, 7c, 7a, 7l (objtype=arm64).
+# Raspberry Pi 4 (bcm64) -käännös käännöskoneessa (tools/rpi4/build).
+# 9frontin oma työkaluketju: mk, 7c, 7a, 7l (objtype=arm64), lukitusta
+# lähteestä käännettynä (tools/native-amd64/build: root.tar).
 #
 # Levyt (AHCI, katso ../native-amd64/vm9.py):
-#	sdE1	pinnattu 9front-11952.amd64.iso: lähteet, otsakkeet,
-#		työkalut, laiteohjelmisto (/sys/src/boot/bcm) ja jakelun
-#		muut tiedostot; ei koneen omaa /sys/src:tä
-#	sdE2	sisään: tämä skripti ja karsittu 9front-puu (root/...) tar-
-#		muodossa, purettu hakemistoon /tmp/p2 ennen tätä
+#	sdE1	bootstrap-ISO (upstream/9front.lockin BOOT_ISO): Pi:n
+#		laiteohjelmisto (/sys/src/boot/bcm), jonka 9frontin mkfile
+#		hakisi raspberrypi/firmwaren liikkuvasta masterista, ja
+#		9frontin hakemistojen malli (ei tiedostoja)
+#	sdE2	sisään: tämä skripti, karsittu 9front-puu (root/...) ja
+#		root.tar tar-muodossa, purettu hakemistoon /tmp/p2 ennen tätä
 #	sdE3	ulos: ytimet ja tarkistustiedot tar-muodossa
 #	sdE4	ulos: 9frontin oma pi3.img-levykuva (pi3 + pi4) raakana
 #
@@ -24,7 +26,6 @@ fn die {
 
 9660srv >[2]/dev/null
 mount /srv/9660 /n/dist /dev/sdE1/data || die 'ISO ei liity'
-test -d /n/dist/sys/src/9/bcm64 || die 'ISO:lla ei ole /sys/src/9/bcm64'
 test -r /n/dist/sys/src/boot/bcm/start4cd.elf || die 'ISO:lla ei ole Pi4-laiteohjelmistoa'
 
 # Lähdepuu = tools/tree:n rakentama pinnattu julkaisu, patchit ja overlay.
@@ -41,10 +42,28 @@ dircp $p2/root/sys/include $w/include || die 'assembled sys/include copy'
 dircp $p2/root/arm64 $w/arm64 || die 'arm64 kopio'
 dircp $p2/root/acme $w/acme || die 'acme kopio'
 dircp $p2/root/rc $w/rc || die 'rc kopio'
+# /arm64/bin:n, /arm64/lib:n ja /rc/bin:n hakemistot kuten 9frontissa (git ei
+# säilytä tyhjiä hakemistoja, mk install ei tee niitä)
+mkdir -p $w/arm64/bin $w/arm64/lib $w/acme/bin/arm64
+for(d in `{walk -d /n/dist/amd64/bin | sed 's|^/n/dist/amd64/bin/?||'})
+	if(! ~ $d '')
+		mkdir -p $w/arm64/bin/$d
+for(d in `{walk -d /n/dist/rc/bin | sed 's|^/n/dist/rc/bin/?||'})
+	if(! ~ $d '')
+		mkdir -p $w/rc/bin/$d
+for(f in /n/dist/sys/src/boot/bcm/*)
+	if(! ~ $f */mkfile)
+		cp $f $w/src/boot/bcm/ || die 'laiteohjelmiston kopio'
+mkdir -p $w/tc
+@{cd $w/tc && tar xf $p2/root.tar amd64/bin amd64/lib} || die 'amd64-työkaluketju'
+test -x $w/tc/amd64/bin/7c -a -x $w/tc/amd64/bin/7l || die 'amd64-työkaluketju puuttuu'
+mkdir -p $w/tc/amd64/include
+dircp $p2/root/amd64/include $w/tc/amd64/include || die 'amd64-otsakkeet'
+cp $p2/root/amd64/mkfile $w/tc/amd64/mkfile || die 'amd64/mkfile'
 
-# isännän (amd64) työkalut julkaisusta, kohteen tiedostot kopioista
-bind -b /n/dist/amd64/bin /bin
-bind /n/dist/amd64 /amd64
+# isännän (amd64) työkalut lukitusta lähteestä, kohteen tiedostot kopioista
+bind -b $w/tc/amd64/bin /bin
+bind $w/tc/amd64 /amd64
 bind -c $w/include /sys/include
 bind -c $w/src /sys/src
 bind -c $w/arm64 /arm64

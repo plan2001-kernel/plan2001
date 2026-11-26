@@ -1,15 +1,18 @@
 #!/bin/rc
-# Plan2001 AMD64 -levykuva 9front-11952-koneessa (tools/native-amd64/mkimage).
+# Plan2001 AMD64 -levykuva käännöskoneessa (tools/native-amd64/mkimage).
 # Samat vaiheet kuin 9frontin asentajassa (inst/prepdisk, mountcwfs,
 # copydist, bootsetup "use esp as 9fat"), ilman kysymyksiä:
 #
 #	ESP (GPT, isännän tekemä)	FAT: \EFI\BOOT\BOOTX64.EFI, 9pc64, plan9.ini
 #	Plan 9 -osio (GPT)		nvram fscache fsworm other, cwfs64x
-#					ja 9front-11952:n jakelu (allproto)
+#					ja jakelu (allproto): koottu puu
+#					(tools/tree, tools/distfiles) ja sen
+#					käännös (tools/native-amd64/build)
 #
-# Levyt: sdE1 pinnattu ISO (jakelu), sdE2 sisään (tämä skripti, 9pc64,
-# bootx64.efi, rc, kbdfs, termrc, console, plan9.ini ja karsittu lähde; purettu
-# hakemistoon /tmp/p2), sdE3 kohdelevy.
+# Levyt: sdE1 bootstrap-ISO (ei käytetä; pitää levyjen numeroinnin),
+# sdE2 sisään (tämä skripti, 9pc64, bootx64.efi, plan9.ini ja root.tar =
+# käännetty juuri; purettu hakemistoon /tmp/p2), sdE3 kohdelevy.  Kuvan
+# tekevät työkalut ovat käännöksen.
 #
 # Käyttö: rc mkimage.rc LEVY
 #	LEVY	kohdelevyn nimi kohdekoneessa, esim. sdE0 (plan9.ini:n
@@ -28,14 +31,15 @@ fn die {
 
 ~ $#disk 1 || die 'käyttö: mkimage.rc LEVY'
 
-9660srv >[2]/dev/null
-mount /srv/9660 /n/dist /dev/sdE1/data || die 'ISO ei liity'
-test -d /n/dist/dist/9front || die 'ISO:lla ei ole jakelua'
-
-# Käytä varmennetun julkaisun työkaluja ja kopiointiprotoa, ei
-# käännöskoneeseen mahdollisesti muutettuja versioita.
-bind -b /n/dist/amd64/bin /bin
-bind -b /n/dist/rc/bin /bin
+r=$p2/root
+mkdir -p $r
+chmod 775 $r
+@{cd $r && tar xf $p2/root.tar} || die 'käännöksen purku'
+test -f $r/sys/lib/sysconfig/proto/allproto || die 'käännetty juuri puuttuu'
+test -x $r/amd64/bin/rc -a -x $r/amd64/bin/cwfs64x || die 'käännös puuttuu'
+# kuvan tekevät työkalut käännöksestä, ei käännöskoneesta
+bind $r/amd64/bin /bin
+bind -a $r/rc/bin /bin
 
 # GPT-osiot ctl-tiedostoon (diskparts: disk/edisk -p)
 diskparts $t
@@ -114,43 +118,17 @@ while(! mount -c /srv/$sname /n/newfs){
 	sleep 2
 }
 
-echo '--- jakelu (inst/copydist)'
-disk/mkfs -z 16372 -U -s /n/dist -d /n/newfs /n/dist/sys/lib/sysconfig/proto/allproto >/tmp/mkfs.p2 >[2=1]
+echo '--- jakelu (inst/copydist): koottu puu ja käännös'
+disk/mkfs -z 16372 -U -s $r -d /n/newfs $r/sys/lib/sysconfig/proto/allproto >/tmp/mkfs.p2 >[2=1]
 tail -5 /tmp/mkfs.p2
 if(grep -s 'can''t (create|write)|file system full' /tmp/mkfs.p2)
 	die 'jakelun kopio epäonnistui (cwfs:n välimuisti liian pieni? suurenna --size)'
 test -x /n/newfs/amd64/bin/rc || die 'jakelun kopio epäonnistui'
-
-# Asennettu lähdepuu on sama karsittu puu, josta ydin käännettiin.
-rm -rf /n/newfs/sys/src /n/newfs/sys/include /n/newfs/sys/lib /n/newfs/sys/doc /n/newfs/sys/man /n/newfs/rc
-mkdir -p /n/newfs/sys/src /n/newfs/sys/include /n/newfs/sys/lib /n/newfs/sys/doc /n/newfs/sys/man /n/newfs/rc
-dircp $p2/src /n/newfs/sys/src || die 'lähdepuun kopio'
-dircp $p2/include /n/newfs/sys/include || die 'otsakkeiden kopio'
-dircp $p2/syslib /n/newfs/sys/lib || die 'sys/lib-kopio'
-dircp $p2/sysdoc /n/newfs/sys/doc || die 'sys/doc-kopio'
-dircp $p2/sysman /n/newfs/sys/man || die 'sys/man-kopio'
-dircp $p2/rcroot /n/newfs/rc || die 'rc-kopio'
 # kaikkien käyttäjien on luettava rc:n alustus ja otsakkeet (newns, rc, 6c)
 ls -l /n/newfs/rc/lib/rcmain /n/newfs/rc/bin/termrc /n/newfs/sys/include/libc.h /n/newfs/sys/lib/yaccpar |
 	awk '{ if(substr($1, 9, 1) != "r") print }' | grep -s . && die 'järjestelmätiedostot eivät ole kaikkien luettavissa'
-rm -rf /n/newfs/amd64/include/ape /n/newfs/amd64/lib/ape /n/newfs/amd64/bin/ape
-rm -rf /n/newfs/amd64/bin/bitsy
-rm -f /n/newfs/amd64/bin/gs /n/newfs/amd64/bin/pcc
-for(p in 1a 1c 1l 2a 2c 2l 5a 5c 5e 5i 5l 8a 8c 8l 9a 9c 9l ka kc ki kl qa qc qi ql va vc vl tc tl)
-	rm -f /n/newfs/amd64/bin/$p
-for(p in compress eqn grap pic spin vi)
-	rm -f /n/newfs/amd64/bin/$p
-for(p in 8prefix apm antiword lpdaemon lpdsend lpsend download postgif postprint postreverse posttek tcpostio)
-	rm -f /n/newfs/amd64/bin/aux/$p
-for(p in flacdec flacenc mp3enc oggdec oggenc)
-	rm -f /n/newfs/amd64/bin/audio/$p
-rm -rf /n/newfs/386 /n/newfs/68000 /n/newfs/68020 /n/newfs/arm /n/newfs/mips /n/newfs/power /n/newfs/power64 /n/newfs/sparc /n/newfs/sparc64 /n/newfs/spim
-rm -rf /n/newfs/acme/bin/386 /n/newfs/acme/bin/arm /n/newfs/acme/bin/mips /n/newfs/acme/bin/power /n/newfs/acme/bin/power64 /n/newfs/acme/bin/sparc /n/newfs/acme/bin/sparc64 /n/newfs/acme/bin/spim
 test -f /n/newfs/sys/include/bootinfo.h || die 'BootInfo-otsake puuttuu'
-cp $p2/rc /n/newfs/amd64/bin/rc || die 'yhdistetyn rc:n kopio'
-# sama korjattu kbdfs kuin ytimen bootfs:ssä; sarjakonsolin oma kuori
-cp $p2/kbdfs /n/newfs/amd64/bin/aux/kbdfs || die 'kbdfs:n kopio'
-cp $p2/termrc $p2/console /n/newfs/rc/bin/ || die 'termrc:n ja consolen kopio'
+test -f /n/newfs/lib/ndb/local -a -f /n/newfs/sys/man/1/INDEX || die 'dist-tiedostot tai man-indeksit puuttuvat'
 
 # Plan2001:n ydin ja loader myös asennettuun järjestelmään, jotta
 # 9frontin omat työkalut (inst/bootsetup, 9fs 9fat) käyttävät niitä

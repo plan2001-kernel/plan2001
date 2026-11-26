@@ -1,70 +1,94 @@
 #!/bin/rc
-# Plan2001 AMD64 -käännös 9front-11952-koneessa (tools/native-amd64/build).
-# 9frontin oma työkaluketju: mk, 6c, 6a, 6l, aux/aout2efi.
+# Plan2001 AMD64 9frontin omalla työkaluketjulla (mk, 6c, 6a, 6l,
+# aux/aout2efi) bootstrap-koneessa (tools/native-amd64/build): lukitun
+# lähteen (upstream/9front.lock, tools/tree) koko /sys/src - kirjastot,
+# ohjelmat, acme - sekä ydin, UEFI-loader ja man-indeksit.
 #
 # Levyt (AHCI, katso vm9.py):
-#	sdE1	pinnattu 9front-11952.amd64.iso: lähteet, otsakkeet, kirjastot
-#		ja työkalut, ei koneen omaa (mahdollisesti muutettua) /sys/src:tä
-#	sdE2	sisään: tämä skripti ja koottu lähde (src, include) tar-muodossa,
+#	sdE1	bootstrap-ISO (lukon BOOT_ISO): vain vaiheen 1 kääntäjät ja
+#		työkalut, ei mitään toimitettavaa
+#	sdE2	sisään: tämä skripti ja koottu puu (root) tar-muodossa,
 #		purettu hakemistoon /tmp/p2 ennen tätä
-#	sdE3	ulos: 9pc64, bootx64.efi (ja bootaa64.efi) tar-muodossa
+#	sdE3	ulos: root.tar (käännetty juuri: puu, /amd64/bin, /amd64/lib,
+#		/acme/bin/amd64, asennetut rc-skriptit, man-indeksit),
+#		9pc64, bootx64.efi (ja bootaa64.efi), rc, kbdfs, libc.a,
+#		entry.txt tar-muodossa
+#
+# Vaihe 1 kääntää koko lähteen bootstrap-työkaluilla uuteen /amd64:ään.
+# Vaihe 2 on 9frontin oma release (sys/src/mkfile): nuke, kirjastot pois,
+# mk install vaiheen 1 työkaluilla ja kääntäjillä.  Toimitettava on siis
+# lukitun lähteen kääntäjien kääntämää lukittua lähdettä.
 #
 # Käyttö: rc build.rc [aa64]
 rfork ne
 p2=/tmp/p2
+root=$p2/root
 
 fn die {
 	echo 'build.rc: '^$"* >[1=2]
 	exit $"*
 }
 
+fn vaihe {
+	echo '---' $"* `{date}
+}
+
 9660srv >[2]/dev/null
-mount /srv/9660 /n/dist /dev/sdE1/data || die 'ISO ei liity'
-test -d /n/dist/sys/src/9/pc64 || die 'ISO:lla ei ole /sys/src/9/pc64'
+mount /srv/9660 /n/boot /dev/sdE1/data || die 'bootstrap-ISO ei liity'
+test -x /n/boot/amd64/bin/6c || die 'bootstrap-ISO:lla ei ole 6c:tä'
+test -f $root/sys/src/mkfile || die 'koottu puu puuttuu'
 
-# kääntäjät, kirjastot ja otsakkeet julkaisusta; BootInfo-otsake overlaysta
-bind -b /n/dist/amd64/bin /bin
-bind /n/dist/rc /rc
-bind /n/dist/lib /lib
-# Writable target libraries, with compiler programs from the pinned ISO.
-mkdir -p $p2/amd64/include $p2/amd64/lib $p2/amd64/bin
-# Bootfs inherits directory permissions from the target tree.
-chmod 775 $p2/amd64 $p2/amd64/bin $p2/amd64/lib $p2/amd64/include
-cp /n/dist/amd64/mkfile $p2/amd64/mkfile
-dircp /n/dist/amd64/include $p2/amd64/include || die headers
-dircp /n/dist/amd64/lib $p2/amd64/lib || die libraries
-rm -rf $p2/amd64/include/ape $p2/amd64/lib/ape
-bind $p2/amd64 /amd64
-bind /n/dist/amd64/bin /amd64/bin
-bind $p2/include /sys/include
-bind $p2/src /sys/src
+# uusi /amd64: include ja mkfile lähteestä, bin ja lib käännöksestä;
+# /amd64/bin:n ja /rc/bin:n alihakemistot kuten 9frontissa (git ei
+# säilytä tyhjiä hakemistoja, mk install ei tee niitä)
+mkdir -p $root/amd64/bin $root/amd64/lib $root/acme/bin/amd64
+for(t in amd64/bin rc/bin)
+	for(d in `{walk -d /n/boot/$t | sed 's|^/n/boot/'^$t^'/?||'})
+		if(! ~ $d '')
+			mkdir -p $root/$t/$d
+for(d in $root/amd64 $root/amd64/bin $root/amd64/lib $root/acme/bin/amd64)
+	chmod 775 $d
+
 objtype=amd64
-cd /sys/src/libc
-mk install >[2=1] || die libc
+cputype=amd64
+bind -c $root/amd64 /amd64
+bind -c $root/acme /acme
+bind -c $root/sys /sys
+bind -bc $root/lib /lib
+# vaihe 1: bootstrap-julkaisun työkalut, ei käännöskoneen omia
+bind -b /n/boot/amd64/bin /bin
+bind -b /n/boot/rc/bin /bin
 
-# Ytimen bootfs ottaa ohjelmat nimiavaruuden /amd64/bin:stä: korjattu
-# kbdfs (sarjakonsolin syöte, patches/9front/kbdfs-*.diff)
-# julkaisun binäärin päälle ennen ytimen käännöstä.
-echo '--- aux/kbdfs'
-cd /sys/src/cmd/aux/kbdfs || die kbdfs
-mk >[2=1] || die 'kbdfs käännös'
-bind 6.out /amd64/bin/aux/kbdfs || die 'kbdfs bind'
+vaihe 'vaihe 1: /sys/src bootstrap-työkaluilla'
+cd /sys/src
+mk install >[2=1] || die 'vaihe 1'
+test -x /amd64/bin/6c -a -x /amd64/bin/rc -a -x /amd64/bin/mk || die 'vaihe 1: työkaluketju puuttuu'
 
-echo '--- ydin: /sys/src/9/pc64'
+# vaihe 2: vain uudet työkalut ja lähteen rc-skriptit, järjestyksessä kuin
+# 9frontin nimiavaruudessa (/$cputype/bin, sen perään /rc/bin)
+bind -c $root/rc /rc
+bind /amd64/bin /bin
+bind -a /rc/bin /bin
+vaihe 'vaihe 2: release vaiheen 1 työkaluilla'
+cd /sys/src
+mk nuke >[2=1] || die 'vaihe 2: nuke'
+rm -f /amd64/lib/*.a
+mk install >[2=1] || die 'vaihe 2'
+mk clean >[2=1] || die 'vaihe 2: clean'
+nm /amd64/lib/libc.a | grep -s -e ' [Tt] spawn$' && die 'native spawn interface leaked'
+
+vaihe 'ydin: /sys/src/9/pc64'
 cd /sys/src/9/pc64 || die pc64
-# The build VM may have private parent permissions; the boot user must
-# be able to traverse the paq root, regardless of workspace permissions.
+# Bootfs inherits directory permissions from the target tree.
 mkdir -p pc64.bootfs
 chmod 775 pc64.bootfs
 mk 'CONF=pc64' >[2=1] || die 'ytimen käännös'
 mkdir -p /n/p2boot
 paqfs -q -m /n/p2boot pc64.bootfs.paq || die bootfs
-ls -ld /n/p2boot /n/p2boot/amd64 /n/p2boot/amd64/bin /n/p2boot/rc /n/p2boot/rc/bin
-ls -l /n/p2boot/rc/bin/bootrc /n/p2boot/amd64/bin/rc
-cmp /n/p2boot/amd64/bin/aux/kbdfs /sys/src/cmd/aux/kbdfs/6.out || die 'bootfs:n kbdfs ei ole korjattu'
+cmp /n/p2boot/amd64/bin/aux/kbdfs /amd64/bin/aux/kbdfs || die 'bootfs:n kbdfs ei ole käännetty'
+cmp /n/p2boot/amd64/bin/rc /amd64/bin/rc || die 'bootfs:n rc ei ole käännetty'
 
-
-echo '--- UEFI-loader: /sys/src/boot/efi'
+vaihe 'UEFI-loader: /sys/src/boot/efi'
 cd /sys/src/boot/efi || die efi
 mk bootx64.efi >[2=1] || die 'bootx64.efi:n käännös'
 aa64=()
@@ -75,21 +99,26 @@ if(~ $1 aa64){
 		echo 'build.rc: bootaa64.efi ei käänny (ARM64 ei kuulu AMD64-vaiheeseen)'
 }
 
-echo '--- yhdistetty rc: /sys/src/cmd/rc'
-cd /sys/src/cmd/rc || die rc
-mk >[2=1] || die 'rc käännös'
+vaihe 'man-indeksit: /sys/man'
+cd /sys/man
+mk indices >[2=1] || die 'man-indeksit'
 
-rm -rf $p2/out
-mkdir -p $p2/out
-cp /sys/src/9/pc64/9pc64 /sys/src/boot/efi/bootx64.efi $p2/out || die kopio
-cp /sys/src/cmd/rc/6.out $p2/out/rc || die 'rc kopio'
-cp /sys/src/cmd/aux/kbdfs/6.out $p2/out/kbdfs || die 'kbdfs kopio'
+vaihe 'tulokset'
+out=$p2/out
+rm -rf $out
+mkdir -p $out
+cp /sys/src/9/pc64/9pc64 /sys/src/boot/efi/bootx64.efi $out || die kopio
 if(! ~ $#aa64 0)
-	cp /sys/src/boot/efi/bootaa64.efi $p2/out
-nm /amd64/lib/libc.a | grep -e ' [Tt] spawn$' && die 'native spawn interface leaked'
-cp /amd64/lib/libc.a $p2/out/libc.a || die libc-output
-cd $p2/out
-nm /sys/src/9/pc64/9pc64 | grep -e ' _efi64$' -e ' T main$' >entry.txt
+	cp /sys/src/boot/efi/bootaa64.efi $out
+cp /amd64/bin/rc $out/rc || die 'rc kopio'
+cp /amd64/bin/aux/kbdfs $out/kbdfs || die 'kbdfs kopio'
+cp /amd64/lib/libc.a $out/libc.a || die libc-output
+nm /sys/src/9/pc64/9pc64 | grep -e ' _efi64$' -e ' T main$' >$out/entry.txt
+# käännetty juuri ilman ytimen ja loaderin välitiedostoja
+@{cd /sys/src/9/pc64 && mk clean && rm -rf pc64.bootfs} >[2=1] || die 'ytimen siivous'
+@{cd /sys/src/boot/efi && mk clean} >[2=1] || die 'loaderin siivous'
+@{cd $root && tar c *} >$out/root.tar || die root.tar
+cd $out
 ls -l
 tar c * >/dev/sdE3/data || die 'tulosten kirjoitus'
 echo 'build.rc: valmis'

@@ -44,12 +44,15 @@ ALKUKARTTA = 1 << 30	# l.s:n KZERO-ikkuna, BootInfon on oltava sen alla
 
 
 def jasenet(tyo):
-    """The verified pinned release assembled with its patches and overlay."""
+    """The locked source assembled (tools/tree) and the toolchain built from it."""
     tree = os.path.join(tyo, "source")
     subprocess.check_call([os.path.join(vm9.JUURI, "tools", "tree"), tree])
+    # 9frontin dist-juuren hakemistot ja tiedostot, joihin dist-mkfile sitoo
+    subprocess.check_call([os.path.join(vm9.JUURI, "tools", "distfiles"), tree, tree, "arm64"])
     return [("build.rc", os.path.join(TAMA, "build.rc")),
             ("native-rules.rc", os.path.join(vm9.JUURI, "tools/test/native-rules.rc")),
-            ("root", tree)]
+            ("root", tree),
+            ("root.tar", os.path.join(os.environ.get("PLAN2001_NATIVE_OUT", vm9.oletus_ulos()), "root.tar"))]
 
 
 def tarkista_puu():

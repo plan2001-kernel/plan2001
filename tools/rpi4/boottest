@@ -155,14 +155,20 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--dir", default=os.environ.get("PLAN2001_RPI4_OUT",
                                                     os.path.join(vm9.valimuisti(), "rpi4")))
-    ap.add_argument("--dtb", help="oletus: julkaisun /sys/src/boot/bcm/bcm2711-rpi-4-b.dtb")
+    ap.add_argument("--dtb", help="oletus: bootstrap-ISO:n /sys/src/boot/bcm/bcm2711-rpi-4-b.dtb")
     ap.add_argument("--machine", choices=("raspi4b", "raspi3b", "both"), default="both")
     ap.add_argument("--timeout", type=int, default=900, help="raspi3b: bootrc ja SDIO-luotaus ovat hitaita")
     a = ap.parse_args()
 
-    dtb = a.dtb or os.path.join(vm9.JUURI, "build", "release", "sys", "src", "boot", "bcm", "bcm2711-rpi-4-b.dtb")
-    if not os.path.exists(dtb):
-        subprocess.check_call([os.path.join(vm9.JUURI, "tools", "release")], stdout=subprocess.DEVNULL)
+    dtb = a.dtb
+    if not dtb:
+        # Pi:n laiteohjelmiston laitepuu: lukon bootstrap-ISO:n binääriresurssi
+        # (upstreamin mkfile hakisi sen liikkuvasta haarasta)
+        iso = subprocess.check_output([os.path.join(vm9.JUURI, "tools", "upstream"), "bootiso"], text=True).strip()
+        hak = os.path.join(vm9.JUURI, "build", "bootiso")
+        subprocess.check_call(["7z", "x", "-y", "-o" + hak, iso, "sys/src/boot/bcm/bcm2711-rpi-4-b.dtb"],
+                              stdout=subprocess.DEVNULL)
+        dtb = os.path.join(hak, "sys/src/boot/bcm/bcm2711-rpi-4-b.dtb")
     for t in ("9pi4", "9pi3", "plan2001-rpi4.img"):
         if not os.path.exists(os.path.join(a.dir, t)):
             raise vm9.VirheVM("%s puuttuu (tools/rpi4/build)" % os.path.join(a.dir, t))

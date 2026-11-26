@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """
-Plan2001 AMD64: 9front-11952:n pc64-ydin (9pc64), rc ja UEFI-loader
+Plan2001 AMD64: lukitun 9front-lähteen (upstream/9front.lock, tools/tree)
+koko /sys/src (kirjastot, ohjelmat), pc64-ydin (9pc64) ja UEFI-loader
 (bootx64.efi) 9frontin omalla työkaluketjulla (mk, 6c, 6a, 6l,
-aux/aout2efi) 9front-11952-koneessa QEMU:ssa.  Linux-isäntä vain
-valmistelee levyt ja lukee tulokset; isännän GCC:tä ei käytetä.
+aux/aout2efi) bootstrap-koneessa QEMU:ssa, kahdessa vaiheessa (build.rc).
+Linux-isäntä vain valmistelee levyt ja lukee tulokset; isännän GCC:tä ei
+käytetä.
 
     tools/native-amd64/build [--shared HAK] [--out HAK] [--aa64]
 
-Lähteet: pinnattu 9front-11952-ISO (SHA256 tarkistetaan) + tämän puun
-AMD64- ja yhteinen koottu 9front-lähde (pc64/shared, port, ip, boot/efi) + yhteinen
-BootInfo v1 (sys/include/bootinfo.h, sys/src/9/port/boot{info,args,fb}.c)
-hakemistosta --shared (oletus: tämä puu).  Käännöskone: PLAN2001_BUILDVM
+Lähteet: koottu puu (tools/tree) + yhteinen BootInfo v1
+(sys/include/bootinfo.h, sys/src/9/port/boot{info,args,fb}.c) hakemistosta
+--shared (oletus: tämä puu).  Bootstrap: lukon BOOT_ISO (SHA256
+tarkistetaan; vain vaiheen 1 työkalut).  Käännöskone: PLAN2001_BUILDVM
 (oletus ~/.cache/plan2001/base.qcow2), ajetaan kertakäyttöisen
 qcow2-kerroksen päällä ilman verkkoa.  Tulokset: --out (oletus
-~/.cache/plan2001/native-amd64): 9pc64, bootx64.efi, rc, kbdfs, build.log.
+~/.cache/plan2001/native-amd64): root.tar (käännetty juuri: koottu puu
+ja tools/distfiles, /amd64/bin, /amd64/lib, /acme/bin/amd64, asennetut
+rc-skriptit, man-indeksit), 9pc64, bootx64.efi, rc, kbdfs, build.log.
 """
 
 import argparse
@@ -46,23 +50,24 @@ def main():
         kone = vm9.overlay_kone(pohja, tyo, "buildvm.qcow2")
         sisaan = vm9.tar_levylle(os.path.join(tyo, "in.img"),
                                   [("build.rc", os.path.join(vm9.TAMA, "build.rc"))]
-                                  + vm9.source_jasenet(tyo, os.path.abspath(a.shared)))
-        ulos = vm9.tyhja_levy(os.path.join(tyo, "out.img"))
+                                  + vm9.puu_jasenet(tyo, os.path.abspath(a.shared), dist=True))
+        ulos = vm9.tyhja_levy(os.path.join(tyo, "out.img"), 2 << 30)
         vm = vm9.Kone([(kone, "qcow2", False, "hd"),
                        (iso, "raw", True, "cd"),
                        (sisaan, "raw", False, "hd"),
                        (ulos, "raw", False, "hd")],
-                      vm9.Ovmf.etsi(), loki, muisti="2048", cpu="2")
+                      vm9.Ovmf.etsi(), loki, muisti="4096", cpu="4")
         vm.kaynnista()
         try:
             vm9.kaynnista_9front(vm, 300)
-            vm.aja("rm -rf /tmp/p2 && mkdir -p /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data", 120)
-            vm.aja("rc /tmp/p2/build.rc" + (" aa64" if a.aa64 else ""), 3600)
+            # Plan 9 rajaa uuden tiedoston oikeudet hakemistonsa mukaan (glendan /tmp 750)
+            vm.aja("rm -rf /tmp/p2 && mkdir -p /tmp/p2 && chmod 775 /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data", 600)
+            vm.aja("rc /tmp/p2/build.rc" + (" aa64" if a.aa64 else ""), 4 * 3600)
         finally:
             vm.sammuta()
         tiedostot = vm9.tar_levylta(ulos, a.out)
 
-    for t in ("9pc64", "bootx64.efi", "rc", "kbdfs"):
+    for t in ("9pc64", "bootx64.efi", "rc", "kbdfs", "root.tar"):
         if t not in tiedostot:
             raise vm9.VirheVM("%s puuttuu tuloksista (%s)" % (t, loki))
     magic, entry = vm9.aout_entry(os.path.join(a.out, "9pc64"))

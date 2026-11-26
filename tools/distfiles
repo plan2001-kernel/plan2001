@@ -1,0 +1,35 @@
+#!/bin/bash
+# What 9front's dist root has that is not one of its source's files at that
+# path, made from an assembled tree (tools/tree) as 9front's dist build
+# makes it: sys/lib/dist/mkfile's binds (cfg, mail/lib, lib/ndb,
+# adm/timezone and usr from sys/lib/dist), distproto's directories (git
+# keeps no empty ones: usr/glenda/bin/$objtype, mail/box/glenda ...) and
+# its empty logs.  The manuals' indexes are the build's (sys/man/mkfile:
+# indices).
+#   tools/distfiles TREE OUT [OBJTYPE]	OUT may be TREE; OBJTYPE default amd64
+set -e
+[ $# = 2 ] || [ $# = 3 ] || { echo "usage: tools/distfiles TREE OUT [OBJTYPE]" >&2; exit 2; }
+python3 -I - "$1" "$2" "${3:-amd64}" <<'PY'
+import os, shutil, sys
+tree, out, objtype = sys.argv[1:]
+dist = os.path.join(tree, "sys/lib/dist")
+for src, dst in (("cfg", "cfg"), ("mail/lib", "mail/lib"), ("ndb", "lib/ndb"), ("adm/timezone", "adm/timezone"), ("usr", "usr")):
+	if os.path.isdir(os.path.join(dist, src)):
+		shutil.copytree(os.path.join(dist, src), os.path.join(out, dst), dirs_exist_ok=True)
+stack = []
+for line in open(os.path.join(tree, "sys/lib/sysconfig/proto/distproto")):
+	if not line.strip() or line.lstrip().startswith("#"):
+		continue
+	depth = len(line) - len(line.lstrip("\t"))
+	f = line.split()
+	del stack[depth:]
+	stack.append(f[0].replace("$objtype", objtype))
+	if f[0] in ("+", "*") or "=" in f[0]:
+		continue
+	if len(f) >= 2 and f[1].startswith("d"):
+		os.makedirs(os.path.join(out, *stack), exist_ok=True)
+	elif len(f) >= 5 and f[4] == "/sys/lib/dist/empty":
+		p = os.path.join(out, *stack)
+		os.makedirs(os.path.dirname(p), exist_ok=True)
+		open(p, "a").close()
+PY

@@ -65,30 +65,9 @@ out=$d/root
 rm -rf "$out"; mkdir -p "$out"
 git -C "$root" archive tree | tar -x -C "$out"
 # what 9front's dist root has that is not one of its source's files at that
-# path (sys/lib/dist/mkfile's binds: cfg, mail/lib, lib/ndb, adm/timezone and
-# usr from sys/lib/dist; distproto's empty logs) and the manuals' indexes
-# (sys/man/mkfile's indices: secindex), made from the tree as 9front's dist
-# build makes them
-python3 -I - "$tree" "$out" <<'PY'
-import os, shutil, sys
-tree, out = sys.argv[1:]
-dist = os.path.join(tree, "sys/lib/dist")
-for src, dst in (("cfg", "cfg"), ("mail/lib", "mail/lib"), ("ndb", "lib/ndb"), ("adm/timezone", "adm/timezone"), ("usr", "usr")):
-	if os.path.isdir(os.path.join(dist, src)):
-		shutil.copytree(os.path.join(dist, src), os.path.join(out, dst), dirs_exist_ok=True)
-stack = []
-for line in open(os.path.join(tree, "sys/lib/sysconfig/proto/distproto")):
-	if not line.strip() or line.lstrip().startswith("#"):
-		continue
-	depth = len(line) - len(line.lstrip("\t"))
-	f = line.split()
-	del stack[depth:]
-	stack.append(f[0])
-	if len(f) >= 5 and f[4] == "/sys/lib/dist/empty":
-		p = os.path.join(out, *stack)
-		os.makedirs(os.path.dirname(p), exist_ok=True)
-		open(p, "a").close()
-PY
+# path (tools/distfiles), and the manuals' indexes as sys/man/mkfile's
+# indices makes them (secindex)
+"$here/distfiles" "$tree" "$out" wasm32
 for i in "$out"/sys/man/[0-9]; do
 	PATH=$PLAN9/bin:$PATH "$PLAN9/bin/rc" "$tree/sys/lib/man/secindex" "$i" >"$i/INDEX" ||
 		{ echo "dist: $i/INDEX" >&2; exit 1; }
