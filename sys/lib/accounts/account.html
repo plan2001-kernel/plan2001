@@ -34,22 +34,22 @@ small { opacity: .75; }
 <h1>Plan2001 account</h1>
 
 <section id="enroll" hidden>
-<p>An invitation for the account <b id="enrollname"></b>.  Make its passkey: on this device, on a phone (the browser shows a QR code), or on a security key.</p>
+<p>An invitation for the account <b id="enrollname"></b>.  Make its passkey: the device offers where to keep it.</p>
 <label>Name for the passkey <input id="enrolllabel" maxlength="64" placeholder="e.g. work laptop"></label>
-<p>
-<button class="main" data-hint="client-device" data-op="enroll">This device</button>
-<button data-hint="hybrid" data-op="enroll">A phone</button>
+<p><button class="main" data-hint="" data-op="enroll">Make a passkey</button></p>
+<details><summary>On another device</summary><p>
+<button data-hint="hybrid" data-op="enroll">A phone (QR code)</button>
 <button data-hint="security-key" data-op="enroll">A security key</button>
-</p>
+</p></details>
 </section>
 
 <section id="signin" hidden>
 <p>Sign in with your passkey.</p>
-<p>
-<button class="main" data-hint="client-device" data-op="login">This device</button>
-<button data-hint="hybrid" data-op="login">A phone</button>
+<p><button class="main" data-hint="" data-op="login">Sign in</button></p>
+<details><summary>On another device</summary><p>
+<button data-hint="hybrid" data-op="login">A phone (QR code)</button>
 <button data-hint="security-key" data-op="login">A security key</button>
-</p>
+</p></details>
 </section>
 
 <section id="account" hidden>
@@ -58,8 +58,8 @@ small { opacity: .75; }
 <ul id="creds"></ul>
 <label>Name for a new passkey <input id="addlabel" maxlength="64" placeholder="e.g. phone"></label>
 <p>
-<button data-hint="client-device" data-op="add">Add: this device</button>
-<button data-hint="hybrid" data-op="add">Add: a phone</button>
+<button data-hint="" data-op="add">Add a passkey</button>
+<button data-hint="hybrid" data-op="add">Add: a phone (QR code)</button>
 <button data-hint="security-key" data-op="add">Add: a security key</button>
 </p>
 </section>

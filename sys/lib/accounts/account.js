@@ -2,7 +2,9 @@
 // (sys/src/cmd/accounts/accountd.c) over this origin's /account
 // WebSocket, never another's (a page that took the address from its URL
 // could be made to relay someone's passkey to a stranger's server).
-// A ceremony is one connection: its challenge, then its request.
+// A ceremony asks its challenge, makes the passkey, and sends its request
+// on a new connection: a phone may end the first while another app makes
+// the passkey, and accountd finds the challenge by the client data.
 'use strict';
 
 const $ = (id) => document.getElementById(id);
@@ -65,10 +67,11 @@ function keep(tok, expires) {
 	document.cookie = `${cookie}=${tok}; Max-Age=${age}; Path=/; SameSite=Strict${secure}`;
 }
 
-// the hints: this device's, a phone's (hybrid: the browser's QR code), a security key's
+// the hints: none (the device offers where), a phone's (hybrid: the browser's QR code), a security key's
 function attachment(hint) {
-	return hint === 'client-device' ? 'platform' : 'cross-platform';
+	return hint ? 'cross-platform' : undefined;
 }
+const hints = (hint) => (hint ? [hint] : []);
 
 async function create(c, name, handle, hint, exclude) {
 	const cred = await navigator.credentials.create({ publicKey: {
@@ -78,7 +81,7 @@ async function create(c, name, handle, hint, exclude) {
 		pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
 		authenticatorSelection: { authenticatorAttachment: attachment(hint), residentKey: 'required', requireResidentKey: true, userVerification: 'required' },
 		attestation: 'none',
-		hints: [hint],
+		hints: hints(hint),
 		excludeCredentials: exclude.map((id) => ({ type: 'public-key', id: unb64u(id) })),
 		extensions: { prf: {} },
 		timeout: 110000,
@@ -93,7 +96,7 @@ async function enroll(hint) {
 	try {
 		const [, chal, name, handle] = answer(await c.ask(`challenge enroll ${invite}`)).split(' ');
 		const cr = await create(chal, name, handle, hint, []);
-		const [, tok, who, expires] = answer(await c.ask(`enroll ${invite} ${cr.line} ${label($('enrolllabel').value)}`)).split(' ');
+		const [, tok, who, expires] = answer(await once(`enroll ${invite} ${cr.line} ${label($('enrolllabel').value)}`)).split(' ');
 		keep(tok, Number(expires));
 		history.replaceState(null, '', location.pathname);	// the invitation is used up
 		await show(who);
@@ -106,11 +109,11 @@ async function login(hint) {
 	try {
 		const [, chal] = answer(await c.ask('challenge login')).split(' ');
 		const cred = await navigator.credentials.get({ publicKey: {
-			challenge: unb64u(chal), rpId: rpid, userVerification: 'required', hints: [hint], timeout: 110000,
+			challenge: unb64u(chal), rpId: rpid, userVerification: 'required', hints: hints(hint), timeout: 110000,
 		} });
 		const r = cred.response;
 		const handle = r.userHandle && r.userHandle.byteLength ? b64u(r.userHandle) : '-';
-		const [, tok, who, expires] = answer(await c.ask(`login ${b64u(cred.rawId)} ${b64u(r.authenticatorData)} ${b64u(r.clientDataJSON)} ${b64u(r.signature)} ${handle}`)).split(' ');
+		const [, tok, who, expires] = answer(await once(`login ${b64u(cred.rawId)} ${b64u(r.authenticatorData)} ${b64u(r.clientDataJSON)} ${b64u(r.signature)} ${handle}`)).split(' ');
 		keep(tok, Number(expires));
 		await show(who);
 		status(`Signed in as ${who}.`);
@@ -122,7 +125,7 @@ async function add(hint) {
 	try {
 		const [, chal, name, handle, ...ids] = answer(await c.ask(`challenge add ${token()}`)).split(' ');
 		const cr = await create(chal, name, handle, hint, ids);
-		answer(await c.ask(`add ${token()} ${cr.line} ${label($('addlabel').value)}`));
+		answer(await once(`add ${token()} ${cr.line} ${label($('addlabel').value)}`));
 		$('addlabel').value = '';
 		await show(name);
 		status('The passkey is added.');

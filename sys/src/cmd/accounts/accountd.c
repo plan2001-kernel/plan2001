@@ -26,7 +26,9 @@
  *	logout TOKEN			<- ok
  * and error WHY for any.  A challenge is 32 random bytes, this
  * connection's, for that one request (the next request uses it up, done
- * or not) within 2 minutes; enroll's is bound to its invitation, add's
+ * or not) within 2 minutes; a request on another connection may use it
+ * too, found by its client data's challenge (a phone's page loses its
+ * connection while another app makes the passkey); enroll's is bound to its invitation, add's
  * to its session, which must be recent (-R).  AUTH is authenticatorData,
  * CLIENT clientDataJSON, SIG the assertion's signature, HANDLE the
  * passkey's user handle (or -), LABEL a name for the passkey (B64 of
@@ -87,6 +89,7 @@ enum {
 	Maxreq	= 64,	/* requests a connection */
 	Maxcreds	= 64,
 	Fswait	= 20*1000,	/* ms for the file server to show a console command done */
+	Maxchals	= 1024,	/* challenges kept for another connection */
 };
 
 enum { Cnone, Clogin, Cenroll, Cadd };
@@ -94,6 +97,7 @@ enum { Cnone, Clogin, Cenroll, Cadd };
 typedef struct Attr Attr;
 typedef struct Conn Conn;
 typedef struct Sess Sess;
+typedef struct Chal Chal;
 
 struct Attr
 {
@@ -113,6 +117,18 @@ struct Conn
 	char	*bound;	/* the invitation's hash or the session's user */
 	char	handle[32];
 	long	expires;
+	int	adopted;	/* the challenge another connection was given */
+};
+
+/* a challenge given out, for a request on another connection */
+struct Chal
+{
+	char	chal[64];
+	int	op;
+	char	*bound;
+	char	handle[32];
+	long	expires;
+	Chal	*next;
 };
 
 struct Sess
@@ -143,6 +159,9 @@ static char hostowner[64];
 static QLock statelk;	/* the files: invitations, accounts, passkeys; the file server's users */
 static QLock sesslk;
 static Sess *sessions;
+static QLock challk;
+static Chal *chals;	/* newest first */
+static int nchals;
 
 static char *reserved[] = {
 	"glenda", "bootes", "adm", "sys", "none", "upas", "nobody", "root",
@@ -902,6 +921,101 @@ struct Req
 	WAauth	w;
 };
 
+static void
+freechal(Chal *h)
+{
+	free(h->bound);
+	free(h);
+}
+
+/* the connection's new challenge, kept for another connection too (the oldest go beyond Maxchals) */
+static void
+keepchal(Conn *c)
+{
+	Chal *h, **l;
+	int n;
+
+	h = mallocz(sizeof *h, 1);
+	strecpy(h->chal, h->chal+sizeof h->chal, c->chal);
+	h->op = c->op;
+	h->bound = c->bound ? strdup(c->bound) : nil;
+	strecpy(h->handle, h->handle+sizeof h->handle, c->handle);
+	h->expires = c->expires;
+	qlock(&challk);
+	h->next = chals;
+	chals = h;
+	n = 0;
+	for(l = &chals; *l != nil;){
+		if((*l)->expires <= time(0) || n >= Maxchals){
+			h = *l;
+			*l = h->next;
+			freechal(h);
+			continue;
+		}
+		n++;
+		l = &(*l)->next;
+	}
+	nchals = n;
+	qunlock(&challk);
+}
+
+/*
+ * the kept challenge s gone, used here: 1 if another connection used it
+ * already (one gone beyond Maxchals is this connection's still)
+ */
+static int
+dropchal(char *s)
+{
+	Chal *h, **l;
+	int used;
+
+	used = 0;
+	qlock(&challk);
+	for(l = &chals; *l != nil; l = &(*l)->next)
+		if(strcmp((*l)->chal, s) == 0){
+			h = *l;
+			used = h->op == Cnone;
+			*l = h->next;
+			freechal(h);
+			nchals--;
+			break;
+		}
+	qunlock(&challk);
+	return used;
+}
+
+/*
+ * a connection without a challenge (a new one): the kept challenge its
+ * client data (B64 client64, of type) has, as this connection's
+ */
+static void
+adoptchal(Conn *c, char *client64, char *type)
+{
+	uchar client[4096];
+	int n;
+	Chal *h, **l;
+
+	if(c->op != Cnone || !wab64uok(client64, 20, 5400) || (n = wab64udec(client64, client, sizeof client)) <= 0)
+		return;
+	qlock(&challk);
+	for(l = &chals; *l != nil; l = &(*l)->next){
+		h = *l;
+		if(h->op == Cnone || h->expires <= time(0) || waclient((char*)client, n, type, h->chal, origins, norigins) != nil)
+			continue;
+		/* kept, used (Cnone) until it ends: its own connection can not use it again */
+		strecpy(c->chal, c->chal+sizeof c->chal, h->chal);
+		c->op = h->op;
+		free(c->bound);
+		c->bound = h->bound ? strdup(h->bound) : nil;
+		strecpy(c->handle, c->handle+sizeof c->handle, h->handle);
+		c->expires = h->expires;
+		c->adopted = 1;
+		h->op = Cnone;
+		break;
+	}
+	qunlock(&challk);
+}
+
 /* the challenge this connection had for op (used up) */
 static char*
 takechal(Conn *c, int op, char *bound)
@@ -909,6 +1023,11 @@ takechal(Conn *c, int op, char *bound)
 	int had, ok;
 
 	had = c->op;
+	if(had != Cnone && !c->adopted && dropchal(c->chal)){
+		c->op = Cnone;
+		return "the challenge is used";
+	}
+	c->adopted = 0;
 	ok = had == op && c->expires > time(0)
 		&& (bound == nil || c->bound != nil && strcmp(c->bound, bound) == 0);
 	c->op = Cnone;
@@ -958,6 +1077,7 @@ enroll(Conn *c, char **f, char *tok, int ntok, char **namep, long *expires)
 	Attr *inv, *acct;
 	Req *r;
 
+	adoptchal(c, f[4], "webauthn.create");
 	if((why = takechal(c, Cenroll, nil)) != nil)
 		return why;
 	if((lab = label(f[5])) == nil)
@@ -1091,6 +1211,7 @@ login(Conn *c, char **f, char *tok, int ntok, char **namep, long *expires)
 	ulong last;
 	Req *r;
 
+	adoptchal(c, f[3], "webauthn.get");
 	if((why = takechal(c, Clogin, nil)) != nil)
 		return why;
 	r = mallocz(sizeof *r, 1);
@@ -1158,8 +1279,9 @@ addcred(Conn *c, char **f, char *idh)
 	Req *r;
 	int i;
 
+	adoptchal(c, f[4], "webauthn.create");
 	if((name = findsession(f[1], &created, nil)) == nil){
-		c->op = Cnone;
+		takechal(c, Cadd, nil);
 		return "no such session";
 	}
 	lab = label(f[5]);
@@ -1331,6 +1453,7 @@ pagereq(Conn *c, char **f, int nf)
 		c->expires = time(0) + Chaltime;
 		free(c->bound);
 		c->bound = nil;
+		keepchal(c);
 		reply(c, "challenge %s", c->chal);
 		return;
 	}
@@ -1353,6 +1476,7 @@ pagereq(Conn *c, char **f, int nf)
 			c->expires = time(0) + Chaltime;
 			free(c->bound);
 			c->bound = strdup(idh);
+			keepchal(c);
 		}
 		qunlock(&statelk);
 		if(name == nil)
@@ -1387,6 +1511,7 @@ pagereq(Conn *c, char **f, int nf)
 		c->expires = time(0) + Chaltime;
 		free(c->bound);
 		c->bound = strdup(name);
+		keepchal(c);
 		reply(c, "challenge %s %s %s%s", c->chal, name, c->handle, ids.s);
 		free(ids.s);
 		free(name);
