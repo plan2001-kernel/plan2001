@@ -146,3 +146,14 @@ libwebauthn-mkfile.diff
 		sys/src/mkfile: libwebauthn among LIBS, the relying party's
 		WebAuthn checks (webauthn.h) that aux/ethernetd and
 		auth/accountd share.  2026-11-25.
+
+rcpu-script-read.diff
+		rc/bin/service/tcp17019, !il17019 and rconnect's aan server:
+		the script was run while read -c was still reading it from
+		the connection, and its first line, mount /fd/0, reads the
+		same connection.  When the rest of the script arrived after
+		the mount had started (the client's script in several TLS
+		records, a slow link), the mount took script text as its
+		Rversion and read -c took the client's Rversion: both waited
+		for ever.  The whole script is now read before it runs.
+		2026-11-26.
