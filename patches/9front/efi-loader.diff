@@ -1,5 +1,5 @@
 diff --git a/sys/src/boot/efi/aa64.s b/sys/src/boot/efi/aa64.s
-index f000b783da678b545b7d10e02f0eeac23cc1c99c..d7e7eafd9da10ac92704774c9de86d83425c9258 100644
+index a10abe1c660e939c73ed1899ca4e5beb8dec8361..d7e7eafd9da10ac92704774c9de86d83425c9258 100644
 --- a/sys/src/boot/efi/aa64.s
 +++ b/sys/src/boot/efi/aa64.s
 @@ -1,6 +1,8 @@
@@ -78,7 +78,7 @@ index f000b783da678b545b7d10e02f0eeac23cc1c99c..d7e7eafd9da10ac92704774c9de86d83
  TEXT jump(SB), 1, $-4
 +	MSR	$0xF, DAIFSet
  	MOV	R0, R3
--	MOV	R1, R4
+-	MOV	arg+8(FP), R4
 -	BL	mmudisable<>(SB)
 +	MOV	0x08(FP), R4
 +	BL	cachehandoff<>(SB)

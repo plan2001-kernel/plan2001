@@ -1,5 +1,5 @@
 diff --git a/sys/src/9/pc/sdvirtio.c b/sys/src/9/pc/sdvirtio.c
-index efa3ef55e172673e491bbcec5f3c6bf9db8d844b..5449750cd3252c00265d7b890d58da27a5019a63 100644
+index 6b23595ed34bbd563f69389a83a3a286b16f6ed1..d409af98cf7f36c2619b41e137733a74dd8e8ff6 100644
 --- a/sys/src/9/pc/sdvirtio.c
 +++ b/sys/src/9/pc/sdvirtio.c
 @@ -21,6 +21,7 @@ typedef struct Vqueue Vqueue;
@@ -400,7 +400,7 @@ index efa3ef55e172673e491bbcec5f3c6bf9db8d844b..5449750cd3252c00265d7b890d58da27
  			t->next = s;
  		else
 diff --git a/sys/src/9/port/sdvirtio10.c b/sys/src/9/port/sdvirtio10.c
-index d08e954dc762b96c865b0fe02e7bf270466944c5..b9041a7ee82aade33b652fd22228647f4cef1207 100644
+index 5b1616c01467dd6fc90beffd1a089e3a22ce1565..15b6a085ee4f0afeb09de4e08eab4c7587d27372 100644
 --- a/sys/src/9/port/sdvirtio10.c
 +++ b/sys/src/9/port/sdvirtio10.c
 @@ -28,6 +28,7 @@

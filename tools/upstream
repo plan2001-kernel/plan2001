@@ -48,6 +48,7 @@ JUURI = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LUKKO = os.path.join(JUURI, "upstream", "9front.lock")
 PATCHIT = os.path.join(JUURI, "patches", "9front")
 SARJA = os.path.join(PATCHIT, "series")
+JOHDETUT = os.path.join(PATCHIT, "derived")
 LUOKAT = {"fix", "backport", "wasm32", "uefi", "integration"}
 # tämän puun uudet tiedostot: vain nämä juuret kootaan 9frontin päälle
 OMAT = ("sys/", "rc/", "wasm32/")
@@ -479,6 +480,19 @@ def kuvaa(rev, b):
     return "%s build %s (%s) %s" % (rev, n, ("build.9front.org: %s" % tila[1]) if tila else "ei build.9front.org:n listalla", loki)
 
 
+def johdetut():
+    """patches/9front/derived: [(kopio, alkuperä)]; kopion on oltava tämän puun."""
+    pareja, omat = [], set(omat_tiedostot())
+    for n, rivi in enumerate(open(JOHDETUT), 1):
+        rivi = rivi.split("#", 1)[0].split()
+        if not rivi:
+            continue
+        if len(rivi) != 2 or rivi[0] not in omat:
+            raise Virhe("derived:%d: 'KOPIO ALKUPERÄ', KOPIO tämän puun tiedosto" % n)
+        pareja.append(tuple(rivi))
+    return pareja
+
+
 def raportti(lukko, uusi):
     vanha = lukko["COMMIT"]
     b = buildit()
@@ -500,6 +514,15 @@ def raportti(lukko, uusi):
     tormaa = sorted(p for t, p in muutetut if t == "A" and p in omat)
     if tormaa:
         print("TÖRMÄYS: upstream lisäsi tämän puun tiedostot: " + ", ".join(tormaa))
+    for kopio, alkupera in johdetut():
+        muut = git("log", "--format=%h %s", "%s..%s" % (vanha, uusi), "--", alkupera,
+                   cwd=valimuisti()).stdout.decode().strip()
+        if not nayta(uusi, alkupera):
+            print("JOHDETTU %s: alkuperä %s poistettu upstreamissa" % (kopio, alkupera))
+        elif muut:
+            print("JOHDETTU %s: katselmoi alkuperän %s muutokset:" % (kopio, alkupera))
+            for r in muut.splitlines():
+                print("    " + r)
     return tormaa
 
 

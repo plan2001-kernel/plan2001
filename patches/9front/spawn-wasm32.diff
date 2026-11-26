@@ -10,10 +10,10 @@ index 8b7f97d349b7db64b67931c9474bfec0324d348e..f6692758b10aa2a144e470eef085c3e8
 +#define	SPAWN		54
 +#endif
 diff --git a/sys/include/libc.h b/sys/include/libc.h
-index 2d3c7a7d5030efc3ab26163dfd076b4be9852cf6..6b42d7b2369d71abd764a4e7dcbcaa130ba67ffc 100644
+index b23bb61bb232d92df3c9f712150ee605c80bbcea..b7003045f4b5ade973560d8c3d0400fc156ef6c7 100644
 --- a/sys/include/libc.h
 +++ b/sys/include/libc.h
-@@ -725,7 +725,6 @@ struct Dir {
+@@ -728,7 +728,6 @@ struct Dir {
  	char	*muid;	/* last modifier name */
  } Dir;
  
@@ -21,7 +21,7 @@ index 2d3c7a7d5030efc3ab26163dfd076b4be9852cf6..6b42d7b2369d71abd764a4e7dcbcaa13
  typedef
  struct Waitmsg
  {
-@@ -755,6 +754,9 @@ extern	int	create(char*, int, ulong);
+@@ -758,6 +757,9 @@ extern	int	create(char*, int, ulong);
  extern	int	dup(int, int);
  extern	int	errstr(char*, uint);
  extern	int	exec(char*, char*[]);

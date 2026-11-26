@@ -284,7 +284,7 @@ index e934d65455a26ea90b17f23ccb94d87e030701d5..25a8e39dec28e465679ff70c663a5b3a
 +enum { BootInfoArch = BootArchArm64 };
 +enum { BootClassRAM, BootClassACPI, BootClassReserved };
 diff --git a/sys/src/9/arm64/l.s b/sys/src/9/arm64/l.s
-index cf7cfa8ca65c08a2e7002db293a1a6f46aedfe8a..d8781de8e075a968b8db40599a07c615656863db 100644
+index acd0441427a3485516176e7a57e9962ebca26d6d..3193d07bedae66b330b359adef5f9fe30b6d5f9b 100644
 --- a/sys/src/9/arm64/l.s
 +++ b/sys/src/9/arm64/l.s
 @@ -49,6 +49,10 @@ _zerobss:
@@ -299,7 +299,7 @@ index cf7cfa8ca65c08a2e7002db293a1a6f46aedfe8a..d8781de8e075a968b8db40599a07c615
  	MOV	$(L1BOT-KZERO), R0
  	BL	mmuidmap(SB)
 diff --git a/sys/src/9/arm64/main.c b/sys/src/9/arm64/main.c
-index 48d349433622758f4728a80fab375865ec7271cb..f8460578cfa4bdd28ec422148fcf70f3add14602 100644
+index 7eb0e4e52d3802fcaef9ae807f6be72e9a522630..aab0ba4cf2ed2591bc016a08b42b8252d42be008 100644
 --- a/sys/src/9/arm64/main.c
 +++ b/sys/src/9/arm64/main.c
 @@ -173,7 +173,9 @@ main(void)
@@ -427,7 +427,7 @@ index 7dbe848584f29f555506448c02930d40900b7727..73a8875ef5a1337aa899c34962e8d981
 +bootefi: bootefi.$O
 +	$LD -o $target $prereq
 diff --git a/sys/src/9/arm64/mmu.c b/sys/src/9/arm64/mmu.c
-index dd98601550d5f32b401e644bac285e3901937772..5cb300f72011f47d6d22c7905dc0f4281105a115 100644
+index faa95eba7fb76deb3c3ac7a1e1c0103e1ab28e0d..128eecb0f17395ca1d4e895254b0611745b309ed 100644
 --- a/sys/src/9/arm64/mmu.c
 +++ b/sys/src/9/arm64/mmu.c
 @@ -4,7 +4,14 @@

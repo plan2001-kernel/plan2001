@@ -208,7 +208,7 @@ index 83650d793e0299aa53204f053d3ee744743f7d28..7572ba2dd429a516e3b3ccab1838193e
   * Park a processor. Should never fall through a return from main to here,
   * should only be called by application processors when shutting down.
 diff --git a/sys/src/9/pc64/main.c b/sys/src/9/pc64/main.c
-index 6504f7cd7e98e692e65a863e7d5d91ccce2546a3..5685df7f6f225354032b555d0869ef0c94ebb506 100644
+index b2718d7427b8500cc35e47f7248801c629db9c42..a80dd42e45fcf0ca6eacdb8a6a4e79343afb5b37 100644
 --- a/sys/src/9/pc64/main.c
 +++ b/sys/src/9/pc64/main.c
 @@ -177,6 +177,13 @@ init0(void)
@@ -242,7 +242,7 @@ index 6504f7cd7e98e692e65a863e7d5d91ccce2546a3..5685df7f6f225354032b555d0869ef0c
  	pcicfginit();
  	bootscreeninit();
  	printinit();
-@@ -205,16 +215,20 @@ main(void)
+@@ -205,15 +215,19 @@ main(void)
  	mmuinit();
  	if(arch->intrinit)
  		arch->intrinit();
@@ -252,7 +252,6 @@ index 6504f7cd7e98e692e65a863e7d5d91ccce2546a3..5685df7f6f225354032b555d0869ef0c
  		arch->clockenable();
 +	bootinfoclock();
  	procinit0();
- 	initseg();
  	links();
  	chandevreset();
 +	bootmark(BMDevs);
@@ -263,7 +262,7 @@ index 6504f7cd7e98e692e65a863e7d5d91ccce2546a3..5685df7f6f225354032b555d0869ef0c
  	schedinit();
  }
  
-@@ -269,7 +283,16 @@ exit(int)
+@@ -268,7 +282,16 @@ exit(int)
  void
  reboot(void *entry, void *code, ulong size)
  {

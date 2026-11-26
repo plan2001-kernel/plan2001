@@ -494,7 +494,7 @@ index 8562c2cd97cd08215d4c9ea7bd5547d7e941d478..dcca105167354077cd33766405789467
  #define	runerealloc(a, n)	realloc(a, (n)*sizeof(Rune))
  #define	runemove(a, b, n)	memmove(a, b, (n)*sizeof(Rune))
 diff --git a/sys/src/cmd/rio/wind.c b/sys/src/cmd/rio/wind.c
-index 790beb61683021d4c294428d7f9f3b10590c4725..1eb1f0128f7f1e7844f505857cdb0332df045829 100644
+index e56de0fb43bdf0656b22e40590f2d39a51d753b7..e7af4715fd8126908da13a3059dedf952e8392c6 100644
 --- a/sys/src/cmd/rio/wind.c
 +++ b/sys/src/cmd/rio/wind.c
 @@ -1086,6 +1086,135 @@ inmode(Rune r, int mode)

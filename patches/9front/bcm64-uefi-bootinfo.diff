@@ -100,7 +100,7 @@ index 7e221047d1bed1cf8136a54e1e807943ae129016..1ed6463235b1b7b59c79cef02ea9d8d1
  TEXT peek(SB), 1, $-4
  	MOV	R0, R1
 diff --git a/sys/src/9/bcm64/main.c b/sys/src/9/bcm64/main.c
-index 033b24c24e5594f81e6258cdf508ecbef80be65b..0a67c89946a94d4164f1570c0b5571d6d90762db 100644
+index 45c229548591430f33e2d3396c7cabbf99638993..427b68b7ca9144905a2ecac9b6cd7b6b031fcef6 100644
 --- a/sys/src/9/bcm64/main.c
 +++ b/sys/src/9/bcm64/main.c
 @@ -133,6 +133,14 @@ machinit(void)
@@ -158,8 +158,8 @@ index 033b24c24e5594f81e6258cdf508ecbef80be65b..0a67c89946a94d4164f1570c0b5571d6
 +#endif
  	pageinit();
  	procinit0();
- 	initseg();
-@@ -230,6 +250,14 @@ exit(int)
+ 	links();
+@@ -229,6 +249,14 @@ exit(int)
  	cpushutdown();
  	splfhi();
  
@@ -174,7 +174,7 @@ index 033b24c24e5594f81e6258cdf508ecbef80be65b..0a67c89946a94d4164f1570c0b5571d6
  	if(m->machno)
  		rebootjump(0, 0, 0);
  
-@@ -240,6 +268,14 @@ exit(int)
+@@ -239,6 +267,14 @@ exit(int)
  	archreboot();
  }
  
@@ -189,7 +189,7 @@ index 033b24c24e5594f81e6258cdf508ecbef80be65b..0a67c89946a94d4164f1570c0b5571d6
  void
  reboot(void *entry, void *code, ulong size)
  {
-@@ -272,6 +308,7 @@ reboot(void *entry, void *code, ulong size)
+@@ -271,6 +307,7 @@ reboot(void *entry, void *code, ulong size)
  	/* off we go - never to return */
  	rebootjump(entry, code, size);
  }

@@ -21,6 +21,13 @@ def replace(path, old, new):
     path.write_text(data.replace(old, new))
 
 
+def cut(data, old, new, count=-1):
+    """str.replace, joka pysähtyy, kun lukittu lähde ei ole odotettu."""
+    if old not in data:
+        raise SystemExit(f"prune-tree: expected {old!r}")
+    return data.replace(old, new, count)
+
+
 def config_sources(directory, configs, extra=()):
     names = set(extra)
     for config in configs:
@@ -91,13 +98,13 @@ def prune_libmach(directory):
     if len(selected) != 2:
         raise SystemExit("prune-tree: libmach machine table changed")
     data = data[:start] + "Machtab\tmachines[] =\n{\n" + "\n".join(selected) + "\n\t{ 0 },\n};" + data[end:]
-    data = data.replace("asstype = AMIPS;\n\t\tmachdata = &mipsmach;\n\t\tmach = &mmips;",
+    data = cut(data, "asstype = AMIPS;\n\t\tmachdata = &mipsmach;\n\t\tmach = &mmips;",
                         "asstype = AAMD64;\n\t\tmachdata = &i386mach;\n\t\tmach = &mamd64;")
     setmach.write_text(data)
 
     machdata = directory / "machdata.c"
-    data = machdata.read_text().replace("extern\tMachdata\tmipsmach;\n", "")
-    data = data.replace("int\tasstype = AMIPS;", "int\tasstype = AAMD64;")
+    data = cut(machdata.read_text(), "extern\tMachdata\tmipsmach;\n", "")
+    data = cut(data, "int\tasstype = AMIPS;", "int\tasstype = AAMD64;")
     machdata.write_text(data)
 
     exe = directory / "executable.c"
@@ -113,9 +120,13 @@ def prune_libmach(directory):
     if len(selected) != 3:
         raise SystemExit("prune-tree: libmach executable table changed")
     data = data[:start] + "ExecTable exectab[] =\n{\n" + "\n".join(selected) + "\n\t{ 0 },\n};" + data[end:]
-    data = data.replace("Mach\t*mach = &mi386;", "Mach\t*mach = &mamd64;")
-    data = data.replace("\tcase E_MAGIC:\n\t\tthumbpctab(fd, fp);\n\t\tbreak;\n", "")
-    data = data.replace("\t/* arm needs to check for both arm and thumb */\n\tif(fp->type == FARM && (fp->entry & mthumb.ktmask))\n\t\tgoto FTHUM;\n", "")
+    data = cut(data, "Mach\t*mach = &mi386;", "Mach\t*mach = &mamd64;")
+    data = cut(data, "\tcase E_MAGIC:\n\t\tthumbpctab(fd, fp);\n\t\tbreak;\n", "")
+    # ARM thumb: armthumb() valitsee mthumbin (a0e76f2c5); ARM ei ole kohde
+    data = cut(data, "static\tint\tarmthumb(int, Fhdr*, ExecHdr*);\n", "")
+    start = data.index("/* Thumb executables are distinguished by setting the LSB")
+    end = data.index("\n}\n", data.index("armthumb(int fd, Fhdr *fp, ExecHdr *hp)", start)) + 3
+    data = data[:start] + data[end:].lstrip("\n")
     start = data.index("\tswitch(fp->type) {", data.index("commonboot(Fhdr *fp)"))
     end = data.index("\n\tfp->hdrsz = 0;", start)
     data = data[:start] + '''\tswitch(fp->type) {
@@ -180,12 +191,12 @@ def prune_postscript(root):
         remove(ps / name)
     mk = ps / "mkfile"
     data = mk.read_text()
-    data = data.replace("TARGETS=common\\\n\t", "TARGETS=", 1)
+    data = cut(data, "TARGETS=common\\\n\t", "TARGETS=", 1)
     for name in POSTSCRIPT_APE:
         old = f"\t{name}\\\n"
         if data.count(old) != 1:
             raise SystemExit(f"prune-tree: {name} not a target in {mk}")
-        data = data.replace(old, "")
+        data = cut(data, old, "")
     for name in ("picpack", "postbgi", "postdaisy", "postdmd", "postmd", "postio"):
         data = re.sub(rf"(?m)^#\t{name}\\?\n", "", data)
     mk.write_text(data)
@@ -217,9 +228,9 @@ def prune_page(path):
     end = data.index("int\nfiletype(", start)
     data = data[:start] + data[end:]
     data = "\n".join(line for line in data.split("\n") if "popengs," not in line)
-    data = data.replace("int ppi = 100;\n", "")
-    data = data.replace(" [ -p ppi ]", "")
-    data = data.replace("\tcase 'p':\n\t\tppi = atoi(EARGF(usage()));\n\t\tbreak;\n", "")
+    data = cut(data, "int ppi = 100;\n", "")
+    data = cut(data, " [ -p ppi ]", "")
+    data = cut(data, "\tcase 'p':\n\t\tppi = atoi(EARGF(usage()));\n\t\tbreak;\n", "")
     path.write_text(data)
 
 
@@ -249,7 +260,7 @@ def prune_dist_mkfile(path):
     old = "if(~ $target *.pi.img.* *.pi3.img.*){"
     if disk.count(old) != 1:
         raise SystemExit(f"prune-tree: Pi3 image rule changed in {path}")
-    disk = disk.replace(old, "if(~ $target *.pi3.img.*){")
+    disk = cut(disk, old, "if(~ $target *.pi3.img.*){")
     start = disk.index("\tif not if(~ $target *.reform.img.*")
     end = disk.index("\thjfs -f $d/fs", start)
     disk = disk[:start] + disk[end:]
@@ -368,7 +379,7 @@ def prune_page_man(path):
     start = data.index(".SH NAME\n")
     end = data.index(".SH SYNOPSIS\n", start)
     data = data[:start] + ".SH NAME\npage \\- view image files\n" + data[end:]
-    data = data.replace("] [\n.B -p\n.I ppi\n", "")
+    data = cut(data, "] [\n.B -p\n.I ppi\n", "")
     start = data.index(".SH DESCRIPTION\n")
     end = data.index(".PP\nBy default", start)
     data = data[:start] + (".SH DESCRIPTION\n.I Page\ndisplays image files in sequence, "

@@ -78,9 +78,10 @@ void	procsetup(Proc *p) { p->fpstate = FPinit; }
 void	procfork(Proc*) { }
 void	fpunotify(Proc*) { }
 void	fpunoted(Proc*) { }
-void	mmuswitch(Proc*) { }
+void	mmuswitch(Proc*, int) { }
 void	mmurelease(Proc*) { }
-void	flushmmu(void) { }
+/* port/proc.c's flushmmu without an MMU: the flush is done (portclock.c, procflushmmu) */
+void	flushmmu(void) { up->tlbflush++; up->newtlb = 0; }
 void	mmuinit(void) { }
 void	countpagerefs(ulong*, int) { }
 void	evenaddr(uintptr) { }
