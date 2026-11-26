@@ -1,0 +1,31 @@
+--- a/rc/bin/rconnect
++++ b/rc/bin/rconnect
+@@ -73,7 +73,7 @@
+ 			fn server {
+ 				echo -n aanserver $netdir >/proc/$pid/args
+ 				rm -f /env/^('fn#server' 'fn#aanserver' 'aanto')
+-				. <{n=`{read} && ! ~ $#n 0 && read -c $n} >[2=1]
++				. <{n=`{read} && ! ~ $#n 0 && s=`''{read -c $n} && echo -n $s} >[2=1]
+ 			}
+ 			exec tlssrv -A /bin/rc -c server
+ 			exit
+--- a/rc/bin/service/!il17019
++++ b/rc/bin/service/!il17019
+@@ -6,6 +6,6 @@
+ fn server {
+ 	~ $#remote 0 || echo -n $netdir $remote >/proc/$pid/args
+ 	rm -f /env/'fn#server'
+-	. <{n=`{read} && ! ~ $#n 0 && read -c $n} >[2=1]
++	. <{n=`{read} && ! ~ $#n 0 && s=`''{read -c $n} && echo -n $s} >[2=1]
+ }
+ exec tlssrv -a /bin/rc -c server
+--- a/rc/bin/service/tcp17019
++++ b/rc/bin/service/tcp17019
+@@ -6,6 +6,6 @@
+ fn server {
+ 	~ $#remote 0 || echo -n $netdir $remote >/proc/$pid/args
+ 	rm -f /env/'fn#server'
+-	. <{n=`{read} && ! ~ $#n 0 && read -c $n} >[2=1]
++	. <{n=`{read} && ! ~ $#n 0 && s=`''{read -c $n} && echo -n $s} >[2=1]
+ }
+ exec tlssrv -a /bin/rc -c server
