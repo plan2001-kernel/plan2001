@@ -157,3 +157,16 @@ rcpu-script-read.diff
 		Rversion and read -c took the client's Rversion: both waited
 		for ever.  The whole script is now read before it runs.
 		2026-11-26.
+
+tcp-splice.diff
+		ip/tcp.c: a local connection's two conversations are spliced
+		(tcb->bypass) and tcpclose() hung up the other side's receive
+		queue without checking that it still pointed back: when that
+		conversation had been closed and reused for a new connection,
+		the new one lost its data and read end of file mid-reply (an
+		auth server's 113-byte ticket reply arriving as 57 bytes while
+		other connections closed).  Writing to an already closed other
+		side dropped the data silently; it is now Ehungup, as qbwrite()
+		gives.  tcpacktimer() no longer takes the Conv lock while
+		qsetbypass() flushes during tcpsplice() (a deadlock).  These are
+		9front's 026e87832, 890656a50 and d683e5c0c.  2026-11-26.
