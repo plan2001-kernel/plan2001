@@ -91,6 +91,10 @@ screenrc
 if(test -f /dev/apm)
 	aux/apm
 
+# ACPI power button: fshalt and power off, when acpipwrbtn=halt
+if(~ $acpipwrbtn halt && test -r /dev/acpievent)
+	{read </dev/acpievent && fshalt} &
+
 if(~ $terminal *reform*){
 	reform/pm
 	reform/audio

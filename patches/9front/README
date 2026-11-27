@@ -170,3 +170,15 @@ tcp-splice.diff
 		gives.  tcpacktimer() no longer takes the Conv lock while
 		qsetbypass() flushes during tcpsplice() (a deadlock).  These are
 		9front's 026e87832, 890656a50 and d683e5c0c.  2026-11-26.
+
+acpi-pwrbtn.diff
+		pc/archacpi.c: the FADT's fixed-feature power button on
+		#P/acpievent, a line ("power button") for each press, read as
+		a stream.  The first read arms it: ACPI mode by SMI_CMD when
+		SCI_EN is clear, the GPEs and the PM1 events other than the
+		button off, the SCI's handler.  Without an MADT override the
+		SCI is level-triggered, active low.  No file without a fixed
+		button (PWR_BUTTON, HW_REDUCED_ACPI), without an ISA SCI or
+		when archacpi is not used.  rc/bin/cpurc reads it and runs
+		fshalt (acpipwrbtn=ignore: not); rc/bin/termrc only with
+		acpipwrbtn=halt.  2026-11-27.
