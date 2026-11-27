@@ -24,6 +24,21 @@
  *	creds TOKEN			<- ok, then a line a passkey: HASH LABEL CREATED LAST FLAGS
  *	revoke TOKEN HASH		<- ok
  *	logout TOKEN			<- ok
+ * Another device for an account (device pairing), the account's device
+ * with its session TOKEN, the new one with the KEY its claim gave:
+ *	pair new TOKEN			<- ok CODE EXPIRES	(5 minutes; ends the account's earlier one)
+ *	pair claim CODE			<- ok KEY CONFIRM NAME	(once)
+ *	pair status TOKEN CODE		<- ok wait | claimed CONFIRM | approved | done | gone
+ *	pair cancel TOKEN CODE		<- ok
+ *	challenge pair TOKEN CODE	<- challenge C [ID...]	(once claimed)
+ *	pair approve TOKEN CODE ID AUTH CLIENT SIG	<- ok	(one of the account's passkeys)
+ *	pair wait KEY			<- ok claimed | approved | gone
+ *	challenge pairadd KEY		<- challenge C NAME HANDLE [ID...]	(once approved)
+ *	pair add KEY ID AUTH CLIENT LABEL	<- ok TOKEN NAME EXPIRES	(one passkey, then done)
+ * CODE travels in the URL's fragment of a QR code; it gives nothing
+ * without the approval on the account's device, where the person checks
+ * that both show the same 6-digit CONFIRM.  CODE and KEY are 32 random
+ * bytes, kept as their hashes in this process's memory.
  * and error WHY for any.  A challenge is 32 random bytes, this
  * connection's, for that one request (the next request uses it up, done
  * or not) within 2 minutes; a request on another connection may use it
@@ -92,12 +107,20 @@ enum {
 	Maxchals	= 1024,	/* challenges kept for another connection */
 };
 
-enum { Cnone, Clogin, Cenroll, Cadd };
+enum { Cnone, Clogin, Cenroll, Cadd, Cpair, Cpairadd };
+
+/* a device pairing's states: made, claimed by the new device, approved, its passkey being made, done */
+enum { Pwait, Pclaimed, Papproved, Padding, Pdone };
+enum {
+	Pairtime	= 5*60,	/* a pairing's life */
+	Maxpairs	= 64,	/* pairings kept */
+};
 
 typedef struct Attr Attr;
 typedef struct Conn Conn;
 typedef struct Sess Sess;
 typedef struct Chal Chal;
+typedef struct Pair Pair;
 
 struct Attr
 {
@@ -131,6 +154,24 @@ struct Chal
 	Chal	*next;
 };
 
+/*
+ * a device pairing: another device for an account, by a code the
+ * account's device shows (a QR code's URL), claimed once by the new
+ * device, which gets its own key, and approved on the account's device
+ * with one of its passkeys; then the new device makes its own passkey.
+ * Codes and keys are kept as their hashes only, in memory.
+ */
+struct Pair
+{
+	char	h[40];		/* the code's hash */
+	char	kh[40];		/* the new device's key's hash, once claimed */
+	char	*name;
+	char	confirm[8];	/* the same number on both devices */
+	int	state;
+	long	expires;
+	Pair	*next;
+};
+
 struct Sess
 {
 	uchar	h[SHA2_256dlen];
@@ -161,6 +202,8 @@ static QLock sesslk;
 static Sess *sessions;
 static QLock challk;
 static Chal *chals;	/* newest first */
+static QLock pairlk;	/* never held while taking statelk or sesslk */
+static Pair *pairs;
 static int nchals;
 
 static char *reserved[] = {
@@ -767,6 +810,97 @@ logoutsession(char *tok)
 	return n;
 }
 
+/* device pairings (pairlk held) */
+
+static void
+freepair(Pair *p)
+{
+	free(p->name);
+	memset(p, 0, sizeof *p);
+	free(p);
+}
+
+/* the ended gone; the number left */
+static int
+trimpairs(void)
+{
+	Pair *p, **l;
+	long now;
+	int n;
+
+	now = time(0);
+	n = 0;
+	for(l = &pairs; (p = *l) != nil; ){
+		if(p->expires <= now){
+			*l = p->next;
+			freepair(p);
+			continue;
+		}
+		n++;
+		l = &p->next;
+	}
+	return n;
+}
+
+/* by its code (B64, as a session token) */
+static Pair*
+findpair(char *code)
+{
+	char h[40];
+	Pair *p;
+
+	if(!wab64uok(code, 40, 48))
+		return nil;
+	hashname(h, (uchar*)code, strlen(code));
+	trimpairs();
+	for(p = pairs; p != nil; p = p->next)
+		if(tsmemcmp((uchar*)p->h, (uchar*)h, 32) == 0)
+			return p;
+	return nil;
+}
+
+/* by the new device's key, while it is the new device's to use (not done) */
+static Pair*
+findpairkey(char *key)
+{
+	char h[40];
+	Pair *p;
+
+	if(!wab64uok(key, 40, 48))
+		return nil;
+	hashname(h, (uchar*)key, strlen(key));
+	trimpairs();
+	for(p = pairs; p != nil; p = p->next)
+		if(p->state != Pwait && p->state != Pdone && tsmemcmp((uchar*)p->kh, (uchar*)h, 32) == 0)
+			return p;
+	return nil;
+}
+
+static void
+droppair(Pair *d)
+{
+	Pair *p, **l;
+
+	for(l = &pairs; (p = *l) != nil; l = &p->next)
+		if(p == d){
+			*l = p->next;
+			freepair(p);
+			return;
+		}
+}
+
+/* a random token (B64) in tok, its hash in h */
+static void
+newtoken(char *tok, int ntok, char *h)
+{
+	uchar t[Ntoken];
+
+	genrandom(t, sizeof t);
+	wab64uenc(tok, ntok, t, sizeof t);
+	memset(t, 0, sizeof t);
+	hashname(h, (uchar*)tok, strlen(tok));
+}
+
 /* invitations, accounts and passkeys (statelk held) */
 
 /* the invitation CODE's record and hash; nil (why) if there is none, or it has ended */
@@ -1201,28 +1335,24 @@ out:
 	return why;
 }
 
-/* login ID AUTH CLIENT SIG HANDLE */
+/*
+ * an assertion (r, from ceremony) by a passkey of an enabled account:
+ * the passkey's id (B64 id), its user handle (or -), the signature and
+ * the counter checked, the counter and last use kept; its account's
+ * name (malloced) in *namep (statelk held)
+ */
 static char*
-login(Conn *c, char **f, char *tok, int ntok, char **namep, long *expires)
+assertion(Req *r, char *id, char *handle, char **namep)
 {
 	uchar pub[WApub];
 	char *why, *name, *p, *s, *v;
 	Attr *cr, *acct;
 	ulong last;
-	Req *r;
 
-	adoptchal(c, f[3], "webauthn.get");
-	if((why = takechal(c, Clogin, nil)) != nil)
-		return why;
-	r = mallocz(sizeof *r, 1);
-	if((why = ceremony(c, r, f[1], f[2], f[3], f[4], "webauthn.get", 0)) != nil){
-		free(r);
-		return why;
-	}
-	qlock(&statelk);
+	*namep = nil;
 	acct = nil;
 	name = nil;
-	if((cr = cred(r->idh)) == nil || (v = aval(cr, "id")) == nil || strcmp(v, f[1]) != 0){
+	if((cr = cred(r->idh)) == nil || (v = aval(cr, "id")) == nil || strcmp(v, id) != 0){
 		why = "no such passkey";
 		goto out;
 	}
@@ -1231,7 +1361,7 @@ login(Conn *c, char **f, char *tok, int ntok, char **namep, long *expires)
 		why = "the account is not enabled";
 		goto out;
 	}
-	if(strcmp(f[5], "-") != 0 && ((v = aval(acct, "handle")) == nil || strcmp(v, f[5]) != 0)){
+	if(strcmp(handle, "-") != 0 && ((v = aval(acct, "handle")) == nil || strcmp(v, handle) != 0)){
 		why = "not this account's passkey";
 		goto out;
 	}
@@ -1249,7 +1379,7 @@ login(Conn *c, char **f, char *tok, int ntok, char **namep, long *expires)
 	if((why = waverify(pub, r->auth, r->nauth, r->client, r->nclient, r->sig, r->nsig)) != nil)
 		goto out;
 	p = pathf("%s/creds/%s", dir, r->idh);
-	s = credtext(name, f[1], pub, r->w.count, aval(cr, "label") ? aval(cr, "label") : "-",
+	s = credtext(name, id, pub, r->w.count, aval(cr, "label") ? aval(cr, "label") : "-",
 		atoi(aval(cr, "flags") ? aval(cr, "flags") : "0"),
 		strtol(aval(cr, "created") ? aval(cr, "created") : "0", nil, 10), time(0));
 	if(writefile(p, 0, s) < 0)
@@ -1257,15 +1387,38 @@ login(Conn *c, char **f, char *tok, int ntok, char **namep, long *expires)
 	free(s);
 	free(p);
 	if(why == nil){
-		newsession(name, r->idh, tok, ntok, expires);
 		*namep = name;
 		name = nil;
 	}
 out:
-	qunlock(&statelk);
 	freeattrs(cr);
 	freeattrs(acct);
 	free(name);
+	return why;
+}
+
+/* login ID AUTH CLIENT SIG HANDLE: a session for a passkey's account */
+static char*
+login(Conn *c, char **f, char *tok, int ntok, char **namep, long *expires)
+{
+	char *why, *name;
+	Req *r;
+
+	adoptchal(c, f[3], "webauthn.get");
+	if((why = takechal(c, Clogin, nil)) != nil)
+		return why;
+	r = mallocz(sizeof *r, 1);
+	if((why = ceremony(c, r, f[1], f[2], f[3], f[4], "webauthn.get", 0)) != nil){
+		free(r);
+		return why;
+	}
+	qlock(&statelk);
+	why = assertion(r, f[1], f[5], &name);
+	qunlock(&statelk);
+	if(why == nil){
+		newsession(name, r->idh, tok, ntok, expires);
+		*namep = name;
+	}
 	free(r);
 	return why;
 }
@@ -1436,6 +1589,295 @@ reply(Conn *c, char *fmt, ...)
 	free(m);
 }
 
+/*
+ * a page's device pairing requests (pagereq's): nil when answered, else
+ * why not.  The account's device (its session TOKEN) makes the pairing
+ * and shows its CODE; the new device claims it once and gets its own KEY
+ * and a CONFIRM number, the same the account's device shows; the
+ * account's device approves with one of the account's passkeys; then the
+ * new device makes its own passkey for the account and gets a session.
+ */
+static char*
+pairreq(Conn *c, char **f, int nf)
+{
+	char code[64], key[64], h[40], tok[64], conf[8], *name, *who, *why, *s, *p0, *lab;
+	uchar b[4];
+	long expires;
+	Attr *acct;
+	List ids;
+	Pair *p;
+	Req *r;
+	int i;
+
+	name = nil;
+	who = nil;
+	why = nil;
+	h[0] = 0;
+	if(strcmp(f[0], "challenge") == 0 && nf == 4 && strcmp(f[1], "pair") == 0){
+		/* challenge pair TOKEN CODE: the approval's, an assertion by one of the account's passkeys */
+		c->op = Cnone;
+		if((name = findsession(f[2], nil, nil)) == nil)
+			return "no such session";
+		qlock(&pairlk);
+		if((p = findpair(f[3])) != nil && strcmp(p->name, name) == 0 && p->state == Pclaimed)
+			strecpy(h, h+sizeof h, p->h);
+		qunlock(&pairlk);
+		if(h[0] == 0){
+			free(name);
+			return "no such pairing";
+		}
+		ids.s = strdup("");
+		ids.n = 0;
+		qlock(&statelk);
+		eachcred(name, idone, &ids);
+		qunlock(&statelk);
+		wachallenge(c->chal, sizeof c->chal);
+		c->op = Cpair;
+		c->expires = time(0) + Chaltime;
+		free(c->bound);
+		c->bound = strdup(h);
+		c->handle[0] = 0;
+		keepchal(c);
+		reply(c, "challenge %s%s", c->chal, ids.s);
+		free(ids.s);
+		free(name);
+		return nil;
+	}
+	if(strcmp(f[0], "challenge") == 0 && nf == 3 && strcmp(f[1], "pairadd") == 0){
+		/* challenge pairadd KEY: the new device's passkey, once approved */
+		c->op = Cnone;
+		qlock(&pairlk);
+		if((p = findpairkey(f[2])) != nil && p->state == Papproved){
+			strecpy(h, h+sizeof h, p->h);
+			name = strdup(p->name);
+		}
+		qunlock(&pairlk);
+		if(name == nil)
+			return "no such pairing";
+		qlock(&statelk);
+		acct = account(name);
+		s = strdup(acct && aval(acct, "handle") ? aval(acct, "handle") : "-");
+		freeattrs(acct);
+		/* its passkeys' ids: the page excludes them (excludeCredentials) */
+		ids.s = strdup("");
+		ids.n = 0;
+		eachcred(name, idone, &ids);
+		qunlock(&statelk);
+		strecpy(c->handle, c->handle+sizeof c->handle, s);
+		free(s);
+		wachallenge(c->chal, sizeof c->chal);
+		c->op = Cpairadd;
+		c->expires = time(0) + Chaltime;
+		free(c->bound);
+		c->bound = strdup(h);
+		keepchal(c);
+		reply(c, "challenge %s %s %s%s", c->chal, name, c->handle, ids.s);
+		free(ids.s);
+		free(name);
+		return nil;
+	}
+	if(strcmp(f[0], "pair") != 0)
+		return "bad request";
+	if(nf == 3 && strcmp(f[1], "new") == 0){
+		/* pair new TOKEN: one at a time an account, a new one ends its earlier */
+		if((name = findsession(f[2], nil, nil)) == nil)
+			return "no such session";
+		newtoken(code, sizeof code, h);
+		qlock(&pairlk);
+		for(;;){
+			for(p = pairs; p != nil; p = p->next)
+				if(strcmp(p->name, name) == 0)
+					break;
+			if(p == nil)
+				break;
+			droppair(p);
+		}
+		if(trimpairs() >= Maxpairs)
+			why = "too many pairings";
+		else{
+			p = mallocz(sizeof *p, 1);
+			strecpy(p->h, p->h+sizeof p->h, h);
+			p->name = strdup(name);
+			p->state = Pwait;
+			p->expires = expires = time(0) + Pairtime;
+			p->next = pairs;
+			pairs = p;
+		}
+		qunlock(&pairlk);
+		if(why == nil){
+			alog("pair %s: begun", name);
+			reply(c, "ok %s %ld", code, expires);
+		}
+		memset(code, 0, sizeof code);
+		free(name);
+		return why;
+	}
+	if(nf == 3 && strcmp(f[1], "claim") == 0){
+		/* pair claim CODE: the new device's, once */
+		qlock(&pairlk);
+		if((p = findpair(f[2])) == nil || p->state != Pwait)
+			why = "no such pairing";
+		else{
+			newtoken(key, sizeof key, p->kh);
+			genrandom(b, sizeof b);
+			snprint(p->confirm, sizeof p->confirm, "%06lud",
+				((ulong)b[0]<<24 | (ulong)b[1]<<16 | (ulong)b[2]<<8 | b[3]) % 1000000UL);
+			strecpy(conf, conf+sizeof conf, p->confirm);
+			p->state = Pclaimed;
+			name = strdup(p->name);
+		}
+		qunlock(&pairlk);
+		if(why != nil)
+			return why;
+		alog("pair %s: claimed from %s", name, c->addr);
+		reply(c, "ok %s %s %s", key, conf, name);
+		memset(key, 0, sizeof key);
+		free(name);
+		return nil;
+	}
+	if(nf == 4 && (strcmp(f[1], "status") == 0 || strcmp(f[1], "cancel") == 0)){
+		/* pair status|cancel TOKEN CODE: the account's device's */
+		if((name = findsession(f[2], nil, nil)) == nil)
+			return "no such session";
+		qlock(&pairlk);
+		p = findpair(f[3]);
+		if(p != nil && strcmp(p->name, name) != 0)
+			p = nil;
+		if(strcmp(f[1], "cancel") == 0){
+			if(p != nil)
+				droppair(p);
+			s = strdup("ok");
+		}else if(p == nil)
+			s = strdup("ok gone");
+		else switch(p->state){
+		case Pwait:
+			s = strdup("ok wait");
+			break;
+		case Pclaimed:
+			s = smprint("ok claimed %s", p->confirm);
+			break;
+		case Pdone:
+			s = strdup("ok done");
+			break;
+		default:
+			s = strdup("ok approved");
+			break;
+		}
+		qunlock(&pairlk);
+		if(strcmp(f[1], "cancel") == 0)
+			alog("pair %s: cancelled", name);
+		reply(c, "%s", s);
+		free(s);
+		free(name);
+		return nil;
+	}
+	if(nf == 3 && strcmp(f[1], "wait") == 0){
+		/* pair wait KEY: the new device's */
+		qlock(&pairlk);
+		p = findpairkey(f[2]);
+		s = p == nil ? "ok gone" : p->state == Pclaimed ? "ok claimed" : "ok approved";
+		qunlock(&pairlk);
+		reply(c, "%s", s);
+		return nil;
+	}
+	if(nf == 8 && strcmp(f[1], "approve") == 0){
+		/* pair approve TOKEN CODE ID AUTH CLIENT SIG: by one of the account's passkeys, now */
+		adoptchal(c, f[6], "webauthn.get");
+		name = findsession(f[2], nil, nil);
+		qlock(&pairlk);
+		if(name != nil && (p = findpair(f[3])) != nil && strcmp(p->name, name) == 0 && p->state == Pclaimed)
+			strecpy(h, h+sizeof h, p->h);
+		qunlock(&pairlk);
+		why = takechal(c, Cpair, h[0] ? h : "-");
+		if(name == nil)
+			why = "no such session";
+		else if(why == nil && h[0] == 0)
+			why = "no such pairing";
+		if(why != nil){
+			free(name);
+			return why;
+		}
+		r = mallocz(sizeof *r, 1);
+		if((why = ceremony(c, r, f[4], f[5], f[6], f[7], "webauthn.get", 0)) == nil){
+			qlock(&statelk);
+			why = assertion(r, f[4], "-", &who);
+			qunlock(&statelk);
+			if(why == nil && strcmp(who, name) != 0)
+				why = "not this account's passkey";
+		}
+		free(r);
+		if(why == nil){
+			qlock(&pairlk);
+			if((p = findpair(f[3])) != nil && strcmp(p->h, h) == 0 && p->state == Pclaimed)
+				p->state = Papproved;
+			else
+				why = "the pairing has ended";
+			qunlock(&pairlk);
+		}
+		if(why == nil){
+			alog("pair %s: approved", name);
+			reply(c, "ok");
+		}
+		free(who);
+		free(name);
+		return why;
+	}
+	if(nf == 7 && strcmp(f[1], "add") == 0){
+		/* pair add KEY ID AUTH CLIENT LABEL: one approval, one passkey */
+		adoptchal(c, f[5], "webauthn.create");
+		qlock(&pairlk);
+		if((p = findpairkey(f[2])) != nil && p->state == Papproved){
+			p->state = Padding;
+			strecpy(h, h+sizeof h, p->h);
+			name = strdup(p->name);
+		}
+		qunlock(&pairlk);
+		why = takechal(c, Cpairadd, h[0] ? h : "-");
+		if(why == nil && name == nil)
+			why = "no such pairing";
+		lab = label(f[6]);
+		if(why == nil && lab == nil)
+			why = "bad label";
+		r = mallocz(sizeof *r, 1);
+		if(why == nil)
+			why = ceremony(c, r, f[3], f[4], f[5], nil, "webauthn.create", 1);
+		if(why == nil){
+			qlock(&statelk);
+			if(!accountactive(name) || !keyenabled(name))
+				why = "the account is not enabled";
+			else if(countcreds(name) >= Maxcreds)
+				why = "too many passkeys";
+			else{
+				p0 = pathf("%s/creds/%s", dir, r->idh);
+				s = credtext(name, f[3], r->w.pub, r->w.count, lab, r->w.flags, time(0), 0);
+				i = writefile(p0, 1, s);
+				free(s);
+				free(p0);
+				if(i < 0)
+					why = "the passkey is known";
+			}
+			qunlock(&statelk);
+		}
+		if(name != nil){
+			/* done, or the new device may try again while the pairing lasts */
+			qlock(&pairlk);
+			if((p = findpairkey(f[2])) != nil && p->state == Padding)
+				p->state = why == nil ? Pdone : Papproved;
+			qunlock(&pairlk);
+		}
+		if(why == nil){
+			newsession(name, r->idh, tok, sizeof tok, &expires);
+			alog("pair %s: passkey %s added", name, r->idh);
+			reply(c, "ok %s %s %ld", tok, name, expires);
+			memset(tok, 0, sizeof tok);
+		}
+		free(r);
+		free(name);
+		return why;
+	}
+	return "bad request";
+}
+
 static void
 pagereq(Conn *c, char **f, int nf)
 {
@@ -1447,6 +1889,12 @@ pagereq(Conn *c, char **f, int nf)
 
 	why = "bad request";
 	name = nil;
+	if(nf >= 2 && (strcmp(f[0], "pair") == 0
+	|| strcmp(f[0], "challenge") == 0 && (strcmp(f[1], "pair") == 0 || strcmp(f[1], "pairadd") == 0))){
+		if((why = pairreq(c, f, nf)) == nil)
+			return;
+		goto err;
+	}
 	if(nf == 2 && strcmp(f[0], "challenge") == 0 && strcmp(f[1], "login") == 0){
 		wachallenge(c->chal, sizeof c->chal);
 		c->op = Clogin;
