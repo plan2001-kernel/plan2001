@@ -1,5 +1,5 @@
 diff --git a/rc/bin/cpurc b/rc/bin/cpurc
-index bb266cd410562112a44e916a11c239cae0f8f89d..23ff3f30b63884e4e756f5c1cbae6a2d2d8dcb47 100755
+index bb266cd410562112a44e916a11c239cae0f8f89d..b319d11b04f958ab12f131befe8761a1ae5ac01b 100755
 --- a/rc/bin/cpurc
 +++ b/rc/bin/cpurc
 @@ -113,6 +113,10 @@ if not {
@@ -7,14 +7,14 @@ index bb266cd410562112a44e916a11c239cae0f8f89d..23ff3f30b63884e4e756f5c1cbae6a2d
  	aux/apm
  
 +# ACPI power button: fshalt and power off (acpipwrbtn=ignore: nothing)
-+if(! ~ $acpipwrbtn ignore && test -r /dev/acpievent)
-+	{read </dev/acpievent && fshalt} &
++if(! ~ $acpipwrbtn ignore && test -r '#P/acpievent')
++	{read <'#P/acpievent' && fshalt} &
 +
  if(test -e /cfg/$sysname/cpustart)
  	. /cfg/$sysname/cpustart
  
 diff --git a/rc/bin/termrc b/rc/bin/termrc
-index fabd3c5e41d30cd62dac663764f33f396ed1dd31..ba9e05bacb4f4e84ccd11b65289f83b81718438e 100755
+index fabd3c5e41d30cd62dac663764f33f396ed1dd31..da2cbf2e38ec5ac675568ea2621112bcb852fb20 100755
 --- a/rc/bin/termrc
 +++ b/rc/bin/termrc
 @@ -91,6 +91,10 @@ screenrc
@@ -22,8 +22,8 @@ index fabd3c5e41d30cd62dac663764f33f396ed1dd31..ba9e05bacb4f4e84ccd11b65289f83b8
  	aux/apm
  
 +# ACPI power button: fshalt and power off, when acpipwrbtn=halt
-+if(~ $acpipwrbtn halt && test -r /dev/acpievent)
-+	{read </dev/acpievent && fshalt} &
++if(~ $acpipwrbtn halt && test -r '#P/acpievent')
++	{read <'#P/acpievent' && fshalt} &
 +
  if(~ $terminal *reform*){
  	reform/pm
