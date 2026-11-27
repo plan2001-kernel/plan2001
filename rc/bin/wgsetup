@@ -70,14 +70,22 @@ case up
 	~ $#* 1 || usage
 	need
 	test -r $cfg || fail ei $cfg
-	ifs0=$ifs; ifs=$nl
-	lines=`{grep '^(private|listen|cookie) ' $cfg}
-	ifs=$ifs0
-	for(l in $lines)
-		wgctl `{echo $l}
+	# toistettava: käynnissä olevan laitteen avainta ja porttia ei kirjoiteta
+	# uudelleen (uusi avain päättäisi istunnot, portti on jo kuuntelussa)
+	st=`{sed 1q '#W/wg0/status'}
+	if(~ $st(5) 0){
+		ifs0=$ifs; ifs=$nl
+		lines=`{grep '^(private|listen|cookie) ' $cfg}
+		ifs=$ifs0
+		for(l in $lines)
+			wgctl `{echo $l}
+	}
 	a=`{awk '$1 == "addr" { print $2, $3 }' $cfg}
 	~ $#a 2 || fail $cfg: ei addr-riviä
-	if(! grep -s '^'^$a(1)^' ' /net/ipifc/*/local){
+	# rajapinta #W:n tilasta (ifc -: ei liitetty), ei osoitteesta, joka voi
+	# olla toisella rajapinnalla
+	st=`{sed 1q '#W/wg0/status'}
+	if(~ $st(7) -){
 		{
 			n=`{read}
 			echo bind wg wg0 >/net/ipifc/$n/ctl && echo add $a >/net/ipifc/$n/ctl
