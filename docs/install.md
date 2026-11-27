@@ -182,6 +182,98 @@ not reach the guest) or `AIKA` (remote command timed out); nothing is
 retried. The serial log is written next to the image
 (`O.boottest.log`) and contains no credentials.
 
+### Updating an installed system
+
+Update the whole system from one build: the kernel and loader together
+with the userland of the same `tools/native-amd64/build`, as 9front
+itself does (`mk install` in `/sys/src`, then the kernel). Copying only
+`9pc64` and `bootx64.efi` leaves a kernel of one 9front revision running
+the userland of another; do not do that across a lock change.
+
+On the build host, from the build's output directory `O`:
+
+    gzip -9 -k O/root.tar
+    (cd O && sha256sum root.tar.gz 9pc64 bootx64.efi >SHA256SUMS)
+
+Send the four files with Plan2001's own tools, for example
+`9pterm ... put FILE /usr/glenda/update/FILE` (9pterm checks MD5), to a
+directory on the target. Then, on the target as the host owner:
+
+    u=/usr/glenda/update
+    cd $u
+    for(f in root.tar.gz 9pc64 bootx64.efi){
+        h=`{sha1sum -2 256 $f}
+        grep -s '^'^$h(1)^'  '^$f^'$' SHA256SUMS || echo BAD $f
+    }
+    echo dump >>/srv/cwfs.cmd           # a snapshot to return to
+    mkdir $u/root && cd $u/root
+    gunzip <$u/root.tar.gz | tar x      # Plan 9 tar reads stdin itself
+    rm -rf adm usr cfg mail cron tmp dist arm64 wasm32
+    rm -f lib/ndb/local
+
+`adm`, `usr`, `cfg`, `mail`, `cron` and `/lib/ndb/local` belong to the
+machine (users, keys, homes, configuration) and are never copied. Then
+compare `rc/bin/service` and `rc/bin/service.auth` with the target's.
+A service the target removed on purpose must also be removed from the
+staging copy. For example, a server that serves auth (567), rcpu (17019)
+and 9P (17020) only through WireGuard (README.md, "Network access and administration") has no
+`tcp567`, `tcp17019` or `tcp17020` there: copying them back would make
+cpurc's listener serve them on every address.
+
+    rm -f rc/bin/service/tcp17019 rc/bin/service/tcp17020 rc/bin/service.auth/tcp567
+    for(d in acme amd64 lib rc sys) dircp $u/root/$d /$d
+
+`dircp` writes each overwritten file with the archive's mode but without
+the group write bit, and drops the append bit. Restore both, or a log a
+service opens as `none` (`rc-httpd` and `/sys/log/www`, for example)
+can no longer be written, and the service fails at its first redirection:
+
+    cd $u/root
+    for(t in acme amd64 lib rc sys) du -a $t | awk '{print "/" $2}' >$u/files
+    awk '{printf "chmod g+w %s\n", $0}' $u/files | rc
+    for(f in /sys/log/*) if(test -f $f){ chmod 662 $f; chmod +a $f }
+
+Compare the result with the snapshot if in doubt (`9fs dump`, then
+`ls -l` of the same names under `/n/dump/YYYY/MMDD*`).
+
+The loader and kernel go to the ESP (`#S/DISK/esp`), keeping the
+previous ones. plan9.ini's `bootfile=` names the kernel. On an image made
+by `mkimage`, the loader is `/efi/boot/bootx64.efi` and the kernel is
+`/9pc64`. A multiboot installation (`tools/native-amd64/mkpayload`) keeps both in its own
+directory, `/efi/plan2001`, for example:
+
+    dossrv -f '#S/sd00/esp' esp
+    mount -c /srv/esp /n/esp
+    grep bootfile /n/esp/efi/plan2001/plan9.ini
+    e=/n/esp/efi/plan2001
+    cp $e/9pc64 $e/9pc64.old; cp $e/bootx64.efi $e/bootx64.efi.old
+    cp $u/9pc64 $u/bootx64.efi $e/
+    unmount /n/esp; rm /srv/esp
+    fshalt -r
+
+To go back, put the `.old` files back on the ESP, and copy what you need
+back from the snapshot in `/n/dump`.
+
+### Rescue shell
+
+When the root file server hangs, the serial console's shell hangs with
+it: even `date` never returns, because every exec needs the file server.
+Typing ctl-T ctl-T `r` on the serial line starts a rescue `rc` in
+kbdfs's own name space. That is the boot name space, with the boot file
+system in memory, `#c`, `#p` and `#s`, and it has `ps`, `ns` and `acid`
+(kbdfs(8)). Examine the hung or broken process there **before** a reset:
+
+    ps | grep cwfs
+    cat /proc/PID/status
+    acid PID                            # lstk(), then ctl-D
+    exit                                # back to the console
+
+cwfs prints a corrupt fid chain to the console before it stops
+(`cwfs: filep: corrupt fid chain ...`, with the memory around it), and
+the process stays Broken for acid. On Oracle Cloud, the console history
+is 1 MiB: read it with `oci compute console-history get-content
+--offset 1000000` as well, or the newest lines are missed.
+
 ### Stopping with the power button
 
 A graceful stop presses the ACPI power button: Oracle Cloud's `SOFTSTOP`
