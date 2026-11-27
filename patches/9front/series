@@ -30,6 +30,7 @@ bcm64-uefi-bootinfo.diff	uefi		local
 # Plan2001 integration: serial console, accounts
 kbdfs-serial-console.diff	integration	local
 serial-console-shell.diff	integration	local
+rescue-shell.diff		integration	local
 libwebauthn-mkfile.diff		integration	local
 acpi-pwrbtn.diff		integration	local
 # WireGuard (#W)
