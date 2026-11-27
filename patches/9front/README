@@ -148,6 +148,27 @@ serial-console-shell.diff
 		ordinary one, not a second shell teed to the line.
 		2026-11-25.
 
+rescue-shell.diff
+		aux/kbdfs: ^T^T r on the serial line starts a rescue rc in
+		kbdfs's own namespace, the boot namespace copied at boot
+		(bootfs in memory, #c, #p, #s), so it works when the root file
+		server hangs or has crashed.  Its lines go to that rc instead
+		of cons; kbdfs edits and echoes them and the rc writes to
+		#c/cons.  DEL interrupts it and ^D gives end of file; when
+		the rc exits, the line returns to cons.  9/boot/bootfs.proto: ps,
+		ns, acid and acid's port and $objtype libraries, to examine a
+		hung or broken process (/proc/N, acid N) there.  2026-11-27.
+
+cwfs-fid-check.diff
+		cmd/cwfs/sub.c: filep, freefp and fileinit check every fid
+		chain pointer (flist[h], File.next) is nil or an element of
+		files[].  Any other value is memory overwritten: cwfs prints
+		it, the chain, the previous File and the memory around it to
+		the console and aborts, leaving the process Broken for acid
+		(rescue-shell.diff).  Diagnostics for issue #56, where a
+		non-canonical chain pointer crashed filep with flock held and
+		froze the file server.  2026-11-27.
+
 libwebauthn-mkfile.diff
 		sys/src/mkfile: libwebauthn among LIBS, the relying party's
 		WebAuthn checks (webauthn.h) that aux/ethernetd and

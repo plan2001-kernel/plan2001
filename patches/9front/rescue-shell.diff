@@ -1,0 +1,290 @@
+diff --git a/sys/src/cmd/aux/kbdfs/kbdfs.c b/sys/src/cmd/aux/kbdfs/kbdfs.c
+index 65cb8d7fb31a1ea58bcfcdebeb28802cb62de8c4..905f8310b2cb8e2c8f78545c5f3e13a785006a70 100644
+--- a/sys/src/cmd/aux/kbdfs/kbdfs.c
++++ b/sys/src/cmd/aux/kbdfs/kbdfs.c
+@@ -713,18 +713,174 @@ keyproc(void *)
+ 	}
+ }
+ 
++/*
++ * Pelastusshell sarjakonsolilla: ^T^T r käynnistää rc:n kbdfs:n omassa
++ * nimiavaruudessa, joka on kopio käynnistyksen nimiavaruudesta (bootfs
++ * muistissa, #c, #p, #s).  Se ei tarvitse juuritiedostopalvelinta, joten
++ * sillä voi tutkia jumittunutta tai kaatunutta cwfs:ää (ps, acid, /proc,
++ * /srv/cwfs.cmd).  Pelastustilassa sarjalinjan rivit menevät rc:lle eivätkä
++ * consiin; kbdfs kaiuttaa ja muokkaa rivin itse ja kirjoittaa #c/cons:iin.
++ * DEL keskeyttää, ^D antaa EOF:n kuten konsolilla.  Kun rc päättyy (exit
++ * tai ^D), linja palaa consille.
++ */
++enum {
++	Kctlt	= 0x14,		/* ^T */
++};
++
++int rescuefd = -1;	/* rc:n syöte (putki) */
++int rescueout = -1;	/* #c/cons: kaiku */
++int rescuepid;
++int rescuegen;		/* pelastusshellin järjestysnumero */
++int rescuedone;		/* rescuegen:n rc on päättynyt */
++char rescueline[256];
++int nrescue;
++
++static int
++rescuenote(void*, char *msg)
++{
++	/* rc on päättynyt: putken toinen pää on suljettu */
++	return strstr(msg, "write on closed pipe") != nil;
++}
++
++static void
++rescueend(void)
++{
++	close(rescuefd);
++	rescuefd = -1;
++	close(rescueout);
++	rescueout = -1;
++	nrescue = 0;
++}
++
++/*
++ * Vahtii rc:n päättymistä: kun putken toinen pää suljetaan, luku palauttaa
++ * nollan.  rc ei kirjoita syötteeseensä, joten muuta ei tule.
++ */
++static void
++rescuewatch(void *a)
++{
++	int fd, gen;
++	char b[64];
++
++	gen = rescuegen;
++	fd = (int)(uintptr)a;
++	threadsetname("rescuewatch");
++	while(read(fd, b, sizeof b) > 0)
++		;
++	close(fd);
++	if(gen != rescuegen)
++		return;
++	rescuedone = 1;
++	/* seuraava merkki menee jo consille */
++	if((fd = open("#c/cons", OWRITE)) >= 0){
++		fprint(fd, "kbdfs: rescue shell ended\n");
++		close(fd);
++	}
++}
++
++static void
++rescuestart(void)
++{
++	int p[2], fd, pid;
++
++	if((fd = open("#c/cons", OWRITE)) < 0)
++		return;
++	if(pipe(p) < 0){
++		close(fd);
++		return;
++	}
++	switch(pid = rfork(RFPROC|RFFDG|RFNAMEG|RFENVG|RFNOTEG|RFNOWAIT)){
++	case -1:
++		close(p[0]);
++		close(p[1]);
++		close(fd);
++		return;
++	case 0:
++		dup(p[1], 0);
++		dup(fd, 1);
++		dup(fd, 2);
++		for(fd = 3; fd < 100; fd++)
++			close(fd);
++		putenv("prompt", "rescue# ");
++		execl("/bin/rc", "rc", "-i", nil);
++		_exits("rescue: no /bin/rc");
++	}
++	close(p[1]);
++	rescuefd = p[0];
++	rescueout = fd;
++	rescuepid = pid;
++	nrescue = 0;
++	rescuegen++;
++	rescuedone = 0;
++	if((fd = dup(rescuefd, -1)) >= 0)
++		proccreate(rescuewatch, (void*)(uintptr)fd, STACK);
++	fprint(rescueout, "\nkbdfs: rescue shell %d (bootfs namespace; exit ends it)\n", pid);
++}
++
++/* pelastustilan syöterune: rivin muokkaus ja kaiku kuten lineproc */
++static void
++rescuerune(Rune r)
++{
++	char buf[UTFmax];
++	int n;
++
++	switch(r){
++	case Kdel:
++		postnote(PNGROUP, rescuepid, "interrupt");
++		nrescue = 0;
++		fprint(rescueout, "\n");
++		return;
++	case Kbs:
++		if(nrescue > 0){
++			/* edellinen rune, ei tavu */
++			do
++				nrescue--;
++			while(nrescue > 0 && (rescueline[nrescue] & 0xC0) == 0x80);
++			fprint(rescueout, "\b");
++		}
++		return;
++	case Knack:
++		nrescue = 0;
++		fprint(rescueout, "\n");
++		return;
++	case Keof:
++		/* rivi sellaisenaan; tyhjänä nollan mittainen kirjoitus = EOF */
++		break;
++	case '\n':
++		if(nrescue < sizeof rescueline)
++			rescueline[nrescue++] = '\n';
++		fprint(rescueout, "\n");
++		break;
++	default:
++		n = runetochar(buf, &r);
++		if(nrescue + n >= sizeof rescueline)
++			return;
++		memmove(rescueline+nrescue, buf, n);
++		nrescue += n;
++		write(rescueout, buf, n);
++		return;
++	}
++	/* rivi valmis (\n tai ^D) */
++	if(write(rescuefd, rescueline, nrescue) != nrescue)
++		rescueend();
++	else
++		nrescue = 0;
++}
++
+ /*
+  * Read characters from consfd (serial console)
+- */ 
++ */
+ void
+ consproc(void *)
+ {
+ 	char *p, *e, *x, buf[64];
+-	int n, cr;
++	int n, cr, ctlt;
+ 	Rune r;
+ 
+ 	threadsetname("consproc");
++	threadnotify(rescuenote, 1);
+ 
++	ctlt = 0;
+ 	cr = 0;
+ 	p = buf;
+ 	e = buf + sizeof(buf);
+@@ -749,6 +905,26 @@ consproc(void *)
+ 			}
+ 			if(cr = (r == '\r'))
+ 				r = '\n';
++			if(rescuefd >= 0 && rescuedone)
++				rescueend();
++			if(rescuefd >= 0){
++				rescuerune(r);
++				continue;
++			}
++			/* ^T^T r: pelastusshell; muut ^T:t menevät consille */
++			if(r == Kctlt){
++				ctlt++;
++				continue;
++			}
++			if(ctlt >= 2 && r == 'r'){
++				ctlt = 0;
++				rescuestart();
++				continue;
++			}
++			for(; ctlt > 0; ctlt--){
++				Rune t = Kctlt;
++				send(serialchan, &t);
++			}
+ 			send(serialchan, &r);
+ 		}
+ 		if(n < 0) n = 0;
+diff --git a/sys/src/9/boot/bootfs.proto b/sys/src/9/boot/bootfs.proto
+index fe9def019a78fb769415cc5ebbc9236fa71c205f..3f9ae14f3dc59c5d5706be73147c47d11f96464b 100644
+--- a/sys/src/9/boot/bootfs.proto
++++ b/sys/src/9/boot/bootfs.proto
+@@ -1,5 +1,6 @@
+ $objtype
+ 	bin
++		acid
+ 		awk
+ 		auth
+ 			secstore
+@@ -20,9 +21,11 @@ $objtype
+ 		mntgen
+ 		mount
+ 		mv
++		ns
+ 		ndb
+ 			dnsgetip
+ 		rc
++		ps
+ 		rm
+ 		sed
+ 		sleep
+@@ -43,6 +46,9 @@ rc
+ tmp
+ sys
+ 	lib
++		acid
++			port
++			$objtype
+ 		kbmap
+ 			+
+ lib
+diff --git a/sys/man/8/kbdfs b/sys/man/8/kbdfs
+index 35fbda5e0ed4fee5b9d6caa431d16f9b017e534b..fba30c629bf87dfcb9261e1b95e828d3db2578cb 100644
+--- a/sys/man/8/kbdfs
++++ b/sys/man/8/kbdfs
+@@ -101,6 +101,44 @@ is open; otherwise they are given to the reader of
+ (the window system) as the keyboard's are.
+ Ctl-H, ctl-U, ctl-W and DEL apply to them as to typed ones.
+ .PP
++Ctl-T ctl-T
++.B r
++read from
++.I consfile
++starts a rescue
++.IR rc (1)
++in
++.IR kbdfs 's
++own name space, the boot name space as it was when
++.I kbdfs
++started (the boot file system in memory,
++.BR #c ,
++.BR #p ,
++.BR #s ),
++so it works while the root file server hangs.
++Lines from
++.I consfile
++then go to that
++.I rc
++instead of
++.BR cons ;
++.I kbdfs
++edits and echoes them, and the
++.I rc
++writes to
++.BR #c/cons .
++DEL interrupts it and ctl-D gives end of file, as on the console;
++when that
++.I rc
++exits, the line returns to
++.BR cons .
++The boot file system has
++.IR ps (1),
++.IR ns (1)
++and
++.IR acid (1)
++for this.
++.PP
+ The
+ .B console
+ command executes
