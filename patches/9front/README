@@ -208,3 +208,10 @@ iproute-lookupskip.diff
 
 pc64-wg.diff
 		9/pc64/pc64: the wg device (#W, ip/devwg.c).  2026-11-27.
+
+keyfs-rename-pakhash.diff
+		auth/keyfs.c: a user renamed by wstat gets its dp9ik pakhash
+		again, from its key and its new name, as when the keys are
+		read and when its aeskey is written.  Before, the hash stayed
+		the old name's and the auth server refused the renamed user's
+		dp9ik sign-in until keyfs restarted.  2026-11-27.
