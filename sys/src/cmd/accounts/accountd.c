@@ -60,6 +60,7 @@
  *	invite NAME TTL [GROUP...]	<- ok CODE	(shown once; kept as its hash)
  *	invites | uninvite HASH | users | creds NAME | revoke NAME HASH|all
  *	disable NAME | enable NAME | groups NAME | group NAME +GROUP|-GROUP
+ *	rename NAME NEWNAME		(the same user: uid, files, groups, passkeys; a new name and home)
  *	sessions | logout NAME
  *	asuser TOKEN			<- ok NAME DOM KEY	(auth/asuser's: the
  *					session's user, the dp9ik key's hex)
@@ -2149,6 +2150,141 @@ mkinvite(char **f, int nf, char *code, int ncode)
 	return nil;
 }
 
+/* a record's text, its attributes in order, k's value v */
+static char*
+attrtext(Attr *a, char *k, char *v)
+{
+	char *s, *t;
+
+	s = strdup("");
+	for(; a != nil; a = a->next){
+		if(a->k == nil)
+			continue;
+		t = smprint("%s%s %s\n", s, a->k, strcmp(a->k, k) == 0 ? v : a->v);
+		free(s);
+		s = t;
+	}
+	return s;
+}
+
+/* a passkey's record for another name (eachcred's) */
+static void
+renamecred(char *h, Attr *a, void *arg)
+{
+	char *p, *s;
+
+	p = pathf("%s/creds/%s", dir, h);
+	s = attrtext(a, "name", arg);
+	if(writefile(p, 0, s) < 0)
+		alog("rename: passkey %s not renamed: %r", h);
+	free(s);
+	free(p);
+}
+
+/* the file server has the user new, and not old */
+static int
+renamed(char *new, char *old)
+{
+	return fsuser(new, nil, nil) >= 0 && fsuser(old, nil, nil) < 0;
+}
+
+/* a path's last element renamed */
+static int
+renamepath(char *path, char *name)
+{
+	Dir d;
+
+	nulldir(&d);
+	d.name = name;
+	return dirwstat(path, &d);
+}
+
+/*
+ * rename OLD NEW: the account, its user in keyfs and on the file server
+ * (newuser OLD NEW: the same uid, so its files, groups and rooms follow),
+ * its home and its records; its passkeys stay (statelk held).  A step
+ * that fails undoes the ones before it.
+ */
+static char*
+renameacct(char *old, char *new)
+{
+	char *why, *v, *ko, *kn, *ho, *hn, *s, *p;
+	void *arg[2];
+	int pending;
+	Attr *a;
+
+	if((a = account(old)) == nil || (v = aval(a, "state")) == nil || strcmp(v, "pending") == 0){
+		freeattrs(a);
+		return "no such account";
+	}
+	if((why = newnameok(new, &pending)) != nil || pending){
+		freeattrs(a);
+		return why != nil ? why : "name taken";
+	}
+	arg[0] = new;
+	arg[1] = nil;
+	eachfile("invites", pendinginvite, arg);
+	if(arg[1] != nil){
+		freeattrs(a);
+		return "an invitation for that name is open";
+	}
+	if(fsuser(old, nil, nil) < 0){
+		freeattrs(a);
+		return "the file server has no such user";
+	}
+	ko = pathf("%s/%s", keys, old);
+	kn = pathf("%s/%s", keys, new);
+	ho = pathf("%s/%s", usrdir, old);
+	hn = pathf("%s/%s", usrdir, new);
+	why = nil;
+	if(renamepath(ko, new) < 0){
+		why = "keyfs: can not rename the user";
+		goto out;
+	}
+	s = smprint("newuser %s %s", old, new);
+	why = fscmd(s, renamed, new, old);
+	free(s);
+	if(why != nil)
+		goto undokeys;
+	if(exists(ho) && renamepath(ho, new) < 0){
+		why = "can not rename the home";
+		goto undofs;
+	}
+	p = pathf("%s/users/%s", dir, new);
+	s = attrtext(a, "state", aval(a, "state"));
+	if(writefile(p, 1, s) < 0){
+		free(s);
+		free(p);
+		why = "can not keep the account";
+		if(exists(hn))
+			renamepath(hn, old);
+		goto undofs;
+	}
+	free(s);
+	free(p);
+	eachcred(old, renamecred, new);
+	p = pathf("%s/users/%s", dir, old);
+	remove(p);
+	free(p);
+	goto out;
+
+undofs:
+	s = smprint("newuser %s %s", new, old);
+	if(fscmd(s, renamed, old, new) != nil)
+		alog("rename %s: the file server's user stays %s", old, new);
+	free(s);
+undokeys:
+	if(renamepath(kn, old) < 0)
+		alog("rename %s: keyfs's user stays %s", old, new);
+out:
+	freeattrs(a);
+	free(ko);
+	free(kn);
+	free(ho);
+	free(hn);
+	return why;
+}
+
 static char*
 setstate(char *name, char *state)
 {
@@ -2262,6 +2398,15 @@ adminreq(Conn *c, char **f, int nf)
 		qlock(&statelk);
 		why = revokecred(f[1], f[2], 1);
 		qunlock(&statelk);
+	}else if(nf == 3 && strcmp(f[0], "rename") == 0){
+		qlock(&statelk);
+		why = renameacct(f[1], f[2]);
+		qunlock(&statelk);
+		if(why == nil){
+			/* sessions name the old user: they end, the passkeys sign in again */
+			endsessions(f[1], nil);
+			alog("rename %s %s", f[1], f[2]);
+		}
 	}else if(nf == 2 && (strcmp(f[0], "disable") == 0 || strcmp(f[0], "enable") == 0)){
 		qlock(&statelk);
 		why = setstate(f[1], strcmp(f[0], "enable") == 0 ? "active" : "disabled");

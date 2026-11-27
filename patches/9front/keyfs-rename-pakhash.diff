@@ -1,0 +1,14 @@
+diff --git a/sys/src/cmd/auth/keyfs.c b/sys/src/cmd/auth/keyfs.c
+index 920aca3a8f11d284a29d7c30fd5e144fe252c802..2cde94b555464a90abd25cc8a2d41e4c799f3b07 100644
+--- a/sys/src/cmd/auth/keyfs.c
++++ b/sys/src/cmd/auth/keyfs.c
+@@ -676,6 +676,9 @@ Wstat(Fid *f)
+ 		return "user previously removed";
+ 	free(f->user->name);
+ 	f->user->name = estrdup(d.name);
++	/* dp9ik's pakhash is of the name too: a renamed user signs in with its new name */
++	if(keydbaes)
++		authpak_hash(&f->user->key, f->user->name);
+ 	insertuser(f->user);
+ 	writeusers();
+ 	return 0;
