@@ -1,0 +1,6 @@
+</$objtype/mkfile
+
+TARG=wgkey
+
+BIN=/$objtype/bin/ip
+</sys/src/cmd/mkmany

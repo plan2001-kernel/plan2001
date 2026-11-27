@@ -31,3 +31,6 @@ kbdfs-serial-console.diff	integration	local
 serial-console-shell.diff	integration	local
 libwebauthn-mkfile.diff		integration	local
 acpi-pwrbtn.diff		integration	local
+# WireGuard (#W)
+iproute-lookupskip.diff		integration	local
+pc64-wg.diff			integration	local

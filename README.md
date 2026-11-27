@@ -76,6 +76,16 @@ Plan2001 accounts are genuine 9front users, created by invitation and used with 
 - **Page.** `sys/lib/accounts` is the reusable client. It connects only to its own origin's `/account` WebSocket (`aux/etherws -C`), takes the invitation from the URL fragment, and keeps the session in a `SameSite=Strict` cookie (`Secure` on HTTPS).
 - **Native logins** (drawterm, rcpu) still need a password. A passwordless account has only a random key, so it reaches the system through the broker unless an administrator also sets a password.
 
+## Network access and administration
+
+A public Plan2001 server exposes its web service and nothing else. Native administration (auth 567, rcpu 17019, 9P 17020) is reached only through Plan2001's own WireGuard tunnel, and dp9ik authorisation still applies inside it.
+
+- **WireGuard is `#W`** (`sys/src/9/ip/devwg.c`), Plan2001's own implementation of the protocol (Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s, libsec's crypto) as the IP medium `wg`; not a port of Linux's driver. `ip/iproute.c` adds `v4lookupskip`/`v6lookupskip` so that the tunnel's own outer packets never route into a `wg` interface (`patches/9front/iproute-lookupskip.diff`). The device's ctl and status are described at the top of `devwg.c`.
+- **Public IPv4:** only WireGuard (UDP 51820) and necessary ICMP. **Public IPv6:** HTTPS (TCP 443) for the site, Room and WASM32, HTTP 80 only for certificate renewal, and ICMPv6. Native service listeners are bound to the tunnel address, never to a public one; the cloud firewall restricts the same ports independently.
+- **Administrators:** one key and one /32 per client in 10.201.0.0/24 (server 10.201.0.1, silli .2, kuha .3), split tunnel to the server only. Clients are authenticated by key, not by source address, and may roam. Private keys are made on the machine that uses them and never leave it.
+- **Server:** `wgsetup init 10.201.0.1 255.255.255.0` once (new private key, `/adm/wg/wg0`, host owner only), `wgsetup up` at boot (from `/cfg/$sysname/cpustart`), `wgsetup peer NAME ADDR KEY` and `wgsetup remove NAME` take effect at once and persist in `/adm/wg/wg0.peers`, `wgsetup show` for the public key and counters. Then `aux/listen -q -a 10.201.0.1 -t TRUSTDIR -d SERVICEDIR tcp` serves the native services on the tunnel only, and the machine's `ndb` entry names the tunnel address so local auth clients find the auth server.
+- **Linux client:** `tools/wg-admin init NAME ADDR` (prints the `wgsetup peer` line), the server's public key in `~/.config/plan2001/wg/server.pub`, then `tools/wg-admin up` and `9pterm -h 10.201.0.1 -a 'tcp!10.201.0.1!567' ...`. `ip/wgkey` makes and derives keys on Plan2001.
+
 ## Preservation and scope
 
 1. Do not replace a working component merely to make the architecture look cleaner.

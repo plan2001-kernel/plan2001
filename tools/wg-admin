@@ -1,0 +1,41 @@
+#!/bin/bash
+# Ylläpitäjän WireGuard-tunneli Plan2001-palvelimelle tältä Linux-koneelta
+# (wg, ip, sudo).  Avain syntyy tällä koneella eikä poistu siltä.
+#   tools/wg-admin init NIMI OSOITE       oma avain; tulostaa palvelimelle
+#                                        ajettavan wgsetup peer -rivin
+#   tools/wg-admin up [PALVELIN:PORTTI]   rajapinta wgp2001 (oletus wg.plan2001.com:51820)
+#   tools/wg-admin down
+# Palvelimen julkinen avain: $sec/server.pub (wgsetup show).  Tunnelissa
+# kulkee vain palvelimen /32, joten muu liikenne ei muutu (split tunnel).
+# Natiivi dp9ik-tunnistus pysyy: 9pterm -h 10.201.0.1 -a 'tcp!10.201.0.1!567' ...
+set -e
+sec=${PLAN2001_WG:-$HOME/.config/plan2001/wg}
+dev=wgp2001
+server=10.201.0.1
+case $1 in
+init)
+	[ $# -eq 3 ] || { echo "usage: tools/wg-admin init NIMI OSOITE" >&2; exit 2; }
+	[ ! -e "$sec/admin.key" ] || { echo "wg-admin: $sec/admin.key on jo" >&2; exit 1; }
+	install -d -m 700 "$sec"
+	(umask 077; wg genkey >"$sec/admin.key")
+	echo "$3" >"$sec/admin.addr"
+	echo "palvelimella: wgsetup peer $2 $3 $(wg pubkey <"$sec/admin.key")"
+	echo "ja tänne palvelimen avain: $sec/server.pub" ;;
+up)
+	ep=${2:-wg.plan2001.com:51820}
+	for f in admin.key admin.addr server.pub; do
+		[ -s "$sec/$f" ] || { echo "wg-admin: $sec/$f puuttuu" >&2; exit 1; }
+	done
+	sudo ip link del $dev 2>/dev/null || true
+	sudo ip link add $dev type wireguard
+	sudo wg set $dev private-key "$sec/admin.key" \
+		peer "$(cat "$sec/server.pub")" endpoint "$ep" allowed-ips $server/32 persistent-keepalive 25
+	sudo ip addr add "$(cat "$sec/admin.addr")/32" peer $server/32 dev $dev
+	sudo ip link set $dev up mtu 1420
+	echo "wg-admin: $dev ylhäällä, $(cat "$sec/admin.addr") -> $server ($ep)" ;;
+down)
+	sudo ip link del $dev 2>/dev/null || true
+	echo "wg-admin: $dev alhaalla" ;;
+*)
+	echo "usage: tools/wg-admin init NIMI OSOITE | up [PALVELIN:PORTTI] | down" >&2; exit 2 ;;
+esac
