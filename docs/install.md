@@ -187,8 +187,9 @@ retried. The serial log is written next to the image
 A graceful stop presses the ACPI power button: Oracle Cloud's `SOFTSTOP`
 (console or `oci compute instance action --action SOFTSTOP`), QEMU's
 `system_powerdown`. The kernel reports each press as a line, `power
-button`, on `#P/acpievent` (`/dev/acpievent`, readable only by the host
-owner); a read blocks until a press. cpurc starts a reader that runs
+button`, on `#P/acpievent` (readable only by the host owner; `#P` is
+not bound on `/dev` at boot, so readers name it directly); a read blocks
+until a press. cpurc starts a reader that runs
 `fshalt`: the file servers flush and halt, then `scram` powers the machine
 off, and the next boot finds cwfs clean. termrc does the same only with
 `acpipwrbtn=halt` in plan9.ini; `acpipwrbtn=ignore` turns it off on a cpu
