@@ -777,5 +777,5 @@ sysseekv(va_list list)
 vlong
 sysnsecv(va_list)
 {
-	return todget(nil, nil);
+	return nsec();
 }

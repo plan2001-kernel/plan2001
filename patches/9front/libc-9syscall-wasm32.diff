@@ -1,6 +1,8 @@
+diff --git a/sys/src/libc/9syscall/mkfile b/sys/src/libc/9syscall/mkfile
+index 2b4f6e5895e6a1a8bbbb2028b3b7059600426972..8f16cf63300eb176e83ef100673f815dfd7af627 100644
 --- a/sys/src/libc/9syscall/mkfile
 +++ b/sys/src/libc/9syscall/mkfile
-@@ -2,11 +2,26 @@
+@@ -2,11 +2,26 @@ NPROC=1
  </$objtype/mkfile
  
  install:V:
@@ -28,7 +30,7 @@
  		{switch($objtype){
  		case 68000 68020
  			echo TEXT $i'(SB)', 1, '$0'
-@@ -147,8 +162,16 @@
+@@ -147,8 +162,16 @@ install:V:
  			echo RET
  		}} > $i.s
  		$AS $i.s

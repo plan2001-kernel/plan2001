@@ -1,5 +1,7 @@
---- a/sys/src/libthread/mkfile	2026-10-04 15:41:35.505589919 +0000
-+++ b/sys/src/libthread/mkfile	2026-10-04 15:42:12.758077333 +0000
+diff --git a/sys/src/libthread/mkfile b/sys/src/libthread/mkfile
+index f392943fa1276b6a59d0e12990db9a8857c51704..0eeb88e5647368fabbdf49843fbbba4ed3962fb3 100644
+--- a/sys/src/libthread/mkfile
++++ b/sys/src/libthread/mkfile
 @@ -2,8 +2,12 @@
  
  LIB=/$objtype/lib/libthread.a
@@ -14,7 +16,7 @@
  	channel.$O\
  	chanprint.$O\
  	create.$O\
-@@ -23,11 +27,9 @@
+@@ -23,11 +27,9 @@ OFILES=\
  	ioflush.$O\
  	kill.$O\
  	lib.$O\
@@ -26,7 +28,7 @@
  
  CFILES=\
  	386.c\
-@@ -70,6 +72,13 @@
+@@ -70,6 +72,13 @@ all:V:	$LIB sched.$objtype.acid channel.$objtype.acid
  spim.$O:	mips.c
  	$CC $CFLAGS -o $target mips.c
  

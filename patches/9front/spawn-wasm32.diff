@@ -1,3 +1,5 @@
+diff --git a/sys/src/libc/9syscall/sys.h b/sys/src/libc/9syscall/sys.h
+index 8b7f97d349b7db64b67931c9474bfec0324d348e..f6692758b10aa2a144e470eef085c3e89f36bd42 100644
 --- a/sys/src/libc/9syscall/sys.h
 +++ b/sys/src/libc/9syscall/sys.h
 @@ -50,3 +50,6 @@
@@ -7,17 +9,33 @@
 +#ifdef __wasm32__
 +#define	SPAWN		54
 +#endif
+diff --git a/sys/include/libc.h b/sys/include/libc.h
+index b23bb61bb232d92df3c9f712150ee605c80bbcea..b7003045f4b5ade973560d8c3d0400fc156ef6c7 100644
 --- a/sys/include/libc.h
 +++ b/sys/include/libc.h
-@@ -728 +727,0 @@
+@@ -728,7 +728,6 @@ struct Dir {
+ 	char	*muid;	/* last modifier name */
+ } Dir;
+ 
 -/* keep /sys/src/ape/lib/ap/plan9/sys9.h in sync with this -rsc */
-@@ -757,0 +757,3 @@
+ typedef
+ struct Waitmsg
+ {
+@@ -758,6 +757,9 @@ extern	int	create(char*, int, ulong);
+ extern	int	dup(int, int);
+ extern	int	errstr(char*, uint);
+ extern	int	exec(char*, char*[]);
 +#ifdef __wasm32__
 +extern	int	spawn(char*, char*[], int*, int, int);
 +#endif
+ extern	int	execl(char*, ...);
+ extern	int	fork(void);
+ extern	int	rfork(int);
+diff --git a/sys/src/cmd/rc/exec.h b/sys/src/cmd/rc/exec.h
+index 69b1004ca239343f185037b431d72bffecddb93d..fc60c26495f4a42573a8d075250a8dfdca15d4d3 100644
 --- a/sys/src/cmd/rc/exec.h
 +++ b/sys/src/cmd/rc/exec.h
-@@ -76,6 +76,7 @@
+@@ -76,6 +76,7 @@ extern void (*builtinfunc(char *name))(void);
  
  void execcd(void), execwhatis(void), execeval(void), execexec(void);
  int execforkexec(void);
@@ -25,9 +43,11 @@
  void execexit(void), execshift(void);
  void execwait(void), execumask(void), execdot(void), execflag(void);
  void execfunc(var*), execcmds(io*, char*, var*, redir*);
+diff --git a/sys/src/cmd/rc/havefork.c b/sys/src/cmd/rc/havefork.c
+index e50197b81026d8cbc195344c1567a1fa1a3a060c..083b53506cc12634ee2716e1fe0aeda458b60cb0 100644
 --- a/sys/src/cmd/rc/havefork.c
 +++ b/sys/src/cmd/rc/havefork.c
-@@ -226,6 +226,11 @@
+@@ -226,6 +226,11 @@ execforkexec(void)
  {
  	int pid;
  
@@ -39,9 +59,11 @@
  	switch(pid = Fork()){
  	case -1:
  		return -1;
+diff --git a/sys/src/cmd/rc/simple.c b/sys/src/cmd/rc/simple.c
+index 362b77bddd5b5c8593a0e08b43ca11a6db12272c..898941e49ce507ecc8cf9d0ac59400c87a46e1ee 100644
 --- a/sys/src/cmd/rc/simple.c
 +++ b/sys/src/cmd/rc/simple.c
-@@ -171,6 +171,79 @@
+@@ -171,6 +171,79 @@ mkargv(word *a)
  	return argv;
  }
  
@@ -121,9 +143,11 @@
  void
  execexec(void)
  {
+diff --git a/sys/src/cmd/rc/mkfile b/sys/src/cmd/rc/mkfile
+index 05cd4b80f03994f96a5a389b2568f77d6fc3be12..b65fd33137ae08dc6e1f5da23084b9564681a734 100644
 --- a/sys/src/cmd/rc/mkfile
 +++ b/sys/src/cmd/rc/mkfile
-@@ -31,7 +31,7 @@
+@@ -31,7 +31,7 @@ YFILES=syn.y
  
  BIN=/$objtype/bin
  

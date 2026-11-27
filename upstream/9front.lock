@@ -1,0 +1,23 @@
+# Plan2001's 9front: the one accepted upstream source revision.  Every
+# build assembles from COMMIT (tools/upstream source); patches/9front/*.diff
+# are made against it.  Change it only with tools/upstream update and review.
+URL=git://git.9front.org/plan9front/9front
+MIRROR=https://github.com/9front/9front.git
+BRANCH=front
+COMMIT=d7e009b7866219fa6b2302941b939759ef2c2b68
+TREE=33b83a455d3531053d7a3eecbae4603d2d193a5d
+# build.9front.org: build number (commits in COMMIT's history) and result
+BUILD=12175
+BUILD_STATUS=pass
+# Bootstrap only: the 9front release whose amd64 binaries give the native
+# build VM its first compilers (tools/native-amd64), and whose
+# sys/src/boot/bcm has the Raspberry Pi firmware 9front's mkfile would
+# fetch from a moving branch (tools/rpi4).  The kernel, libraries and
+# programs Plan2001 ships are rebuilt from COMMIT.  9front-11952 is
+# BOOT_COMMIT's source; its release announcement gives the .gz checksum.
+BOOT_NAME=9front-11952
+BOOT_ISO=9front-11952.amd64.iso
+BOOT_URL=http://9front.org/iso/9front-11952.amd64.iso.gz
+BOOT_ISO_GZ_SHA256=59ba79f1304f02c1aae573b337fa2569fc78027ce8e4c2056c4117e971025b91
+BOOT_ISO_SHA256=ee90b5e8a8d6b4ee8ad950322f91e338f698dae18c7f5e5800a650bbfa173fd9
+BOOT_COMMIT=602faae9a52f342a40b086d10b23c71c82dd52d7

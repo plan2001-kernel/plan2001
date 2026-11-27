@@ -1,6 +1,8 @@
+diff --git a/sys/src/9/pc/screen.c b/sys/src/9/pc/screen.c
+index 09d8a8872c09f256c37634212b83477ed29629e9..101c6bbe5d2802740498866ac5d6f5ddddce1797 100644
 --- a/sys/src/9/pc/screen.c
 +++ b/sys/src/9/pc/screen.c
-@@ -719,7 +719,12 @@
+@@ -719,7 +719,12 @@ bootscreeninit(void)
  	ulong chan, sz;
  	char *s, *p, *err;
  
@@ -14,7 +16,7 @@
  	s = getconf("*bootscreen");
  	if(s == nil)
  		return;
-@@ -733,6 +738,13 @@
+@@ -733,6 +738,13 @@ bootscreeninit(void)
  		return;
  
  	z = strtoul(s, &s, 0);

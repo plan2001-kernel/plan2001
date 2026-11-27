@@ -2,7 +2,7 @@
 
 As 9front is installed on a PC: boot the live image, run `inst/start`,
 reboot from the disk; then the machine builds its own system from its
-source contained in the distribution. Keep the 9front-11952 baseline pinned.
+source contained in the distribution, the locked 9front revision (`upstream/9front.lock`).
 
 ## The distribution
 
@@ -13,7 +13,7 @@ A binary base, the tools, and the whole source with its git:
   9front's own is `github.com/9front/9front`) and this tree's files over
   it (the port, 3c/3a/3l, the patched files), without 9front's jokes and
   quotations (`tools/dist.deny`). `tools/treebranch` records overlay source
-  snapshots over the pinned release. Its root is the machine's `/`.
+  snapshots over the locked 9front revision. Its root is the machine's `/`.
 - **The ISO** (`tools/dist`: `build/dist/plan9-wasm32.iso`, plan9port's
   dump9660, `-c9j` as 9front's mkfile) has the branch's files, and built
   for wasm32 only the base system and the tools (`tools/dist.base`: the
@@ -39,7 +39,7 @@ After the install, on the machine (as 9front's sysupdate):
     mk install                  # the rest of the system, built here
 
 To update the overlay from the distribution's configured source remote,
-keep the same frozen 9front release and rebuild the tools first. Network
+keep the distribution's locked 9front revision and rebuild the tools first. Network
 access requires a configured gateway (`docs/network.md`); `-n` provides
 an isolated test network without Internet access:
 
@@ -184,11 +184,12 @@ retried. The serial log is written next to the image
 
 ## ARM64 QEMU virt live image
 
-The serial live image uses the frozen release's `sys/src/9/arm64` QEMU
+The serial live image uses upstream's `sys/src/9/arm64` QEMU
 board and native `7c`, `7a`, `7l`, `mk`, and `aux/aout2efi`. Linux needs
 QEMU for AMD64 (the cross-build VM) and AArch64 (the target), OVMF,
-AAVMF/EDK2 and mtools. The verified 11952 AMD64 ISO supplies sources and
-cross-compilers; `PLAN2001_BUILDVM` selects the same native build VM used
+AAVMF/EDK2 and mtools. The sources are the assembled tree (`tools/tree`) and
+the cross-compilers are those `tools/native-amd64/build` built from it
+(`root.tar`); `PLAN2001_BUILDVM` selects the same native build VM used
 by `tools/native-amd64/build` (default `~/.cache/plan2001/base.qcow2`).
 
     tools/native-arm64/build
@@ -210,7 +211,7 @@ verified `tools/tree` source assembly and build libc with the
 architecture-aware syscall selector.
 
 The target command uses `virt,gic-version=3,highmem=off`, a Cortex-A72,
-one CPU and 1024 MiB RAM. These settings match the pinned board's GICv3,
+one CPU and 1024 MiB RAM. These settings match the board's GICv3,
 PCI ECAM and MMIO addresses. The virtio PCI devices use
 `disable-legacy=on`, matching the board's virtio 1.0 drivers. `AAVMF_CODE` and `AAVMF_VARS` override the
 firmware paths. The firmware variables and test disk are disposable; the

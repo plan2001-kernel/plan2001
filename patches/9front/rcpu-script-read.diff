@@ -1,6 +1,8 @@
+diff --git a/rc/bin/rconnect b/rc/bin/rconnect
+index e265c0c93988350f6da67a1bc09ac64d5f7dbcbd..d326c5008d413aaba05f0f39ec12822a1aa2ecb1 100755
 --- a/rc/bin/rconnect
 +++ b/rc/bin/rconnect
-@@ -73,7 +73,7 @@
+@@ -73,7 +73,7 @@ if(~ $filter aan){
  			fn server {
  				echo -n aanserver $netdir >/proc/$pid/args
  				rm -f /env/^('fn#server' 'fn#aanserver' 'aanto')
@@ -9,9 +11,11 @@
  			}
  			exec tlssrv -A /bin/rc -c server
  			exit
+diff --git a/rc/bin/service/!il17019 b/rc/bin/service/!il17019
+index 0bdd5592b93997cecbdedf12f37f9e29ada0dafa..7242d6ea91e8acf4765ac42daad0104b18c78de7 100755
 --- a/rc/bin/service/!il17019
 +++ b/rc/bin/service/!il17019
-@@ -6,6 +6,6 @@
+@@ -6,6 +6,6 @@ if(~ $#* 3){
  fn server {
  	~ $#remote 0 || echo -n $netdir $remote >/proc/$pid/args
  	rm -f /env/'fn#server'
@@ -19,9 +23,11 @@
 +	. <{n=`{read} && ! ~ $#n 0 && s=`''{read -c $n} && echo -n $s} >[2=1]
  }
  exec tlssrv -a /bin/rc -c server
+diff --git a/rc/bin/service/tcp17019 b/rc/bin/service/tcp17019
+index 0bdd5592b93997cecbdedf12f37f9e29ada0dafa..7242d6ea91e8acf4765ac42daad0104b18c78de7 100755
 --- a/rc/bin/service/tcp17019
 +++ b/rc/bin/service/tcp17019
-@@ -6,6 +6,6 @@
+@@ -6,6 +6,6 @@ if(~ $#* 3){
  fn server {
  	~ $#remote 0 || echo -n $netdir $remote >/proc/$pid/args
  	rm -f /env/'fn#server'

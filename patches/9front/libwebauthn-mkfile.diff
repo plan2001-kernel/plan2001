@@ -1,4 +1,12 @@
+diff --git a/sys/src/mkfile b/sys/src/mkfile
+index 902c744513dc21657d980a79061e7ffecf63a948..4888cd38372f94226b3ba041ac04849b7fa5d24d 100644
 --- a/sys/src/mkfile
 +++ b/sys/src/mkfile
-@@ -42,0 +43 @@
+@@ -40,6 +40,7 @@ LIBS=\
+ 	libttf\
+ 	libventi\
+ 	libdtracy\
 +	libwebauthn\
+ 
+ 
+ CMDS=cmd\

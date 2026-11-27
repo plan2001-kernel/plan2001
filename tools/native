@@ -134,12 +134,39 @@ PY
 		./mklatin "$tree/lib/keyboard" >"$k/latin1.h") || { echo "native: latin1.h" >&2; rm -f "$k/latin1.h"; exit 1; }
 	rm -rf "$m"
 fi
-# awk's y.tab.h and awkgram.c (yacc's): the release ships awkgram.c but
-# not y.tab.h; both made here with plan9port's yacc (its tokens are the
-# release's proctab.c's, made by maketab from 9front's yacc's)
+# What 9front's mkfiles make with a program for the host ($cputype) - its
+# own release ships them made, its source does not: libc/ucd's tables
+# (mkrunetype, from /lib/ucd's text), awk's proctab.c (maketab, from
+# yacc's y.tab.h) and jpg's ycbcr.h and rgbv.h (rgbycc, rgbrgbv).  Made
+# here with plan9port's 9c and 9l from the tree's own programs.
+hostmade() {	# DIR PROGRAM: build DIR/PROGRAM.c for the host into $m/PROGRAM
+	cp "$1/$2.c" "$m/$2.c" && (cd "$m" && PATH=$PLAN9/bin:$PATH 9c "$2.c" >/dev/null && PATH=$PLAN9/bin:$PATH 9l -o "$2" "$2.o")
+}
+u=$tree/sys/src/libc/ucd
+if [ -e "$u/mkrunetype.c" ] && [ ! -e "$u/runeistypedata" ]; then
+	m=$(mktemp -d)
+	cp "$u/mkrunetype.c" "$m/mkrunetype.c"
+	"$hostsed" -i "s|\"/lib/ucd/|\"$tree/lib/ucd/|" "$m/mkrunetype.c"
+	"$hostgrep" -q "\"$tree/lib/ucd/UnicodeData.txt\"" "$m/mkrunetype.c" || { echo "native: mkrunetype.c: its /lib/ucd is not where it was" >&2; exit 1; }
+	(cd "$m" && PATH=$PLAN9/bin:$PATH 9c mkrunetype.c >/dev/null && PATH=$PLAN9/bin:$PATH 9l -o mkrunetype mkrunetype.o &&
+		cd "$u" && "$m/mkrunetype") || { echo "native: libc/ucd's tables" >&2; rm -f "$u"/rune*data; exit 1; }
+	rm -rf "$m"
+fi
 aw=$tree/sys/src/cmd/awk
 if [ -e "$aw/awkgram.y" ] && [ ! -e "$aw/y.tab.h" ]; then
 	(cd "$aw" && "$PLAN9/bin/yacc" -d -o awkgram.c awkgram.y >/dev/null 2>&1) || { echo "native: awk's grammar" >&2; exit 1; }
+fi
+if [ -e "$aw/maketab.c" ] && [ ! -e "$aw/proctab.c" ]; then
+	m=$(mktemp -d)
+	(hostmade "$aw" maketab && cd "$aw" && "$m/maketab" >proctab.c) || { echo "native: awk's proctab.c" >&2; rm -f "$aw/proctab.c"; exit 1; }
+	rm -rf "$m"
+fi
+j=$tree/sys/src/cmd/jpg
+if [ -e "$j/rgbycc.c" ] && { [ ! -e "$j/ycbcr.h" ] || [ ! -e "$j/rgbv.h" ]; }; then
+	m=$(mktemp -d)
+	(hostmade "$j" rgbycc && hostmade "$j" rgbrgbv && "$m/rgbycc" >"$j/ycbcr.h" && "$m/rgbrgbv" >"$j/rgbv.h") ||
+		{ echo "native: jpg's ycbcr.h, rgbv.h" >&2; rm -f "$j/ycbcr.h" "$j/rgbv.h"; exit 1; }
+	rm -rf "$m"
 fi
 # what the kernel and the boot file system's programs need, in order, and
 # those programs (sys/src/9/wasm32/bootfs.proto)
@@ -147,8 +174,8 @@ libs="libc libthread libmp libsec libbio libregexp libString libauth libauthsrv 
 one="basename cat cleanname cp date dd echo ls mkdir mv rm sleep sort touch wc xd bind unmount ns sed mount pwd ps read test chmod tlsclient mntgen ramfs tar stats webcookies clock"
 cmds="cmd/rc cmd/hjfs cmd/rio cmd/aux/kbdfs cmd/auth/factotum cmd/auth/secstore:secstore.install,aescbc.install cmd/aux/seckeys cmd/exportfs cmd/plumb cmd/disk/prep cmd/disk:format.install,mkfs.install,mkext.install cmd/dossrv cmd/9660srv cmd/gefs cmd/cwfs cmd/gzip:gunzip.install cmd/webfs cmd/ip/ipconfig cmd/ip:ping.install cmd/ndb:cs.install cmd/aux:listen1.install,dial.install cmd/ethergw cmd:$(echo $one | "$hostsed" 's/\([^ ]*\)/\1.install/g; s/ /,/g')"
 dirs=${*:-$libs 9/wasm32 $cmds}
-# /lib/ucd: libc/ucd's tables are made from it, but they come made (its *data
-# files); stand-ins older than the tables.  aux/kbdfs's latin1.h, made from
+# /lib/ucd: libc/ucd's tables are made from it (above, by the host's
+# mkrunetype); stand-ins older than the tables.  aux/kbdfs's latin1.h, made from
 # /lib/keyboard by mklatin, a program for the host ($cputype): it comes made
 # too; a stand-in /lib/keyboard as old (below, a stand-in mklatin)
 ucd=$(mktemp -d)
@@ -265,8 +292,8 @@ k=/sys/src/cmd/aux/kbdfs
 if [ -e $k/latin1.h ]; then
 	: >$k/mklatin.amd64; "$hosttouch" -d '+1 min' $k/latin1.h
 fi
-# awk's proctab.c (made by maketab, a program for the host) and awkgram.c, y.tab.h (yacc's): they
-# come made too; a stand-in maketab newer than its inputs, the made files newer than both
+# awk's proctab.c (made by maketab, a program for the host) and awkgram.c, y.tab.h (yacc's): made
+# above; a stand-in maketab newer than its inputs, the made files newer than both
 a=/sys/src/cmd/awk
 if [ -e $a/proctab.c ]; then
 	"$hosttouch" -d '-3 min' $a/awkgram.y $a/maketab.c

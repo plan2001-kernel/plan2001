@@ -4,23 +4,25 @@ Plan2001 AMD64: UEFI-käynnistyvä raaka levykuva (USB-tikku tai sisäinen
 levy), joka käynnistyy ilman verkkoa:
 
     GPT: 1 ESP (FAT)   \\EFI\\BOOT\\BOOTX64.EFI (Plan2001-loader), 9pc64, plan9.ini
-         2 Plan 9      nvram fscache fsworm other: cwfs64x ja 9front-11952:n
-                       jakelu (allproto) pinnatulta ISO:lta
+         2 Plan 9      nvram fscache fsworm other: cwfs64x ja jakelu
+                       (allproto): käännetty juuri (tools/native-amd64/build:
+                       koottu puu, tools/distfiles ja käännös)
 
     tools/native-amd64/mkimage [--in HAK] [--out KUVA] [--size GiB, oletus 8]
                                [--disk sdE0] [--console 0]
 
---in: tools/native-amd64/build:n tulokset (9pc64, bootx64.efi, rc, kbdfs).  --disk on
+--in: tools/native-amd64/build:n tulokset (9pc64, bootx64.efi, root.tar).  --disk on
 levyn nimi kohdekoneessa (9frontin #S: AHCI sdE0, NVMe sdN0, ...):
 plan9.ini:n bootargs/nvram ja cwfs:n asetuslohko viittaavat siihen.
 --console 0 lisää plan9.ini:hin console=0 (sarjakonsoli, testit).
-Osiointi, FAT, cwfs ja kopiointi tehdään 9front-11952-koneessa 9frontin
-omilla työkaluilla (mkimage.rc); isäntä kirjoittaa vain GPT:n.
+Osiointi, FAT, cwfs ja kopiointi tehdään käännöskoneessa käännöksen omilla
+9front-työkaluilla (mkimage.rc); isäntä kirjoittaa vain GPT:n.
 """
 
 import argparse
 import os
 import struct
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -104,7 +106,7 @@ def main():
     a = ap.parse_args()
 
     ulos = a.out or os.path.join(a.sisaan, "plan2001-amd64.img")
-    for t in ("9pc64", "bootx64.efi", "rc", "kbdfs"):
+    for t in ("9pc64", "bootx64.efi", "root.tar"):
         if not os.path.isfile(os.path.join(a.sisaan, t)):
             raise vm9.VirheVM("%s puuttuu hakemistosta %s: aja ensin tools/native-amd64/build" % (t, a.sisaan))
     if a.size < 8:
@@ -125,17 +127,8 @@ def main():
             ("mkimage.rc", os.path.join(vm9.TAMA, "mkimage.rc")),
             ("9pc64", os.path.join(a.sisaan, "9pc64")),
             ("bootx64.efi", os.path.join(a.sisaan, "bootx64.efi")),
-            ("rc", os.path.join(a.sisaan, "rc")),
-            ("kbdfs", os.path.join(a.sisaan, "kbdfs")),
-            # sarjakonsolin oma kuori (patches/9front/serial-console-shell.diff)
-            ("termrc", os.path.join(vm9.JUURI, "rc/bin/termrc")),
-            ("console", os.path.join(vm9.JUURI, "rc/bin/console")),
+            ("root.tar", os.path.join(a.sisaan, "root.tar")),
             ("plan9.ini", plan9ini(a.disk, a.console)),
-        ] + vm9.source_jasenet(tyo, os.path.abspath(a.shared)) + [
-            ("syslib", os.path.join(tyo, "source/sys/lib")),
-            ("sysdoc", os.path.join(tyo, "source/sys/doc")),
-            ("sysman", os.path.join(tyo, "source/sys/man")),
-            ("rcroot", os.path.join(tyo, "source/rc")),
         ])
         vm = vm9.Kone([(kone, "qcow2", False, "hd"),
                        (iso, "raw", True, "cd"),
@@ -147,7 +140,7 @@ def main():
             vm9.kaynnista_9front(vm, 300)
             # Plan 9 rajaa uuden tiedoston oikeudet hakemistonsa mukaan: glendan
             # /tmp (750) tekisi asennetusta /rc:stä ja /sys:stä muille lukukelvottomat
-            vm.aja("rm -rf /tmp/p2 && mkdir -p /tmp/p2 && chmod 775 /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data", 120)
+            vm.aja("rm -rf /tmp/p2 && mkdir -p /tmp/p2 && chmod 775 /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data", 600)
             vm.aja("rc /tmp/p2/mkimage.rc " + a.disk, 3600)
         finally:
             vm.sammuta()

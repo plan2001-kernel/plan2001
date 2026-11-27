@@ -4,7 +4,7 @@ No firmware or physical Pi4 is emulated by these sanitizer-backed tests.
 
     tools/test/arm64-loader [--kernel 9pi4efi]
 
-The pinned release's BCM2711 device trees (Pi 4 B, 400, CM4) must pass
+The bootstrap release's BCM2711 device trees (Pi 4 B, 400, CM4) must pass
 archinit() as the loader runs it, QEMU virt's tree (qemu-system-aarch64
 dumpdtb) must be refused as the wrong board, and with --kernel (default:
 tools/rpi4/build's output, if present) the built 9pi4efi header must pass
@@ -18,7 +18,10 @@ import subprocess
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-EFI = ROOT / 'sys/src/boot/efi'
+# the loader's source as the build has it: the assembled tree (efi-loader.diff)
+TREE = tempfile.TemporaryDirectory(prefix='arm64-loader-tree-')
+subprocess.run([str(ROOT / 'tools/tree'), TREE.name], check=True, stdout=subprocess.DEVNULL)
+EFI = pathlib.Path(TREE.name) / 'sys/src/boot/efi'
 
 def body(name):
     return '\n'.join(l for l in (EFI / name).read_text().splitlines() if not l.startswith('#include'))
@@ -287,12 +290,16 @@ with tempfile.TemporaryDirectory(prefix='arm64-loader-') as td:
     ap = argparse.ArgumentParser()
     ap.add_argument('--kernel', help='built 9pi4efi (default: tools/rpi4/build output if present)')
     a = ap.parse_args()
-    release = pathlib.Path(subprocess.check_output([str(ROOT / 'tools/release')], text=True).strip())
+    # the Pi firmware's device trees: binary resources of the lock's bootstrap
+    # ISO (upstream's mkfile fetches them from a moving branch)
+    iso = subprocess.check_output([str(ROOT / 'tools/upstream'), 'bootiso'], text=True).strip()
+    subprocess.run(['7z', 'x', '-y', '-o' + td, iso, 'sys/src/boot/bcm/bcm2711-*.dtb'],
+                   check=True, stdout=subprocess.DEVNULL)
     args = []
     for name in ('bcm2711-rpi-4-b.dtb', 'bcm2711-rpi-400.dtb', 'bcm2711-rpi-cm4.dtb'):
-        dtb = release / 'sys/src/boot/bcm' / name
+        dtb = pathlib.Path(td) / 'sys/src/boot/bcm' / name
         if not dtb.exists():
-            raise SystemExit('arm64-loader: pinned %s missing' % dtb)
+            raise SystemExit('arm64-loader: bootstrap ISO has no %s' % name)
         args.append('dtb=%s' % dtb)
     # the device trees pftf's EDK2 forwards on a real Pi 4 (tools/rpi4/uefi-esp's pinned zip, if cached)
     fwzip = pathlib.Path(os.environ.get('PLAN2001_CACHE', os.path.expanduser('~/.cache/plan2001'))) / 'rpi4-uefi/RPi4_UEFI_Firmware_v1.53.zip'

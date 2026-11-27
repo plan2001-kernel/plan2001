@@ -1,0 +1,11 @@
+# Plan2001 files made from an upstream file and changed for wasm32's
+# machine (no MMU, no scheduler of its own, programs as WebAssembly):
+# tools/upstream check and update list each origin's upstream commits since
+# the lock, to review into the copy.
+# copy					origin
+sys/src/9/wasm32/proc.c			sys/src/9/port/proc.c
+sys/src/9/wasm32/sysproc.c		sys/src/9/port/sysproc.c
+sys/src/9/wasm32/devproc.c		sys/src/9/port/devproc.c
+sys/src/9/wasm32/devswap.c		sys/src/9/port/devswap.c
+sys/src/libthread/wasm32/main.c		sys/src/libthread/main.c
+sys/src/libthread/wasm32/sched.c	sys/src/libthread/sched.c

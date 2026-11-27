@@ -38,10 +38,9 @@ node tools/test/workerurl.mjs
 PLAN9=/path/to/plan9port tools/test/run bootinfo badblob oldheader echo riotouch disk
 ```
 
-The build verifies the pinned 9front-11952 ISO from `tools/release.conf`.
-`PLAN9WASM32_CACHE` selects its cache; the default is
-`$HOME/.cache/plan9-wasm32`, with `$HOME/.cache/plan2001` as a legacy
-source. Browser tests require Chromium. Network tests can use the
+The build assembles the locked 9front revision (`upstream/9front.lock`,
+`tools/upstream source`) from the upstream cache in `$PLAN2001_CACHE`
+(default `$HOME/.cache/plan2001`), fetched and verified on first use. Browser tests require Chromium. Network tests can use the
 isolated `tools/gateway -n`; Internet access additionally needs passt or
 a configured TAP. `tools/hostcc/build` builds only 3c/3l/3a, not native
 AMD64 tools.

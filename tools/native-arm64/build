@@ -22,6 +22,7 @@ def main():
     ap.add_argument('--out', default=str(ROOT / 'build/native-arm64'))
     ap.add_argument('--buildvm')
     ap.add_argument('--iso')
+    ap.add_argument('--in', dest='sisaan', default=vm9.oletus_ulos())
     ap.add_argument('--loader-only', action='store_true', help='build only bootaa64.efi')
     a = ap.parse_args()
     out = pathlib.Path(a.out).resolve()
@@ -32,7 +33,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='p2arm64-') as td:
         members = [('build.rc', str(ROOT / 'tools/native-arm64/build.rc')),
                    ('native-rules.rc', str(ROOT / 'tools/test/native-rules.rc'))]
-        members += vm9.source_jasenet(td)
+        members += vm9.puu_jasenet(td)
+        members += [('root.tar', str(pathlib.Path(a.sisaan) / 'root.tar'))]
         disk = vm9.overlay_kone(base, td, 'build.qcow2')
         src = vm9.tar_levylle(td + '/in.img', members)
         dst = vm9.tyhja_levy(td + '/out.img', 256 << 20)
@@ -43,7 +45,7 @@ def main():
         vm.kaynnista()
         try:
             vm9.kaynnista_9front(vm, 300)
-            vm.aja('mkdir -p /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data', 120)
+            vm.aja('rm -rf /tmp/p2 && mkdir -p /tmp/p2 && chmod 775 /tmp/p2 && cd /tmp/p2 && tar xf /dev/sdE2/data', 600)
             vm.aja('rc /tmp/p2/build.rc' + (' loaderonly' if a.loader_only else ''), 7200)
         finally:
             vm.sammuta()

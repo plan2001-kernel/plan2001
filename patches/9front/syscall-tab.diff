@@ -1,6 +1,8 @@
+diff --git a/sys/src/cmd/syscall/mkfile b/sys/src/cmd/syscall/mkfile
+index f00157075257ad58a5076cff4e614f015c2369fa..1a28907517fb26fa4d30164b54ed6892682b3025 100644
 --- a/sys/src/cmd/syscall/mkfile
 +++ b/sys/src/cmd/syscall/mkfile
-@@ -11,8 +11,9 @@
+@@ -11,8 +11,9 @@ BIN=/$objtype/bin
  
  SYSCALL=/sys/src/libc/9syscall/sys.h
  

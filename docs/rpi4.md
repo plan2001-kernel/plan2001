@@ -1,6 +1,6 @@
 # Raspberry Pi 4 (bcm64)
 
-The Raspberry Pi 4 (BCM2711) runs 9front-11952's own `bcm64` port: the
+The Raspberry Pi 4 (BCM2711) runs 9front's own `bcm64` port: the
 `pi4` kernel configuration (`sys/src/9/bcm64/pi4`, kernel `9pi4`) and the
 ordinary 9front arm64 userland, built with 9front's own compilers
 (`mk`, `7c`, `7a`, `7l`). The QEMU `virt` ARM64 platform is a separate
@@ -29,12 +29,13 @@ Plan2001's UEFI boot, which remains the native boot policy (README).
     tools/rpi4/stock            # 9front-11952.pi3.img, SHA256-checked
     tools/rpi4/bootinfotest     # 9pi4efi's BootInfo entry in QEMU raspi4b
 
-`tools/rpi4/build` assembles the pinned release with `tools/tree` before
-transferring the complete patched source and headers to the 9front-11952 build VM of
-`tools/native-amd64` (`PLAN2001_BUILDVM`, default
-`~/.cache/plan2001/base.qcow2`) with no network, from the pinned ISO
-(SHA256-checked) with this tree's files over it (`tools/tree` must
-succeed first). In the VM it runs `objtype=arm64 mk install` in
+`tools/rpi4/build` assembles the locked 9front revision with `tools/tree`
+and transfers it, with the amd64 toolchain `tools/native-amd64/build`
+built from it (`root.tar`), to the build VM of `tools/native-amd64`
+(`PLAN2001_BUILDVM`, default `~/.cache/plan2001/base.qcow2`) with no
+network. The Raspberry Pi firmware blobs come from the lock's
+SHA256-checked bootstrap ISO; upstream's mkfile would fetch them from a
+moving branch. In the VM it runs `objtype=arm64 mk install` in
 `/sys/src`, builds and installs `9pi4`, `9pi3` and `9pi4efi` (each
 after `mk clean`: `9pi4efi`'s objects are built with `-DUEFI`), builds
 the shared `bootaa64.efi` from `/sys/src/boot/efi` as it is, and makes the SD
@@ -231,7 +232,7 @@ other's entry.
   Loading another kernel through `#c/reboot` is refused under UEFI.
 
 `tools/test/arm64-loader --kernel 9pi4efi` runs the loader's platform
-code on the host with the pinned release's and pftf v1.53's BCM2711
+code on the host with the bootstrap release's and pftf v1.53's BCM2711
 device trees (Pi 4 B, 400, CM4), refuses QEMU virt's tree as the wrong
 board, and passes the built kernel's header through the loader's whole
 preflight. `tools/native-arm64/boottest --rpi4-refusal` runs the real

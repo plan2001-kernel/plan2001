@@ -1,6 +1,8 @@
+diff --git a/sys/src/cmd/riow.c b/sys/src/cmd/riow.c
+index 59b70ec7497a0b49cf2577ded8d60751906295e5..f6ad264f03c36688ef8b7a198ed17d3674379981 100644
 --- a/sys/src/cmd/riow.c
 +++ b/sys/src/cmd/riow.c
-@@ -150,7 +150,7 @@
+@@ -150,7 +150,7 @@ wsupdate(void)
  }
  
  static void
@@ -9,7 +11,7 @@
  {
  	if(rfork(RFPROC|RFNOWAIT|RFNAMEG|RFENVG|RFCFDG|RFREND) == 0)
  		execl("/bin/rc", "rc", s, nil);
-@@ -325,7 +325,7 @@
+@@ -325,7 +325,7 @@ keyevent(char c, Rune r)
  {
  	if(c == 'c'){
  		if(r == '\n' && mod == Mmod4){

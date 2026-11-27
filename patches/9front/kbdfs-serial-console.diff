@@ -1,6 +1,8 @@
+diff --git a/sys/src/cmd/aux/kbdfs/kbdfs.c b/sys/src/cmd/aux/kbdfs/kbdfs.c
+index c62307e71d4238777f2255831d73f9efdc34b749..65cb8d7fb31a1ea58bcfcdebeb28802cb62de8c4 100644
 --- a/sys/src/cmd/aux/kbdfs/kbdfs.c
 +++ b/sys/src/cmd/aux/kbdfs/kbdfs.c
-@@ -112,6 +112,7 @@
+@@ -112,6 +112,7 @@ int notefd = -1;
  int killfd = -1;
  
  int kbdopen;
@@ -8,7 +10,7 @@
  int consctlopen;
  int quiet = 0;
  char *sname = nil;
-@@ -130,6 +131,7 @@
+@@ -130,6 +131,7 @@ Channel *ctlchan;	/* chan(int) */
  
  Channel *rawchan;	/* chan(Rune) */
  Channel *runechan;	/* chan(Rune) */
@@ -16,7 +18,7 @@
  
  Channel *conschan;	/* chan(char*) */
  Channel *kbdchan;	/* chan(char*) */
-@@ -747,7 +749,7 @@
+@@ -747,7 +749,7 @@ consproc(void *)
  			}
  			if(cr = (r == '\r'))
  				r = '\n';
@@ -25,7 +27,7 @@
  		}
  		if(n < 0) n = 0;
  		p = buf + n;
-@@ -1096,11 +1098,11 @@
+@@ -1096,11 +1098,11 @@ void
  ctlproc(void *)
  {
  	Channel *cook, *aconsr[2], *akbdr[2];
@@ -40,7 +42,7 @@
  
  	threadsetname("ctlproc");
  
-@@ -1111,7 +1113,7 @@
+@@ -1111,7 +1113,7 @@ ctlproc(void *)
  	if(scanfd >= 0)
  		proccreate(scanproc, nil, STACK);	/* scanfd -> keychan */
  	if(consfd >= 0)
@@ -49,7 +51,7 @@
  	if(notefd >= 0)
  		proccreate(intrproc, nil, STACK);	/* intchan -> notefd */
  
-@@ -1139,10 +1141,20 @@
+@@ -1139,10 +1141,20 @@ ctlproc(void *)
  	a[ARUNE].v = &r;
  	a[ARUNE].op = CHANRCV;
  
@@ -71,7 +73,7 @@
  		case ACTL:
  			switch(c){
  			case Rawoff:
-@@ -1154,7 +1166,12 @@
+@@ -1154,7 +1166,12 @@ ctlproc(void *)
  			}
  			break;
  		case ARUNE:
@@ -85,7 +87,7 @@
  				s = emalloc9p(UTFmax+2);
  				s[0] = 'c';
  				s[1+runetochar(s+1, &r)] = 0;
-@@ -1165,6 +1182,17 @@
+@@ -1165,6 +1182,17 @@ ctlproc(void *)
  			if(raw){
  				s = emalloc9p(UTFmax+1);
  				s[runetochar(s, &r)] = 0;
@@ -103,7 +105,7 @@
  				if(nbsendp(conschan, s) <= 0)
  					free(s);
  				break;
-@@ -1179,6 +1207,9 @@
+@@ -1179,6 +1207,9 @@ ctlproc(void *)
  			 */
  			send(cook, &r);
  			break;
@@ -113,7 +115,7 @@
  		}
  	}
  }
-@@ -1639,7 +1670,7 @@
+@@ -1639,7 +1670,7 @@ Srv fs = {
  void
  usage(void)
  {
@@ -122,7 +124,7 @@
  	exits("usage");
  }
  
-@@ -1656,6 +1687,9 @@
+@@ -1656,6 +1687,9 @@ threadmain(int argc, char** argv)
  	case 's':
  		sname = EARGF(usage());
  		break;
@@ -132,7 +134,7 @@
  	case 'm':
  		mntpt = EARGF(usage());
  		break;
-@@ -1687,6 +1721,8 @@
+@@ -1687,6 +1721,8 @@ threadmain(int argc, char** argv)
  	ctlchan = chancreate(sizeof(int), 0);
  	rawchan = chancreate(sizeof(Rune), 0);
  	runechan = chancreate(sizeof(Rune), 256);
@@ -141,9 +143,11 @@
  	conschan = chancreate(sizeof(char*), 128);
  	kbdchan = chancreate(sizeof(char*), 128);
  	intchan = chancreate(sizeof(int), 0);
+diff --git a/sys/man/8/kbdfs b/sys/man/8/kbdfs
+index b7b1f91b8e3c953fd90ba1f2ba8a1e003542965d..35fbda5e0ed4fee5b9d6caa431d16f9b017e534b 100644
 --- a/sys/man/8/kbdfs
 +++ b/sys/man/8/kbdfs
-@@ -4,7 +4,7 @@
+@@ -4,7 +4,7 @@ kbdfs, console \- keyboard and console filesystem
  .SH SYNOPSIS
  .B aux/kbdfs
  [
@@ -152,7 +156,7 @@
  ] [
  .B -s
  .I srv
-@@ -88,6 +88,19 @@
+@@ -88,6 +88,19 @@ otherwise on
  .B /dev
  (the default).
  .PP

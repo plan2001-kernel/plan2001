@@ -1,6 +1,8 @@
+diff --git a/sys/src/cmd/aux/kbdfs/kbdfs.c b/sys/src/cmd/aux/kbdfs/kbdfs.c
+index bfe630ff27e13669a4836819377cf5635ce47018..c62307e71d4238777f2255831d73f9efdc34b749 100644
 --- a/sys/src/cmd/aux/kbdfs/kbdfs.c
 +++ b/sys/src/cmd/aux/kbdfs/kbdfs.c
-@@ -1149,7 +1149,7 @@
+@@ -1149,7 +1149,7 @@ ctlproc(void *)
  			case Rawon:
  				if(raw = (c == Rawon)){
  					r = 0;
@@ -9,7 +11,7 @@
  				}
  			}
  			break;
-@@ -1169,7 +1169,15 @@
+@@ -1169,7 +1169,15 @@ ctlproc(void *)
  					free(s);
  				break;
  			}
