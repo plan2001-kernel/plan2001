@@ -1,0 +1,121 @@
+diff --git a/sys/src/9/ip/iproute.c b/sys/src/9/ip/iproute.c
+index 1e97c1d27a2bfcd103797878d495fd87e447ebc7..33598cc07835ff117af1b7a51cffdb2203426552 100644
+--- a/sys/src/9/ip/iproute.c
++++ b/sys/src/9/ip/iproute.c
+@@ -587,14 +587,19 @@ flushrouteifc(Fs *f, Ipifc *ifc)
+  *
+  *  for v4lookup, addresses are in 4 byte format.
+  */
+-Route*
+-v4lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
++/*
++ * Plan2001: skip, if not nil, is a medium whose interfaces the route must
++ * not go out of - a tunnel's own (outer) packets must not be routed into
++ * it (#W, ip/devwg.c).  The route found is left in rh, for ipoput4/6.
++ */
++static Route*
++v4lookup0(Fs *f, uchar *a, uchar *s, Routehint *rh, Medium *skip)
+ {
+ 	ulong la, ls;
+ 	Route *p, *q;
+ 	Ipifc *ifc;
+ 
+-	if(rh != nil
++	if(skip == nil && rh != nil
+ 	&& rh->rgen == v4routegeneration
+ 	&& (q = rh->r) != nil
+ 	&& (ifc = q->ifc) != nil
+@@ -616,7 +621,9 @@ v4lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
+ 			p = p->right;
+ 			continue;
+ 		}
+-		if(p->type & Rsrc){
++		/* with skip and no source yet, a source specific route serves:
++		 * its source is the one to use (DHCP's default routes are) */
++		if((p->type & Rsrc) && (skip == nil || ls != 0)){
+ 			if(ls < p->v4.source){
+ 				p = p->mid;
+ 				continue;
+@@ -626,7 +633,8 @@ v4lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
+ 				continue;
+ 			}
+ 		}
+-		q = p;
++		if(skip == nil || p->ifc == nil || p->ifc->m != skip)
++			q = p;
+ 		p = p->mid;
+ 	}
+ 	if(rh != nil){
+@@ -638,7 +646,19 @@ v4lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
+ }
+ 
+ Route*
+-v6lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
++v4lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
++{
++	return v4lookup0(f, a, s, rh, nil);
++}
++
++Route*
++v4lookupskip(Fs *f, uchar *a, uchar *s, Routehint *rh, Medium *skip)
++{
++	return v4lookup0(f, a, s, rh, skip);
++}
++
++static Route*
++v6lookup0(Fs *f, uchar *a, uchar *s, Routehint *rh, Medium *skip)
+ {
+ 	ulong la[IPllen], ls[IPllen];
+ 	ulong x, y;
+@@ -648,11 +668,11 @@ v6lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
+ 
+ 	if(isv4(s)){
+ 		if(isv4(a))
+-			return v4lookup(f, a+IPv4off, s+IPv4off, rh);
++			return v4lookup0(f, a+IPv4off, s+IPv4off, rh, skip);
+ 		return nil;
+ 	}
+ 
+-	if(rh != nil
++	if(skip == nil && rh != nil
+ 	&& rh->rgen == v6routegeneration
+ 	&& (q = rh->r) != nil
+ 	&& (ifc = q->ifc) != nil
+@@ -690,7 +710,7 @@ v6lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
+ 			}
+ 			break;
+ 		}
+-		if(p->type & Rsrc){
++		if((p->type & Rsrc) && (skip == nil || ipcmp(s, IPnoaddr) != 0)){
+ 			for(h = 0; h < IPllen; h++){
+ 				x = ls[h];
+ 				y = p->v6.source[h];
+@@ -714,7 +734,8 @@ v6lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
+ 				break;
+ 			}
+ 		}
+-		q = p;
++		if(skip == nil || p->ifc == nil || p->ifc->m != skip)
++			q = p;
+ 		p = p->mid;
+ next:		;
+ 	}
+@@ -726,6 +747,18 @@ next:		;
+ 	return q;
+ }
+ 
++Route*
++v6lookup(Fs *f, uchar *a, uchar *s, Routehint *rh)
++{
++	return v6lookup0(f, a, s, rh, nil);
++}
++
++Route*
++v6lookupskip(Fs *f, uchar *a, uchar *s, Routehint *rh, Medium *skip)
++{
++	return v6lookup0(f, a, s, rh, skip);
++}
++
+ /*
+  * v4source, v6source:
+  *  lookup a route to destination address a and also find

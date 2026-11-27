@@ -196,3 +196,15 @@ acpi-pwrbtn.diff
 		when archacpi is not used.  rc/bin/cpurc reads it and runs
 		fshalt (acpipwrbtn=ignore: not); rc/bin/termrc only with
 		acpipwrbtn=halt.  2026-11-27.
+
+iproute-lookupskip.diff
+		ip/iproute.c: v4lookupskip and v6lookupskip, the longest-prefix
+		lookup that skips routes out of an interface of a given medium,
+		for #W's outer packets (ip/devwg.c), so a tunnel may carry the
+		default route.  With a skip and no source yet, a source
+		specific route serves (DHCP's default routes are such).
+		Recovered from Plan2001 d649157a3be7 (2026-10-01), unchanged.
+		2026-11-27.
+
+pc64-wg.diff
+		9/pc64/pc64: the wg device (#W, ip/devwg.c).  2026-11-27.

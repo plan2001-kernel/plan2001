@@ -1,0 +1,12 @@
+diff --git a/sys/src/9/pc64/pc64 b/sys/src/9/pc64/pc64
+index b7b1512bd5860a8c564c196722b17481b381355c..0e9551f0611397ff9d80381e7244b80f9763225a 100644
+--- a/sys/src/9/pc64/pc64
++++ b/sys/src/9/pc64/pc64
+@@ -21,6 +21,7 @@ dev
+ 	ether		netif
+ 	bridge		log
+ 	ip		arp chandial ip ipv6 ipaux iproute netlog nullmedium pktmedium inferno
++	wg
+ 
+ 	draw		screen vga vgax vgasoft
+ 	mouse		mouse

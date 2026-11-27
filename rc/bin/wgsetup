@@ -1,0 +1,130 @@
+#!/bin/rc
+# wgsetup: WireGuard-rajapinta wg0 (#W) pysyvästä asetuksesta sekä
+# vertaisten lisäys ja poisto ilman uudelleenkäynnistystä.  Isäntäomistajana.
+#	wgsetup init OSOITE MASKI [PORTTI]	uusi yksityinen avain ja asetus
+#	wgsetup up				asetus ja vertaiset ytimeen, rajapinta IP-pinoon
+#	wgsetup peer NIMI OSOITE AVAIN		lisää tai vaihda vertainen (OSOITE/32)
+#	wgsetup remove NIMI			poista vertainen, heti
+#	wgsetup show				rajapinta, vertaiset ja laskurit
+# Asetus $dir/wg0 (private, listen, addr) ja vertaiset $dir/wg0.peers
+# (NIMI OSOITE AVAIN rivillä), molemmat vain isäntäomistajan luettavissa.
+# Kullakin vertaisella on oma avain ja oma /32: ei lähdeosoitteen
+# sallittuja listoja, päätepiste vaeltaa todennettujen pakettien mukana.
+rfork e
+dir=/adm/wg
+cfg=$dir/wg0
+peers=$dir/wg0.peers
+ctl='#W/wg0/ctl'
+nl='
+'
+
+fn usage {
+	echo 'usage: wgsetup init addr mask [port] | up | peer name addr key | remove name | show' >[1=2]
+	exit usage
+}
+fn fail {
+	echo wgsetup: $* >[1=2]
+	exit fail
+}
+fn need {
+	test -e $ctl || fail 'ytimessä ei ole #W'
+}
+# base64-avain: 44 merkkiä, viimeinen '='
+fn keyok {
+	echo $1 | awk 'length($0) != 44 || $0 !~ /^[A-Za-z0-9+\/]+=$/ { exit 1 }'
+}
+fn addrok {
+	echo $1 | awk -F. 'NF != 4 { exit 1 } { for(i = 1; i <= 4; i++) if($i !~ /^[0-9]+$/ || $i > 255) exit 1 }'
+}
+fn nameok {
+	echo $1 | awk '$0 !~ /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/ { exit 1 }'
+}
+# rivi kerrallaan, jokainen ctl-rivi on kokonainen
+fn wgctl {
+	echo $* >$ctl || fail wg0: $1 $2
+}
+fn peerline {
+	wgctl peer $3 allowed $2/32
+}
+
+switch($1){
+case init
+	~ $#* 3 4 || usage
+	addrok $2 && addrok $3 || fail 'osoite tai maski'
+	port=51820
+	if(~ $#* 4)
+		port=$4
+	test -e $cfg && fail $cfg on jo: avainta ei vaihdeta
+	mkdir -p $dir && chmod 700 $dir || fail $dir
+	touch $cfg $peers && chmod 600 $cfg $peers || fail $cfg
+	key=`{ip/wgkey}
+	~ $#key 1 || fail ip/wgkey
+	{
+		echo private $key
+		echo listen $port
+		echo addr $2 $3
+	} >$cfg || fail $cfg
+	key=()
+	echo wgsetup: $cfg tehty, julkinen avain `{grep '^private ' $cfg | sed 's/^private //' | ip/wgkey -p}
+case up
+	~ $#* 1 || usage
+	need
+	test -r $cfg || fail ei $cfg
+	ifs0=$ifs; ifs=$nl
+	lines=`{grep '^(private|listen|cookie) ' $cfg}
+	ifs=$ifs0
+	for(l in $lines)
+		wgctl `{echo $l}
+	a=`{awk '$1 == "addr" { print $2, $3 }' $cfg}
+	~ $#a 2 || fail $cfg: ei addr-riviä
+	if(! grep -s '^'^$a(1)^' ' /net/ipifc/*/local){
+		{
+			n=`{read}
+			echo bind wg wg0 >/net/ipifc/$n/ctl && echo add $a >/net/ipifc/$n/ctl
+		} <>/net/ipifc/clone || fail wg0: ipifc
+	}
+	if(test -r $peers){
+		ifs0=$ifs; ifs=$nl
+		lines=`{grep -v '^(#|[ 	]*$)' $peers}
+		ifs=$ifs0
+		for(l in $lines)
+			peerline `{echo $l}
+	}
+	echo wgsetup: wg0 $a(1), `{grep -cv '^(#|[ 	]*$)' $peers} vertaista
+case peer
+	~ $#* 4 || usage
+	need
+	nameok $2 || fail nimi $2
+	addrok $3 || fail osoite $3
+	keyok $4 || fail avain
+	test -w $peers || fail ei $peers
+	# sama osoite toisella nimellä: etuliitteellä on yksi omistaja
+	awk -v n'='$2 -v a'='$3 '$1 != n && $2 == a { exit 1 }' $peers || fail $3 on jo toisella vertaisella
+	old=`{awk -v n'='$2 '$1 == n { print $3 }' $peers}
+	# vanha avain ensin pois, jotta uusi saa sen etuliitteen
+	for(k in $old)
+		~ $k $4 || wgctl remove $k
+	peerline $2 $3 $4
+	{ awk -v n'='$2 '$1 != n' $peers; echo $2 $3 $4 } >$peers.new && mv $peers.new $peers || fail $peers
+	chmod 600 $peers
+	echo wgsetup: $2 $3 lisätty
+case remove
+	~ $#* 2 || usage
+	need
+	test -w $peers || fail ei $peers
+	old=`{awk -v n'='$2 '$1 == n { print $3 }' $peers}
+	~ $#old 0 && fail ei vertaista $2
+	for(k in $old)
+		wgctl remove $k
+	awk -v n'='$2 '$1 != n' $peers >$peers.new && mv $peers.new $peers || fail $peers
+	chmod 600 $peers
+	echo wgsetup: $2 poistettu
+case show
+	~ $#* 1 || usage
+	need
+	cat '#W/wg0/status'
+	test -r $peers && cat $peers
+case *
+	usage
+}
+exit ''
