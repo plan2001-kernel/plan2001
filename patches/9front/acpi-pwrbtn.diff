@@ -1,0 +1,281 @@
+diff --git a/rc/bin/cpurc b/rc/bin/cpurc
+index bb266cd410562112a44e916a11c239cae0f8f89d..23ff3f30b63884e4e756f5c1cbae6a2d2d8dcb47 100755
+--- a/rc/bin/cpurc
++++ b/rc/bin/cpurc
+@@ -113,6 +113,10 @@ if not {
+ if(test -f /dev/apm)
+ 	aux/apm
+ 
++# ACPI power button: fshalt and power off (acpipwrbtn=ignore: nothing)
++if(! ~ $acpipwrbtn ignore && test -r /dev/acpievent)
++	{read </dev/acpievent && fshalt} &
++
+ if(test -e /cfg/$sysname/cpustart)
+ 	. /cfg/$sysname/cpustart
+ 
+diff --git a/rc/bin/termrc b/rc/bin/termrc
+index fabd3c5e41d30cd62dac663764f33f396ed1dd31..ba9e05bacb4f4e84ccd11b65289f83b81718438e 100755
+--- a/rc/bin/termrc
++++ b/rc/bin/termrc
+@@ -91,6 +91,10 @@ screenrc
+ if(test -f /dev/apm)
+ 	aux/apm
+ 
++# ACPI power button: fshalt and power off, when acpipwrbtn=halt
++if(~ $acpipwrbtn halt && test -r /dev/acpievent)
++	{read </dev/acpievent && fshalt} &
++
+ if(~ $terminal *reform*){
+ 	reform/pm
+ 	reform/audio
+diff --git a/sys/src/9/pc/archacpi.c b/sys/src/9/pc/archacpi.c
+index 4fa65c23b189721b6e2c265ec7d2ef785cef9b4a..4d855ea3df722d0d626360e2f72c48c25f61a6d5 100644
+--- a/sys/src/9/pc/archacpi.c
++++ b/sys/src/9/pc/archacpi.c
+@@ -53,6 +53,34 @@ static uvlong tblpa[64];
+ static int ntblmap;
+ static Tbl *tblmap[64];
+ 
++/*
++ * The fixed-feature power button (FADT), reported on #P/acpievent.
++ * Armed by the first read of the file, so a machine nobody listens
++ * on keeps its firmware's mode and interrupts as they were.
++ */
++enum {
++	Pm1pwrbtn	= 1<<8,		/* PM1_STS, PM1_EN */
++	Pm1scien	= 1<<0,		/* PM1_CNT */
++};
++
++static struct {
++	Lock;			/* the registers, npress */
++	QLock	rl;		/* the reader; arming */
++	Rendez	r;
++	int	armed;
++	int	npress;		/* presses not yet read */
++	int	off;		/* in the line being read */
++
++	int	sci;		/* ISA irq; 0: no fixed power button */
++	ulong	smicmd;
++	uchar	acpienable;
++	ulong	pm1evt[2];	/* PM1a, PM1b event blocks (0: none) */
++	ulong	pm1cnt;		/* PM1a control block */
++	int	pm1evtlen;
++	ulong	gpe[2];		/* GPE0, GPE1 blocks (0: none) */
++	int	gpelen[2];
++} pwrbtn;
++
+ static ushort
+ get16(uchar *p){
+ 	return p[1]<<8 | p[0];
+@@ -755,6 +783,13 @@ acpiinit(void)
+ 		}
+ 	}
+ 
++	/*
++	 * the SCI without an override is level-triggered, active low
++	 * (an override, added above, is kept)
++	 */
++	if(pwrbtn.sci > 0)
++		addirq(pwrbtn.sci, BusISA, 0, pwrbtn.sci, PcmpLEVEL|PcmpLOW, nil);
++
+ 	/* find embedded controller */
+ 	amlenum(amlroot, "_HID", enumec, nil);
+ 
+@@ -855,6 +890,189 @@ readtbls(Chan*, void *v, long n, vlong o)
+ 	return p - (uchar*)v;
+ }
+ 
++/*
++ * disable and acknowledge the enabled GPEs, all of them or the
++ * pending ones: nothing here handles them, and the SCI is a level
++ * interrupt they would keep raised
++ */
++static void
++gpeoff(int all)
++{
++	int i, j, n;
++	ulong b;
++	uchar s;
++
++	for(i=0; i<2; i++){
++		if((b = pwrbtn.gpe[i]) == 0)
++			continue;
++		n = pwrbtn.gpelen[i]/2;
++		for(j=0; j<n; j++){
++			s = inb(b+n+j);
++			if(!all)
++				s &= inb(b+j);
++			if(s == 0)
++				continue;
++			outb(b+n+j, inb(b+n+j) & ~s);
++			outb(b+j, s);
++		}
++	}
++}
++
++static void
++pwrbtnintr(Ureg*, void*)
++{
++	int i, s, press;
++	ulong b, e;
++
++	press = 0;
++	ilock(&pwrbtn);
++	for(i=0; i<2; i++){
++		if((b = pwrbtn.pm1evt[i]) == 0)
++			continue;
++		e = b + pwrbtn.pm1evtlen/2;
++		s = ins(b) & ins(e);
++		if(s == 0)
++			continue;
++		/* events other than the button are not handled: off */
++		if(s & ~Pm1pwrbtn)
++			outs(e, ins(e) & ~(s & ~Pm1pwrbtn));
++		outs(b, s);	/* status bits clear when written with 1 */
++		if(s & Pm1pwrbtn)
++			press = 1;
++	}
++	gpeoff(0);
++	if(press)
++		pwrbtn.npress++;
++	iunlock(&pwrbtn);
++	if(press)
++		wakeup(&pwrbtn.r);
++}
++
++/* called with pwrbtn.rl held */
++static void
++pwrbtnarm(void)
++{
++	int i;
++	ulong b;
++
++	if(pwrbtn.armed)
++		return;
++
++	/* in legacy mode the firmware's SMI handler takes the events */
++	if((ins(pwrbtn.pm1cnt) & Pm1scien) == 0){
++		if(pwrbtn.smicmd == 0 || pwrbtn.acpienable == 0)
++			error("acpi: no way to enter ACPI mode");
++		outb(pwrbtn.smicmd, pwrbtn.acpienable);
++		for(i = 0; (ins(pwrbtn.pm1cnt) & Pm1scien) == 0; i++){
++			if(i >= 300)
++				error("acpi: firmware did not enter ACPI mode");
++			tsleep(&up->sleep, return0, nil, 10);
++		}
++	}
++
++	/* the button alone raises the SCI; a press before now is not reported */
++	ilock(&pwrbtn);
++	gpeoff(1);
++	for(i=0; i<2; i++){
++		if((b = pwrbtn.pm1evt[i]) == 0)
++			continue;
++		outs(b + pwrbtn.pm1evtlen/2, 0);
++		outs(b, 0xFFFF);
++		outs(b + pwrbtn.pm1evtlen/2, Pm1pwrbtn);
++	}
++	iunlock(&pwrbtn);
++
++	intrenable(pwrbtn.sci, pwrbtnintr, nil, BUSUNKNOWN, "acpi");
++	pwrbtn.armed = 1;
++}
++
++static int
++pwrbtnpressed(void*)
++{
++	return pwrbtn.npress > 0;
++}
++
++/*
++ * a line for each press of the button, as a stream: a reader may take
++ * it a byte at a time (read(1)).  The first read arms the button.
++ */
++static long
++readacpievent(Chan*, void *v, long n, vlong)
++{
++	static char line[] = "power button\n";
++
++	if(n <= 0)
++		return 0;
++	eqlock(&pwrbtn.rl);
++	if(waserror()){
++		qunlock(&pwrbtn.rl);
++		nexterror();
++	}
++	pwrbtnarm();
++	if(pwrbtn.off == 0){
++		sleep(&pwrbtn.r, pwrbtnpressed, nil);
++		ilock(&pwrbtn);
++		pwrbtn.npress--;
++		iunlock(&pwrbtn);
++	}
++	n = readstr(pwrbtn.off, v, n, line);
++	pwrbtn.off += n;
++	if(pwrbtn.off >= sizeof(line)-1)
++		pwrbtn.off = 0;
++	qunlock(&pwrbtn.rl);
++	poperror();
++	return n;
++}
++
++/* an I/O port block of the FADT: the extended one if in I/O space, else the 32-bit one */
++static ulong
++fadtio(uchar *p, int len, int o32, int ox)
++{
++	uvlong a;
++
++	if(len >= ox+12 && p[ox] == IoSpace && (a = get64(p+ox+4)) != 0)
++		return a <= 0xFFFF ? a : 0;
++	a = get32(p+o32);
++	return a <= 0xFFFF ? a : 0;
++}
++
++static void
++pwrbtninit(void)
++{
++	uchar *p;
++	Tbl *t;
++	int len, sci;
++
++	if((t = findtable("FACP")) == nil)
++		return;
++	p = (uchar*)t;
++	len = get32(t->len);
++	if(len < 116)
++		return;
++	/* PWR_BUTTON: the button is a control method one; HW_REDUCED_ACPI: no PM1 blocks */
++	if(get32(p+112) & (1<<4 | 1<<20))
++		return;
++	sci = get16(p+46);
++	if(sci <= 0 || sci >= 16)
++		return;
++	pwrbtn.pm1evtlen = p[88];
++	pwrbtn.pm1evt[0] = fadtio(p, len, 56, 148);
++	pwrbtn.pm1evt[1] = fadtio(p, len, 60, 160);
++	pwrbtn.pm1cnt = fadtio(p, len, 64, 172);
++	if(pwrbtn.pm1evt[0] == 0 || pwrbtn.pm1cnt == 0 || pwrbtn.pm1evtlen < 4)
++		return;
++	pwrbtn.gpe[0] = fadtio(p, len, 80, 220);
++	pwrbtn.gpe[1] = fadtio(p, len, 84, 232);
++	pwrbtn.gpelen[0] = p[92];
++	pwrbtn.gpelen[1] = p[93];
++	pwrbtn.smicmd = get32(p+48);
++	if(pwrbtn.smicmd > 0xFFFF)
++		pwrbtn.smicmd = 0;
++	pwrbtn.acpienable = p[52];
++	pwrbtn.sci = sci;
++	addarchfile("acpievent", 0400, readacpievent, nil);
++}
++
+ static int
+ identify(void)
+ {
+@@ -891,6 +1109,7 @@ identify(void)
+ 	}
+ 	if(m->havetsc && getconf("*notsc") == nil)
+ 		archacpi.fastclock = tscticks;
++	pwrbtninit();
+ 
+ 	return 0;
+ }
