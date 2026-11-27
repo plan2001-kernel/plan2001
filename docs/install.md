@@ -182,6 +182,31 @@ not reach the guest) or `AIKA` (remote command timed out); nothing is
 retried. The serial log is written next to the image
 (`O.boottest.log`) and contains no credentials.
 
+### Stopping with the power button
+
+A graceful stop presses the ACPI power button: Oracle Cloud's `SOFTSTOP`
+(console or `oci compute instance action --action SOFTSTOP`), QEMU's
+`system_powerdown`. The kernel reports each press as a line, `power
+button`, on `#P/acpievent` (`/dev/acpievent`, readable only by the host
+owner); a read blocks until a press. cpurc starts a reader that runs
+`fshalt`: the file servers flush and halt, then `scram` powers the machine
+off, and the next boot finds cwfs clean. termrc does the same only with
+`acpipwrbtn=halt` in plan9.ini; `acpipwrbtn=ignore` turns it off on a cpu
+server.
+
+The first read arms the button: the kernel switches the firmware to ACPI
+mode if it is not already in it (`SMI_CMD`), enables only the button's
+event, disables the GPEs and handles the SCI. Until then, and on a machine
+without the file, nothing changes. The file exists only when the FADT
+describes a fixed-feature power button with an SCI on an ISA interrupt
+(not with `PWR_BUTTON` or `HW_REDUCED_ACPI` set, and not with `*acpi=0`
+or `*nomp`).
+
+`fshalt` needs a working userland. A hung system does not halt; stop it
+with `STOP` (force) instead, since an instance in `STOPPING` after a
+`SOFTSTOP` refuses every other action, force stop included, until Oracle
+Cloud's graceful-shutdown timeout cuts the power.
+
 ## ARM64 QEMU virt live image
 
 The serial live image uses upstream's `sys/src/9/arm64` QEMU

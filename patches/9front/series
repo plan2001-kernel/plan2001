@@ -30,3 +30,4 @@ bcm64-uefi-bootinfo.diff	uefi		local
 kbdfs-serial-console.diff	integration	local
 serial-console-shell.diff	integration	local
 libwebauthn-mkfile.diff		integration	local
+acpi-pwrbtn.diff		integration	local
