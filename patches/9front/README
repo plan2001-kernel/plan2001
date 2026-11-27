@@ -159,6 +159,16 @@ rescue-shell.diff
 		ns, acid and acid's port and $objtype libraries, to examine a
 		hung or broken process (/proc/N, acid N) there.  2026-11-27.
 
+cwfs-fid-check.diff
+		cmd/cwfs/sub.c: filep, freefp and fileinit check every fid
+		chain pointer (flist[h], File.next) is nil or an element of
+		files[].  Any other value is memory overwritten: cwfs prints
+		it, the chain, the previous File and the memory around it to
+		the console and aborts, leaving the process Broken for acid
+		(rescue-shell.diff).  Diagnostics for issue #56, where a
+		non-canonical chain pointer crashed filep with flock held and
+		froze the file server.  2026-11-27.
+
 libwebauthn-mkfile.diff
 		sys/src/mkfile: libwebauthn among LIBS, the relying party's
 		WebAuthn checks (webauthn.h) that aux/ethernetd and

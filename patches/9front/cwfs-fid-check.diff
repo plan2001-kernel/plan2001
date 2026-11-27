@@ -1,0 +1,115 @@
+diff --git a/sys/src/cmd/cwfs/sub.c b/sys/src/cmd/cwfs/sub.c
+index 294e1e5eb598fadd9f754324237441a5b8176967..aae030ed52a53b60b1dd65c32fd1adbc66623fe4 100644
+--- a/sys/src/cmd/cwfs/sub.c
++++ b/sys/src/cmd/cwfs/sub.c
+@@ -27,6 +27,54 @@ dev2fs(Device *dev)
+ 	return 0;
+ }
+ 
++/*
++ * fid-ketjun tarkistus: flist[]:n ja File.nextin osoittimien on oltava
++ * nil tai files[]:n alkio.  Muu arvo on muistin ylikirjoitus: tulostetaan
++ * arvo, ketju, edellinen File ja sen ympäristö konsoliin (kmesg) ja
++ * pysähdytään abortiin, jolloin prosessi jää Broken-tilaan tutkittavaksi
++ * (acid PID kbdfs:n pelastusshellistä).  Kutsutaan flock pidettynä.
++ */
++static int
++fileok(File *f)
++{
++	uintptr o;
++
++	if(f == nil)
++		return 1;
++	if((uintptr)f < (uintptr)files || (uintptr)f >= (uintptr)(files+conf.nfile))
++		return 0;
++	o = (uintptr)f - (uintptr)files;
++	return o % sizeof(File) == 0;
++}
++
++static void
++dumpwords(char *what, void *a, int n)
++{
++	uvlong *w;
++	int i;
++
++	w = (uvlong*)((uintptr)a & ~(uintptr)7);
++	fprint(2, "cwfs: %s %#p:\n", what, w);
++	for(i = 0; i < n/8; i++)
++		fprint(2, "%s%.16llux%s", i%4 == 0 ? "  " : " ", w[i], i%4 == 3 ? "\n" : "");
++	if(i%4 != 0)
++		fprint(2, "\n");
++}
++
++static void
++badchain(char *where, int h, File *prev, File *f)
++{
++	fprint(2, "cwfs: %s: corrupt fid chain flist[%d] (%#p): %#p after %#p; files %#p-%#p size %d\n",
++		where, h, &flist[h], f, prev, files, files+conf.nfile, sizeof(File));
++	if(prev != nil){
++		fprint(2, "cwfs: prev: index %lld fid %lud cp %#p qid %llux open %d\n",
++			(vlong)(prev - files), prev->fid, prev->cp, (uvlong)prev->qid.path, prev->open);
++		dumpwords("around prev", (uchar*)prev - 128, sizeof(File) + 256);
++	} else
++		dumpwords("around flist[h]", &flist[h] - 8, 17*8);
++	abort();
++}
++
+ /*
+  * allocate 'count' contiguous channels
+  * of type 'type' and return pointer to base
+@@ -72,6 +120,8 @@ loop:
+ 	lock(&flock);
+ 	for (h=0; h < nelem(flist); h++)
+ 		for (prev=0, f = flist[h]; f; prev=f, f=f->next) {
++			if(!fileok(f))
++				badchain("fileinit", h, prev, f);
+ 			if(f->cp != cp)
+ 				continue;
+ 			if(prev) {
+@@ -107,7 +157,7 @@ loop:
+ File*
+ filep(Chan *cp, ulong fid, int flag)
+ {
+-	File *f;
++	File *f, *prev;
+ 	int h;
+ 
+ 	if(fid == NOFID)
+@@ -120,7 +170,9 @@ filep(Chan *cp, ulong fid, int flag)
+ 
+ loop:
+ 	lock(&flock);
+-	for(f=flist[h]; f; f=f->next)
++	for(prev=nil, f=flist[h]; f; prev=f, f=f->next){
++		if(!fileok(f))
++			badchain("filep", h, prev, f);
+ 		if(f->fid == fid && f->cp == cp){
+ 			/*
+ 			 * Already in use is an error
+@@ -133,6 +185,7 @@ loop:
+ 			unlock(&flock);
+ 			return 0;
+ 		}
++	}
+ 
+ 	if(flag) {
+ 		f = newfp();
+@@ -204,7 +257,9 @@ freefp(File *fp)
+ 	h %= nelem(flist);
+ 
+ 	lock(&flock);
+-	for(prev=0,f=flist[h]; f; prev=f,f=f->next)
++	for(prev=0,f=flist[h]; f; prev=f,f=f->next){
++		if(!fileok(f))
++			badchain("freefp", h, prev, f);
+ 		if(f == fp) {
+ 			if(prev)
+ 				prev->next = f->next;
+@@ -212,6 +267,7 @@ freefp(File *fp)
+ 				flist[h] = f->next;
+ 			break;
+ 		}
++	}
+ 	fp->cp = 0;
+ 	unlock(&flock);
+ }

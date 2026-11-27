@@ -31,6 +31,7 @@ bcm64-uefi-bootinfo.diff	uefi		local
 kbdfs-serial-console.diff	integration	local
 serial-console-shell.diff	integration	local
 rescue-shell.diff		integration	local
+cwfs-fid-check.diff		integration	local; diagnostics for #56
 libwebauthn-mkfile.diff		integration	local
 acpi-pwrbtn.diff		integration	local
 # WireGuard (#W)
