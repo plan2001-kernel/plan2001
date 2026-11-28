@@ -38,6 +38,7 @@
  */
 #include <u.h>
 #include <libc.h>
+#include <fcall.h>
 #include <thread.h>
 
 enum {
@@ -215,7 +216,7 @@ dirreadreply(char *tag, int fd)
 {
 	Dir *d;
 	char *b, *s, *rb, hdr[32];
-	long n, len, i, l, nent;
+	long n, len, i, l, m, nent;
 
 	b = malloc(Maxio + 512);
 	rb = malloc(Dirbatch);
@@ -236,15 +237,20 @@ dirreadreply(char *tag, int fd)
 	nent = 0;
 	n = 0;
 	while(len < Maxio - 4*Dirbatch && (n = read(fd, rb, Dirbatch)) > 0){
-		if((n = dirpackage((uchar*)rb, n, &d)) < 0)
-			break;
-		for(i = 0; i < n; i++){
-			s = dirline(&d[i]);
+		/* erässä kokonaisia stat-merkintöjä, kukin 2 tavun koko edellä */
+		for(i = 0; i+BIT16SZ <= n; i += m){
+			m = BIT16SZ + GBIT16((uchar*)rb+i);
+			if(i+m > n || statcheck((uchar*)rb+i, m) < 0)
+				break;
+			if((d = malloc(sizeof(Dir) + m)) == nil)
+				break;
+			convM2D((uchar*)rb+i, m, d, (char*)&d[1]);
+			s = dirline(d);
+			free(d);
 			l = strlen(s);
 			if(len + l > Maxio){
 				/* ei voi tapahtua yllä olevalla rajalla; ei koskaan yli puskurin */
 				free(s);
-				free(d);
 				free(b);
 				free(rb);
 				werrstr("directory lines overflow");
@@ -256,7 +262,6 @@ dirreadreply(char *tag, int fd)
 			free(s);
 			nent++;
 		}
-		free(d);
 	}
 	free(rb);
 	if(n < 0 && nent == 0){

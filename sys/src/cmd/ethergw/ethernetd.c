@@ -38,7 +38,8 @@
  * session (a genuine dp9ik exchange through the auth server, the user's
  * own namespace, the file server checking the user's permissions).  The
  * session token never leaves this process but to asuser's standard
- * input.  At most Nexport exports a machine; they end with its connection.
+ * input.  At most Nexport exports a machine, and Fsynrate new calls a
+ * second (Fsynburst at once); they end with its connection.
  *
  * Out (-e only): into this server's IP stack and out with its address
  * (9front's NAT on a default route, the default one's gateway and
@@ -78,6 +79,8 @@ enum {
 	Nexport	= 4,	/* file service connections a machine */
 	Burst	= 256*1024,
 	Synrate	= 20,
+	Fsynrate	= 1,	/* the file service's new connections a second, a machine: each starts asuser and exportfs */
+	Fsynburst	= 4,
 	Nout	= 256,	/* frames waiting for a connection: more are dropped */
 	Nlease	= 256,
 	Etherhdr	= 14,
@@ -114,7 +117,7 @@ struct Conn
 	int	lease;	/* its host on NET, 0 none */
 	uchar	mac[6];
 	int	hasmac;
-	Bucket	up, down, syn;
+	Bucket	up, down, syn, fsyn;
 	long	start;
 	long	last;	/* a frame from it */
 	vlong	bytes[2];	/* up, down */
@@ -735,6 +738,7 @@ fromvm(Conn *c, uchar *f, int n)
 			echo(c, ip, len);
 		/* the file service: into this server's stack, its own address on the pkt interface */
 		else if(proto == 6 && len - hl >= 20 && nhgets(ip+hl+2) == fport && (ip[6] & 0x3f) == 0 && ip[7] == 0
+		&& ((ip[hl+13] & 0x12) != 0x02 || take(&c->fsyn, Fsynrate, Fsynburst, 1))
 		&& take(&c->up, rate, Burst, len)){
 			c->bytes[0] += len;
 			write(netfd, ip, len);
@@ -1049,8 +1053,12 @@ exportcall(char *adir)
 	uchar ip[IPaddrlen];
 	Conn *c;
 
-	if((lcfd = listen(adir, ldir)) < 0)
-		sysfatal("listen: %r");
+	if((lcfd = listen(adir, ldir)) < 0){
+		/* not every machine's network: the file service waits and listens again */
+		elog("file service: listen: %r");
+		sleep(1000);
+		return;
+	}
 	snprint(path, sizeof path, "%s/remote", ldir);
 	raddr[0] = 0;
 	if((dfd = open(path, OREAD)) >= 0){
@@ -1065,6 +1073,7 @@ exportcall(char *adir)
 		l = nhgetl(ip+IPv4off) & ~mask;
 	tok = nil;
 	slot = -1;
+	c = nil;
 	qlock(&lk);
 	if(l >= 2 && l < Nlease && (c = leases[l]) != nil && !c->dead){
 		for(i = 0; i < Nexport; i++){
@@ -1090,6 +1099,8 @@ exportcall(char *adir)
 	if((dfd = accept(lcfd, ldir)) < 0 || pipe(pfd) < 0){
 		qunlock(&lk);
 		elog("file service: %s: %r", raddr);
+		if(dfd >= 0)
+			close(dfd);
 		close(lcfd);
 		free(tok);
 		return;

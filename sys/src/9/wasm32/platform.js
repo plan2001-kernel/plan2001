@@ -1619,7 +1619,8 @@ export async function boot(url, front = {}) {
 		if (jsch.q.length) jsch.timer = setTimeout(jsch.pump, 5);	/* rengas täynnä: kun kernel on lukenut */
 	};
 	jsch.send = (b) => {
-		if (!(b instanceof Uint8Array) || b.length > JSMAX) throw new Error('js: a message of at most ' + JSMAX + ' bytes');
+		/* 0 tavua on devjs:lle tiedoston loppu, jolloin aux/jsio lopettaisi */
+		if (!(b instanceof Uint8Array) || b.length === 0 || b.length > JSMAX) throw new Error('js: a message of 1 to ' + JSMAX + ' bytes');
 		jsch.q.push(b);
 		if (!jsch.timer) jsch.pump();
 	};

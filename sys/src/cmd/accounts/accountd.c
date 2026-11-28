@@ -2238,7 +2238,6 @@ renameacct(char *old, char *new)
 	kn = pathf("%s/%s", keys, new);
 	ho = pathf("%s/%s", usrdir, old);
 	hn = pathf("%s/%s", usrdir, new);
-	why = nil;
 	if(renamepath(ko, new) < 0){
 		why = "keyfs: can not rename the user";
 		goto out;
