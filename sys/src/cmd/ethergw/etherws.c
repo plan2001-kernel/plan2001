@@ -1,7 +1,7 @@
 /*
- * etherws - a WebSocket to ethernetd (docs/network.md): GET /auth from the
- * auth origin's page (-A: its passkeys), GET /ether from the machine's
- * page (-E: its Ethernet card's frames); and to auth/accountd: GET
+ * etherws - a WebSocket to ethernetd (README.md): GET /ether from the
+ * machine's page (-E: its Ethernet card's frames, after the account's
+ * session); and to auth/accountd: GET
  * /account from the accounts' page (-C: its passkeys and sessions, with
  * -a accountd's srvname), when -C is given.  One connection, on fd 0 and 1:
  * rc-httpd's request (-r: $request and $reqlines, as webterm -r takes
@@ -17,8 +17,9 @@
  * to 1514 bytes); anything else ends the connection.  ADDR is $remote
  * (the caller's: the browser's address), else $net/remote's, else -.
  *
- *	aux/etherws [-r] -A authorigin -E machineorigin [-s srvname]
+ *	aux/etherws [-r] [-E machineorigin [-s srvname]]
  *		[-C accountorigin [-a accountsrv]]
+ * (-A, the former passkey page's origin, is taken and ignored)
  */
 #include <u.h>
 #include <libc.h>
@@ -296,7 +297,7 @@ dialsrv(char *svc, char *kind)
 static void
 usage(void)
 {
-	fprint(2, "usage: aux/etherws [-r] -A authorigin -E machineorigin [-s srvname] [-C accountorigin [-a accountsrv]]\n");
+	fprint(2, "usage: aux/etherws [-r] [-E machineorigin [-s srvname]] [-C accountorigin [-a accountsrv]]\n");
 	exits("usage");
 }
 
@@ -328,7 +329,7 @@ main(int argc, char **argv)
 	default:
 		usage();
 	}ARGEND
-	if(argc != 0 || authorigin == nil || machineorigin == nil)
+	if(argc != 0 || machineorigin == nil && accountorigin == nil)
 		usage();
 
 	hdr = fromhttpd ? httpdhdr() : readhdr();
@@ -346,10 +347,7 @@ main(int argc, char **argv)
 		kind = "account";
 		want = accountorigin;
 		srv = accountsrv;
-	}else if(strcmp(path, "/auth") == 0){
-		kind = "auth";
-		want = authorigin;
-	}else if(strcmp(path, "/ether") == 0){
+	}else if(strcmp(path, "/ether") == 0 && machineorigin != nil){
 		kind = "ether";
 		want = machineorigin;
 	}else

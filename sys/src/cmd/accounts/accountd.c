@@ -62,6 +62,8 @@
  *	disable NAME | enable NAME | groups NAME | group NAME +GROUP|-GROUP
  *	rename NAME NEWNAME		(the same user: uid, files, groups, passkeys; a new name and home)
  *	sessions | logout NAME
+ *	session TOKEN			<- ok NAME EXPIRES	(the session's active account;
+ *					aux/ethernetd's network permission, no key)
  *	asuser TOKEN			<- ok NAME DOM KEY	(auth/asuser's: the
  *					session's user, the dp9ik key's hex)
  * An invitation names the account (a new name, NAME [a-z][a-z0-9]{1,26},
@@ -2350,6 +2352,7 @@ adminreq(Conn *c, char **f, int nf)
 	Sess *ss;
 	Attr *a;
 	int n;
+	long expires;
 
 	why = "bad request";
 	if(nf >= 3 && strcmp(f[0], "invite") == 0){
@@ -2438,6 +2441,18 @@ adminreq(Conn *c, char **f, int nf)
 	}else if(nf == 2 && strcmp(f[0], "logout") == 0){
 		endsessions(f[1], nil);
 		why = nil;
+	}else if(nf == 2 && strcmp(f[0], "session") == 0){
+		/* aux/ethernetd:n ja Roomin ohjaustason tarkistus: tilin nimi, ei avainta */
+		why = "no such session";
+		if((name = findsession(f[1], nil, &expires)) != nil){
+			why = "the account is not enabled";
+			if(accountactive(name) && keyenabled(name)){
+				reply(c, "ok %s %ld", name, expires);
+				free(name);
+				return;
+			}
+			free(name);
+		}
 	}else if(nf == 2 && strcmp(f[0], "asuser") == 0){
 		why = "no such session";
 		if((name = findsession(f[1], nil, nil)) != nil){

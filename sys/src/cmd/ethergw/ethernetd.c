@@ -1,52 +1,58 @@
 /*
- * ethernetd - the wasm32 machines' network on a server (docs/network.md):
- * a browser's machine (its Ethernet card, etherwasm32.c) reaches the
- * internet through this machine, one that has shown a passkey.  aux/etherws
- * brings each WebSocket here (one per connection, as none, from rc-httpd);
- * this runs once, as the host owner, from cpustart.
+ * ethernetd - the wasm32 machines' network on a server: a browser's
+ * machine (its Ethernet card, etherwasm32.c) reaches this server's file
+ * service, as its signed-in account's user, through this machine.
+ * aux/etherws brings each WebSocket here (one per connection); this runs
+ * once, as the host owner, from cpustart.
  *
  * A connection's first message (etherws's ctl write to /srv/ethernetd) is
- *	conn SRVNAME KIND ADDR
- * SRVNAME a pipe in /srv (etherws's, mode 0660), KIND auth or ether, ADDR
- * the browser's address (for the log).  On the pipe a message is a write:
- * its first byte T (a WebSocket text message) or B (a binary one, an
- * Ethernet frame), then its bytes; X alone, from here, ends the connection.
+ *	conn SRVNAME ether ADDR
+ * SRVNAME a pipe in /srv (etherws's, mode 0660), ADDR the browser's
+ * address (for the log).  On the pipe a message is a write: its first
+ * byte T (a WebSocket text message) or B (a binary one, an Ethernet
+ * frame), then its bytes; X alone, from here, ends the connection.
  *
- * auth (the auth origin's page, -o; its passkeys' rp -r):
- *	<- challenge C			32 random bytes, base64url
- *	-> enroll INVITE ID SPKI AUTH CLIENT	a new passkey (create), with an invitation
- *	-> login ID AUTH CLIENT SIG	a passkey's assertion (get)
- *	<- ok TICKET | error WHY
- * An invitation is a line of DIR/invites, CODE NAME: used once, the line
- * removed; without the file there is no enrolling.  A passkey is DIR/cred/ID
- * (name, pubkey, count, created).  The passkey must have verified its user
- * (UV) and been present (UP), for this rp, from that origin, this challenge;
- * an assertion's signature (ES256) by the key kept, its counter above the
- * last.  A ticket is 32 random bytes in this process's memory, an hour's.
- *
- * ether (the machine's page):
- *	-> ticket T
+ * The machine's page:
+ *	-> session TOKEN	an auth/accountd session (README.md, "Accounts and passkeys")
  *	<- ok | error WHY
- *	then frames both ways, and from time to time
- *	<- ticket T2	the ticket renewed (the old one good until it ends)
- * One connection a name: a new one takes the old one's place (a page
- * reloaded, a connection lost).  The machine is a host of NET (-n,
- * 100.64.0.0/24: not the 10.* or 192.168.* this server's own services
- * trust), the gateway its .1, which answers its ARP, DHCP and ping; the rest
- * goes into this machine's IP stack through a pkt interface, and out with
- * its address (source translation, the default route's t: 9front's NAT,
- * which translates what is forwarded only).  What goes
- * out: its own address only, TCP to ports 80, 443 and 9418, DNS (UDP and
- * TCP 53) to the resolvers (-D), ICMP echo; not to this machine, nor the
- * private, shared, link-local (the cloud's metadata), multicast or reserved
- * networks; no fragments, no IPv6.  Each machine has -R bytes a second
- * each way (1 MB), 20 new TCP connections a second, 2 GB a day a name; at
- * most -m at once (8); -i idle seconds end it (15 minutes).  The log (syslog ether, or -l: standard error) has the
- * passkeys, the connections, their bytes and each new TCP connection's
- * destination.
+ *	then frames both ways.
+ * The session is accountd's (-a: its srvname), asked as the host owner
+ * asks (admin "session TOKEN": the account's name, active, not expired);
+ * no passkeys or accounts of its own.  The session is network permission
+ * and nothing else: every 60 seconds, and at once for a new connection,
+ * accountd is asked again, and a session ended (logout, revocation,
+ * expiry, a disabled account) ends the machine's connection and its file
+ * service.  One connection a name: a new one takes the old one's place
+ * and address (a page reloaded, a connection lost).
  *
- *	aux/ethernetd -r rpid -o origin [-d dir] [-s srvname] [-n net] [-g gate ifc]
- *		[-D resolver]... [-m max] [-i idle] [-R rate] [-l] [-v]
+ * The machine is a host of NET (-n, 100.64.0.0/24: not the 10.* or
+ * 192.168.* this server's own services trust), the gateway its .1, which
+ * answers its ARP, DHCP and ping.  Its frames must come from one MAC
+ * address and its packets from its own address.
+ *
+ * File service: TCP to the gateway's port -f (564) reaches this server's
+ * stack through a pkt interface; a call from a machine's address is
+ * served by exportfs -r ROOT (-X, /) with exportfs -P PATTERN (-x, if
+ * given) as that machine's account: auth/asuser with the connection's
+ * session (a genuine dp9ik exchange through the auth server, the user's
+ * own namespace, the file server checking the user's permissions).  The
+ * session token never leaves this process but to asuser's standard
+ * input.  At most Nexport exports a machine; they end with its connection.
+ *
+ * Out (-e only): into this server's IP stack and out with its address
+ * (9front's NAT on a default route, the default one's gateway and
+ * interface): TCP to ports 80, 443 and 9418, DNS (UDP and TCP 53) to the
+ * resolvers (-D), ICMP echo; never to this server, the private, shared,
+ * link-local (the cloud's metadata), multicast or reserved networks; no
+ * fragments, no IPv6.  Without -e nothing goes beyond this server's file
+ * service.  Each machine has -R bytes a second each way (1 MB), 20 new
+ * TCP connections a second, 2 GB a day a name; at most -m at once (8);
+ * -i idle seconds end it (15 minutes).  The log (syslog ether, or -l:
+ * standard error) has the connections, their bytes, the exports and each
+ * new outward TCP connection's destination.
+ *
+ *	aux/ethernetd [-a accountsrv] [-s srvname] [-n net] [-f port] [-X root] [-x pattern]
+ *		[-e] [-g gate ifc] [-D resolver]... [-m max] [-i idle] [-R rate] [-l] [-v]
  * (-v: each connection in the log too)
  */
 #include <u.h>
@@ -56,16 +62,19 @@
 #include <libsec.h>
 #include <thread.h>
 #include <ip.h>
-#include <webauthn.h>
+
+/* auth/accountd's connections (../accounts/conn.c) */
+int	dialaccountd(char *srv);
+void	hangupaccountd(int fd);
+char*	askaccountd(int fd, char *req);
 
 enum {
 	Stack	= 64*1024,
-	Nchal	= 32,
-	Nticket	= 32,
 	Maxmsg	= 8*1024,	/* a message: a text's longest */
-	Ttl	= 60*60,	/* a ticket's seconds */
-	Renew	= 30*60,	/* a ticket in use is renewed after */
 	Authtime	= 120,	/* seconds for a page to answer */
+	Recheck	= 60,	/* seconds between a session's checks */
+	Ttl	= 60*60,	/* a DHCP lease's seconds */
+	Nexport	= 4,	/* file service connections a machine */
 	Burst	= 256*1024,
 	Synrate	= 20,
 	Nout	= 256,	/* frames waiting for a connection: more are dropped */
@@ -79,7 +88,6 @@ typedef struct Conn Conn;
 typedef struct Day Day;
 typedef struct Msg Msg;
 typedef struct Net Net;
-typedef struct Ticket Ticket;
 
 struct Bucket
 {
@@ -93,25 +101,15 @@ struct Msg
 	uchar	b[1];	/* T or B, then its bytes */
 };
 
-struct Ticket
-{
-	char	s[64];	/* base64url */
-	char	prev[64];	/* the one it renewed, until it ends */
-	char	*name;
-	long	expires;
-	long	prevexpires;
-	long	issued;
-	Ticket	*next;
-};
-
 struct Conn
 {
 	int	fd;
 	char	*addr;
-	int	kind;
 	Channel	*out;	/* Msg* to the writer; nil ends it */
-	Ticket	*t;
+	char	tok[128];	/* its accountd session */
 	char	*name;
+	int	export[Nexport];	/* its file service's calls: their ctl fds+1 */
+	char	exportdir[Nexport][40];
 	int	lease;	/* its host on NET, 0 none */
 	uchar	mac[6];
 	int	hasmac;
@@ -137,10 +135,12 @@ struct Net
 	ulong	a, m;
 };
 
-enum { Kauth, Kether };
 
-static char *rp, *authorigin;
-static char *dir = "/adm/ether";
+static char *accountsrv = "accountd";
+static char *exportroot = "/";
+static char *exportpat;
+static int fport = 564;
+static int egress;
 static char *srvname = "ethernetd";
 static int logerr, verbose;
 static int maxmach = 8;
@@ -156,12 +156,10 @@ static int nself;
 static char *gate, *gateifc;
 static int netfd = -1;
 
-static QLock lk;	/* the tickets, leases and days */
-static Ticket *tickets;
+static QLock lk;	/* the leases, connections and days */
 static Conn *leases[Nlease];
 static Conn *conns;	/* all of them, for the timer */
 static Day *days;
-static QLock invlk, credlk;	/* the invitations and the passkeys' files */
 
 static Net blocked[] = {
 	0x00000000, 0xff000000,	/* this network */
@@ -209,345 +207,6 @@ take(Bucket *b, double r, double burst, double n)
 		return 0;
 	b->n -= n;
 	return 1;
-}
-
-/* base64url, without padding (libwebauthn's) */
-#define unb64u(s, p, n)	wab64udec(s, p, n)
-#define b64u(s, ns, p, n)	wab64uenc(s, ns, p, n)
-#define isb64u(s, min, max)	wab64uok(s, min, max)
-
-/* the page's word for what was asked, from where, for this challenge; nil if so */
-static char*
-clientok(uchar *client, int nclient, char *type, char *chal)
-{
-	return waclient((char*)client, nclient, type, chal, &authorigin, 1);
-}
-
-/* authenticatorData: this rp's, the user present and verified */
-static char*
-authok(uchar *auth, int nauth, WAauth *w)
-{
-	char *e;
-
-	if((e = waparseauth(auth, nauth, w)) != nil)
-		return e;
-	return wacheckauth(w, rp, 1);
-}
-
-/* the assertion's signature, ES256, by the SPKI's key */
-static int
-verify(char *spki, uchar *auth, int nauth, uchar *client, int nclient, uchar *sig, int nsig)
-{
-	uchar pub[WApub];
-
-	if(waspkipub(spki, pub) < 0)
-		return -1;
-	return waverify(pub, auth, nauth, client, nclient, sig, nsig) == nil ? 0 : -1;
-}
-
-typedef struct Rec Rec;
-struct Rec
-{
-	char	*name;
-	char	*pubkey;
-	ulong	count;
-	char	*created;
-};
-
-static Rec*
-readrec(char *path)
-{
-	Biobuf *b;
-	char *l, *v;
-	Rec *r;
-
-	if((b = Bopen(path, OREAD)) == nil)
-		return nil;
-	r = mallocz(sizeof *r, 1);
-	while((l = Brdstr(b, '\n', 1)) != nil){
-		v = l + strcspn(l, " \t");
-		if(*v != 0)
-			*v++ = 0;
-		v += strspn(v, " \t");
-		if(strcmp(l, "name") == 0)
-			r->name = strdup(v);
-		else if(strcmp(l, "pubkey") == 0)
-			r->pubkey = strdup(v);
-		else if(strcmp(l, "count") == 0)
-			r->count = strtoul(v, nil, 10);
-		else if(strcmp(l, "created") == 0)
-			r->created = strdup(v);
-		free(l);
-	}
-	Bterm(b);
-	if(r->name == nil || r->pubkey == nil){
-		free(r);
-		return nil;
-	}
-	return r;
-}
-
-static int
-writerec(int fd, Rec *r)
-{
-	char *s;
-	int n;
-
-	s = smprint("name\t%s\npubkey\t%s\ncount\t%lud\ncreated\t%s\n", r->name, r->pubkey, r->count, r->created ? r->created : "");
-	n = strlen(s);
-	if(seek(fd, 0, 0) < 0 || write(fd, s, n) != n){
-		free(s);
-		return -1;
-	}
-	free(s);
-	return 0;
-}
-
-static int
-nameok(char *s)
-{
-	int n;
-
-	n = strlen(s);
-	return n >= 1 && n <= 28 && s[0] >= 'a' && s[0] <= 'z' && strspn(s, "abcdefghijklmnopqrstuvwxyz0123456789") == n;
-}
-
-/*
- * The invitation CODE's name, the line taken out of the file; nil (and
- * why) if there is none.  invlk held.
- */
-static char*
-invitation(char *code, char **why, int consume)
-{
-	char *path, *buf, *l, *e, *name, *t, *f[3], *rest;
-	int fd, n, m, nf;
-	Dir *d;
-
-	*why = "no such invitation";
-	if(!isb64u(code, 16, 128))
-		return nil;
-	path = smprint("%s/invites", dir);
-	if((fd = open(path, OREAD)) < 0){
-		*why = "no invitations";	/* without the file, no enrolling */
-		free(path);
-		return nil;
-	}
-	if((d = dirfstat(fd)) == nil || d->length > 1024*1024){
-		free(d);
-		close(fd);
-		free(path);
-		return nil;
-	}
-	n = d->length;
-	free(d);
-	buf = malloc(n+1);
-	rest = malloc(n+2);
-	if(buf == nil || rest == nil || readn(fd, buf, n) != n){
-		free(buf);
-		free(rest);
-		close(fd);
-		free(path);
-		return nil;
-	}
-	close(fd);
-	buf[n] = 0;
-	name = nil;
-	m = 0;
-	for(l = buf; *l != 0; l = e){
-		if((e = strchr(l, '\n')) != nil)
-			*e++ = 0;
-		else
-			e = l + strlen(l);
-		if(name == nil){
-			t = strdup(l);
-			nf = tokenize(t, f, nelem(f));
-			if(nf == 2 && strlen(f[0]) == strlen(code) && tsmemcmp(f[0], code, strlen(code)) == 0 && nameok(f[1])){
-				name = strdup(f[1]);
-				free(t);
-				continue;
-			}
-			free(t);
-		}
-		m += sprint(rest+m, "%s\n", l);
-	}
-	free(buf);
-	/* used: the file without its line */
-	if(name != nil && consume)
-		if((fd = open(path, OWRITE|OTRUNC)) < 0 || write(fd, rest, m) != m || close(fd) < 0){
-			*why = "can not use the invitation";
-			free(name);
-			name = nil;
-		}
-	free(rest);
-	free(path);
-	return name;
-}
-
-static char*
-enroll(char **f, char *chal, char **namep)
-{
-	uchar auth[1024], client[4096], pub[WApub], id[WAmaxid];
-	int nauth, nclient, nid, fd, n;
-	char *why, *e, *path, *name;
-	WAauth w;
-	Rec r;
-
-	if(!isb64u(f[2], 16, 1024) || (nid = unb64u(f[2], id, sizeof id)) < 16)
-		return "bad passkey id";
-	if(waspkipub(f[3], pub) < 0)
-		return "not a P-256 key";
-	nauth = unb64u(f[4], auth, sizeof auth);
-	nclient = unb64u(f[5], client, sizeof client);
-	if(nauth < 37 || nclient <= 0)
-		return "bad passkey";
-	if((e = clientok(client, nclient, "webauthn.create", chal)) != nil)
-		return e;
-	if((e = authok(auth, nauth, &w)) != nil)
-		return e;
-	/* the key and id are the authenticator's: its attested credential data */
-	if((w.flags & WAat) == 0)
-		return "no attested credential";
-	if(w.nid != nid || memcmp(w.id, id, nid) != 0 || memcmp(w.pub, pub, WApub) != 0)
-		return "not the attested passkey";
-
-	qlock(&invlk);
-	if((name = invitation(f[1], &why, 0)) == nil){
-		qunlock(&invlk);
-		return why;
-	}
-	path = smprint("%s/cred/%s", dir, f[2]);
-	if((fd = create(path, OWRITE|OEXCL, 0600)) < 0){
-		qunlock(&invlk);
-		free(path);
-		free(name);
-		return "the passkey is known";
-	}
-	r.name = name;
-	r.pubkey = f[3];
-	r.count = w.count;
-	r.created = smprint("%ld", time(0));
-	n = writerec(fd, &r);
-	if(close(fd) < 0)
-		n = -1;
-	free(name);
-	if(n < 0 || (name = invitation(f[1], &why, 1)) == nil){
-		remove(path);
-		qunlock(&invlk);
-		free(path);
-		free(r.created);
-		return "can not keep the passkey";
-	}
-	qunlock(&invlk);
-	free(path);
-	free(r.created);
-	*namep = name;
-	return nil;
-}
-
-static char*
-login(char **f, char *chal, char **namep)
-{
-	uchar auth[1024], client[4096], sig[256];
-	int nauth, nclient, nsig, fd;
-	char *e, *path;
-	ulong count;
-	WAauth w;
-	Rec *r;
-
-	if(!isb64u(f[1], 16, 1024))
-		return "no such passkey";
-	nauth = unb64u(f[2], auth, sizeof auth);
-	nclient = unb64u(f[3], client, sizeof client);
-	nsig = unb64u(f[4], sig, sizeof sig);
-	if(nauth < 37 || nclient <= 0 || nsig <= 0)
-		return "bad assertion";
-	if((e = clientok(client, nclient, "webauthn.get", chal)) != nil)
-		return e;
-	if((e = authok(auth, nauth, &w)) != nil)
-		return e;
-
-	path = smprint("%s/cred/%s", dir, f[1]);
-	qlock(&credlk);
-	if((r = readrec(path)) == nil){
-		qunlock(&credlk);
-		free(path);
-		return "no such passkey";
-	}
-	count = w.count;
-	if((e = wacounter(r->count, count)) != nil){
-		qunlock(&credlk);
-		free(path);
-		return e;
-	}
-	if(verify(r->pubkey, auth, nauth, client, nclient, sig, nsig) < 0){
-		qunlock(&credlk);
-		free(path);
-		return "bad signature";
-	}
-	r->count = count;
-	if((fd = open(path, OWRITE|OTRUNC)) < 0 || writerec(fd, r) < 0){
-		if(fd >= 0)
-			close(fd);
-		qunlock(&credlk);
-		free(path);
-		return "can not keep the counter";
-	}
-	close(fd);
-	qunlock(&credlk);
-	free(path);
-	*namep = r->name;
-	return nil;
-}
-
-static void
-newticketstr(char *s, int n)
-{
-	uchar b[Nticket];
-
-	genrandom(b, sizeof b);
-	b64u(s, n, b, sizeof b);
-}
-
-/* lk held */
-static Ticket*
-newticket(char *name)
-{
-	Ticket *t;
-
-	t = mallocz(sizeof *t, 1);
-	newticketstr(t->s, sizeof t->s);
-	t->name = strdup(name);
-	t->issued = time(0);
-	t->expires = t->issued + Ttl;
-	t->next = tickets;
-	tickets = t;
-	return t;
-}
-
-/* the ticket s names, those ended gone; lk held */
-static Ticket*
-findticket(char *s)
-{
-	Ticket *t, **l;
-	long now;
-	int n;
-
-	now = time(0);
-	n = strlen(s);
-	for(l = &tickets; (t = *l) != nil; ){
-		if(t->expires <= now){
-			*l = t->next;
-			free(t->name);
-			free(t);
-			continue;
-		}
-		if(n == strlen(t->s) && tsmemcmp(s, t->s, n) == 0)
-			return t;
-		if(t->prevexpires > now && n == strlen(t->prev) && tsmemcmp(s, t->prev, n) == 0)
-			return t;
-		l = &t->next;
-	}
-	return nil;
 }
 
 /* n more bytes of name's today: 0 if past its day's; lk held */
@@ -652,19 +311,48 @@ endl(Conn *c)
 }
 
 /*
+ * a machine's file service ended (lk held): its calls hung up, so their
+ * exportfs (the account's, not the host owner's to signal) read the end
+ */
+static void
+endexports(Conn *c)
+{
+	int i;
+
+	for(i = 0; i < Nexport; i++)
+		if(c->export[i] > 0){
+			hangup(c->export[i]-1);
+			close(c->export[i]-1);
+			c->export[i] = 0;
+		}
+}
+
+/* a file service call still connected: its status Established */
+static int
+exportalive(char *dir)
+{
+	char path[64], buf[32];
+	int fd, n;
+
+	snprint(path, sizeof path, "%s/status", dir);
+	if((fd = open(path, OREAD)) < 0)
+		return 0;
+	n = read(fd, buf, sizeof buf - 1);
+	close(fd);
+	buf[n > 0 ? n : 0] = 0;
+	return strncmp(buf, "Established", 11) == 0;
+}
+
+/*
  * What takes time, without notes (a proc's read is not interrupted): every
- * 5 seconds a connection that has not shown its passkey or ticket in
- * Authtime, or a machine idle past -i, is ended (etherws closes it, its
- * reader sees the end); a ticket in use past Renew is renewed (the page
- * keeps the new one; the old one good until it ends)
+ * 5 seconds a connection that has not shown its session in Authtime, or a
+ * machine idle past -i, is ended (etherws closes it, its reader sees the
+ * end) with its file service
  */
 static void
 timerproc(void*)
 {
-	char buf[128];
 	Conn *c;
-	Ticket *t;
-	Msg *m;
 	long now;
 
 	threadsetname("ethernetd timer");
@@ -680,20 +368,89 @@ timerproc(void*)
 				c->dead = 1;
 				if(leases[c->lease] == c)
 					leases[c->lease] = nil;
-			}else if(!c->dead && c->lease != 0 && (t = c->t) != nil && now - t->issued > Renew){
-				strcpy(t->prev, t->s);
-				t->prevexpires = t->expires;
-				newticketstr(t->s, sizeof t->s);
-				t->issued = now;
-				t->expires = now + Ttl;
-				snprint(buf, sizeof buf, "ticket %s", t->s);
-				if((m = mkmsg('T', buf, strlen(buf))) != nil && nbsendp(c->out, m) == 0)
-					free(m);
 			}
-			if(c->dead)
+			if(c->dead){
+				endexports(c);
 				endl(c);
+			}
 		}
 		qunlock(&lk);
+	}
+}
+
+/*
+ * accountd's answer to the host owner's "session TOKEN": the session's
+ * account name (malloced), nil if it has none (ended, expired, the
+ * account disabled) or accountd did not answer
+ */
+static char*
+session(char *tok)
+{
+	char *a, *f[4], *name;
+	int fd;
+
+	if((fd = dialaccountd(accountsrv)) < 0){
+		elog("accountd: %r");
+		return nil;
+	}
+	a = askaccountd(fd, smprint("session %s", tok));
+	hangupaccountd(fd);
+	if(a == nil){
+		elog("accountd: %r");
+		return nil;
+	}
+	name = nil;
+	if(tokenize(a, f, nelem(f)) == 3 && strcmp(f[0], "ok") == 0)
+		name = strdup(f[1]);
+	free(a);
+	return name;
+}
+
+/* askaccountd's alarm: its read interrupted, not the proc ended */
+static int
+alarmnote(void*, char *note)
+{
+	return strcmp(note, "alarm") == 0;
+}
+
+/* every Recheck seconds each machine's session again: one ended ends the machine and its file service */
+static void
+sessproc(void*)
+{
+	char tok[Nlease][128], *name;
+	Conn *cs[Nlease], *c;
+	int ls[Nlease], i, n;
+
+	threadsetname("ethernetd sessions");
+	threadnotify(alarmnote, 1);
+	for(;;){
+		sleep(Recheck*1000);
+		n = 0;
+		qlock(&lk);
+		for(i = 2; i < Nlease; i++)
+			if((c = leases[i]) != nil && !c->dead){
+				cs[n] = c;
+				ls[n] = i;
+				strecpy(tok[n], tok[n]+sizeof tok[n], c->tok);
+				n++;
+			}
+		qunlock(&lk);
+		for(i = 0; i < n; i++){
+			name = session(tok[i]);
+			qlock(&lk);
+			c = cs[i];
+			/* still the lease's (so not freed): a connection gone since is not looked at */
+			if(leases[ls[i]] == c && !c->dead && (name == nil || strcmp(name, c->name) != 0)){
+				elog("%s: %s: the session ended", c->addr, c->name);
+				c->dead = 1;
+				leases[c->lease] = nil;
+				endexports(c);
+				endl(c);
+			}
+			qunlock(&lk);
+			free(name);
+			memset(tok[i], 0, sizeof tok[i]);
+		}
 	}
 }
 
@@ -970,8 +727,16 @@ fromvm(Conn *c, uchar *f, int n)
 	if(dst == (net|1)){
 		if(proto == 1 && len - hl >= 8 && ip[hl] == 8)
 			echo(c, ip, len);
+		/* the file service: into this server's stack, its own address on the pkt interface */
+		else if(proto == 6 && len - hl >= 20 && nhgets(ip+hl+2) == fport && (ip[6] & 0x3f) == 0 && ip[7] == 0
+		&& take(&c->up, rate, Burst, len)){
+			c->bytes[0] += len;
+			write(netfd, ip, len);
+		}
 		return;
 	}
+	if(!egress)
+		return;
 	if((ip[6] & 0x3f) != 0 || ip[7] != 0)
 		return;	/* a fragment */
 	if(isself(dst) || inet(dst, blocked, nelem(blocked)))
@@ -1040,72 +805,37 @@ netproc(void*)
 }
 
 static void
-authconn(Conn *c)
-{
-	uchar chal[Nchal], buf[Maxmsg];
-	char cs[64], *f[8], *why, *name;
-	int n, nf;
-	Ticket *t;
-
-	genrandom(chal, sizeof chal);
-	b64u(cs, sizeof cs, chal, sizeof chal);
-	sendtext(c, "challenge %s", cs);
-	n = read(c->fd, buf, sizeof buf - 1);
-	if(n <= 1 || buf[0] != 'T')
-		return;
-	buf[n] = 0;
-	nf = tokenize((char*)buf+1, f, nelem(f));
-	name = nil;
-	if(nf == 6 && strcmp(f[0], "enroll") == 0)
-		why = enroll(f, cs, &name);
-	else if(nf == 5 && strcmp(f[0], "login") == 0)
-		why = login(f, cs, &name);
-	else
-		why = "bad request";
-	if(why != nil){
-		elog("%s: %s refused: %s", c->addr, nf > 0 ? f[0] : "-", why);
-		sleep(1000);	/* slower guessing */
-		sendtext(c, "error %s", why);
-		return;
-	}
-	qlock(&lk);
-	t = newticket(name);
-	qunlock(&lk);
-	elog("%s: %s %s", c->addr, f[0], name);
-	sendtext(c, "ok %s", t->s);
-	free(name);
-}
-
-static void
 etherconn(Conn *c)
 {
 	uchar buf[Maxmsg+1];
-	char *f[3];
+	char *f[3], *name;
 	int n, i, l;
-	Ticket *t;
 	Conn *old;
 
 	n = read(c->fd, buf, sizeof buf - 1);
 	if(n <= 1 || buf[0] != 'T')
 		return;
 	buf[n] = 0;
-	if(tokenize((char*)buf+1, f, nelem(f)) != 2 || strcmp(f[0], "ticket") != 0){
+	if(tokenize((char*)buf+1, f, nelem(f)) != 2 || strcmp(f[0], "session") != 0 || strlen(f[1]) >= sizeof c->tok){
 		sendtext(c, "error bad request");
 		return;
 	}
-	qlock(&lk);
-	if((t = findticket(f[1])) == nil){
-		qunlock(&lk);
-		elog("%s: no such ticket", c->addr);
-		sendtext(c, "error no such ticket");
+	if((name = session(f[1])) == nil){
+		elog("%s: no such session", c->addr);
+		sleep(1000);	/* slower guessing */
+		sendtext(c, "error no such session");
 		return;
 	}
+	strecpy(c->tok, c->tok+sizeof c->tok, f[1]);
+	memset(buf, 0, n);
+	qlock(&lk);
 	/* one machine a name: a new connection takes the old one's place and address, the old one ended */
 	l = 0;
 	for(i = 2; i < Nlease; i++)
-		if((old = leases[i]) != nil && strcmp(old->name, t->name) == 0){
+		if((old = leases[i]) != nil && strcmp(old->name, name) == 0){
 			old->dead = 1;
 			leases[i] = nil;
+			endexports(old);
 			endl(old);
 			l = i;
 			break;
@@ -1124,12 +854,12 @@ etherconn(Conn *c)
 	}
 	if(l == 0){
 		qunlock(&lk);
-		elog("%s: %s: no room", c->addr, t->name);
+		elog("%s: %s: no room", c->addr, name);
+		free(name);
 		sendtext(c, "error the network is full; try later");
 		return;
 	}
-	c->t = t;
-	c->name = strdup(t->name);
+	c->name = name;
 	c->lease = l;
 	c->last = time(0);
 	leases[l] = c;
@@ -1148,6 +878,7 @@ etherconn(Conn *c)
 	if(leases[c->lease] == c)
 		leases[c->lease] = nil;
 	c->dead = 1;
+	endexports(c);
 	qunlock(&lk);
 	elog("%s: %s down, %lld bytes up, %lld down", c->addr, c->name, c->bytes[0], c->bytes[1]);
 }
@@ -1158,11 +889,9 @@ connproc(void *a)
 	Conn *c, **l;
 
 	c = a;
-	threadsetname("ethernetd %s %s", c->kind == Kauth ? "auth" : "ether", c->addr);
-	if(c->kind == Kauth)
-		authconn(c);
-	else
-		etherconn(c);
+	threadsetname("ethernetd ether %s", c->addr);
+	threadnotify(alarmnote, 1);
+	etherconn(c);
 	qlock(&lk);
 	for(l = &conns; *l != nil; l = &(*l)->next)
 		if(*l == c){
@@ -1172,6 +901,7 @@ connproc(void *a)
 	qunlock(&lk);
 	free(c->name);
 	c->name = nil;
+	memset(c->tok, 0, sizeof c->tok);
 	if(!c->ended)
 		sendend(c);
 	sendp(c->out, nil);	/* the writer ends it */
@@ -1249,7 +979,8 @@ netsetup(void)
 	uchar a[4], m[4], r[4];
 	int cfd, n, rfd;
 
-	defaultroute();
+	if(egress)
+		defaultroute();
 	if((cfd = open("/net/ipifc/clone", ORDWR)) < 0)
 		sysfatal("/net/ipifc/clone: %r");
 	if((n = read(cfd, buf, sizeof buf - 1)) <= 0)
@@ -1262,11 +993,16 @@ netsetup(void)
 	hnputl(r, net);
 	if(fprint(cfd, "add %V %V %V 1500", a, m, r) < 0)
 		sysfatal("add: %r");
-	if(fprint(cfd, "iprouting 1") < 0)
+	if(egress && fprint(cfd, "iprouting 1") < 0)
 		sysfatal("iprouting: %r");
 	snprint(path, sizeof path, "/net/ipifc/%d/data", atoi(buf));
 	if((netfd = open(path, ORDWR)) < 0)
 		sysfatal("%s: %r", path);
+	if(!egress){
+		/* cfd stays open: the interface is gone when it is closed */
+		elog("up: %V/%d, the file service only", a, 24);
+		return;
+	}
 	/*
 	 * the machines' route out: the default one's gateway and interface,
 	 * translated (NAT: only what is forwarded is, never this machine's own).
@@ -1288,8 +1024,116 @@ netsetup(void)
 static void
 usage(void)
 {
-	fprint(2, "usage: aux/ethernetd -r rpid -o origin [-d dir] [-s srvname] [-n net] [-g gate ifc] [-D resolver]... [-m max] [-i idle] [-R rate] [-l] [-v]\n");
+	fprint(2, "usage: aux/ethernetd [-a accountsrv] [-s srvname] [-n net] [-f port] [-X root] [-x pattern] [-e] [-g gate ifc] [-D resolver]... [-m max] [-i idle] [-R rate] [-l] [-v]\n");
 	threadexitsall("usage");
+}
+
+/*
+ * A call to the file service: the machine its address names, then
+ * exportfs as its account (auth/asuser with its session on standard
+ * input), the call on fd 3.  A machine that is not up, or has Nexport
+ * already, is refused.
+ */
+static void
+exportcall(char *adir)
+{
+	char ldir[40], path[64], raddr[64], *p, *tok;
+	int lcfd, dfd, l, i, slot, pid, pfd[2];
+	uchar ip[IPaddrlen];
+	Conn *c;
+
+	if((lcfd = listen(adir, ldir)) < 0)
+		sysfatal("listen: %r");
+	snprint(path, sizeof path, "%s/remote", ldir);
+	raddr[0] = 0;
+	if((dfd = open(path, OREAD)) >= 0){
+		i = read(dfd, raddr, sizeof raddr - 1);
+		raddr[i > 0 ? i : 0] = 0;
+		close(dfd);
+	}
+	if((p = strchr(raddr, '!')) != nil)
+		*p = 0;
+	l = 0;
+	if(parseip(ip, raddr) != -1 && isv4(ip) && (nhgetl(ip+IPv4off) & mask) == net)
+		l = nhgetl(ip+IPv4off) & ~mask;
+	tok = nil;
+	slot = -1;
+	qlock(&lk);
+	if(l >= 2 && l < Nlease && (c = leases[l]) != nil && !c->dead){
+		for(i = 0; i < Nexport; i++){
+			if(c->export[i] > 0 && !exportalive(c->exportdir[i])){
+				close(c->export[i]-1);
+				c->export[i] = 0;
+			}
+			if(c->export[i] <= 0){
+				slot = i;
+				break;
+			}
+		}
+		if(slot >= 0)
+			tok = smprint("%s\n", c->tok);
+	}
+	if(tok == nil){
+		qunlock(&lk);
+		elog("file service: %s refused", raddr);
+		hangup(lcfd);
+		close(lcfd);
+		return;
+	}
+	if((dfd = accept(lcfd, ldir)) < 0 || pipe(pfd) < 0){
+		qunlock(&lk);
+		elog("file service: %s: %r", raddr);
+		close(lcfd);
+		free(tok);
+		return;
+	}
+	switch(pid = rfork(RFPROC|RFFDG|RFNOTEG|RFNOWAIT|RFREND)){
+	case -1:
+		elog("file service: fork: %r");
+		break;
+	case 0:
+		dup(pfd[0], 0);
+		dup(dfd, 3);
+		/* nothing else of this process's: the other machines' calls, the pkt interface, the srv pipes */
+		for(i = 4; i < 1024; i++)
+			close(i);
+		/* exportfs serves fds 0 and 1: the call's, once asuser has read the session from 0 */
+		p = smprint("exec /bin/exportfs -r %q%s%q <[0=3] >[1=3] >[2]/dev/null",
+			exportroot, exportpat != nil ? " -P " : "", exportpat != nil ? exportpat : "");
+		execl("/bin/auth/asuser", "asuser", "/bin/rc", "-c", p, nil);
+		_exits("exec");
+	default:
+		/* the call's ctl kept: hung up when the machine goes */
+		c->export[slot] = lcfd+1;
+		strecpy(c->exportdir[slot], c->exportdir[slot]+sizeof c->exportdir[slot], ldir);
+		lcfd = -1;
+		elog("%s: %s: file service %d", raddr, c->name, pid);
+	}
+	qunlock(&lk);
+	close(pfd[0]);
+	write(pfd[1], tok, strlen(tok));
+	close(pfd[1]);
+	memset(tok, 0, strlen(tok));
+	free(tok);
+	close(dfd);
+	if(lcfd >= 0)
+		close(lcfd);
+}
+
+/* the file service's calls, on the gateway's address of this server's stack */
+static void
+exportproc(void*)
+{
+	char addr[64], adir[40];
+	uchar a[4];
+	threadsetname("ethernetd file service");
+	hnputl(a, net|1);
+	snprint(addr, sizeof addr, "tcp!%V!%d", a, fport);
+	if(announce(addr, adir) < 0)	/* its ctl stays open: the announcement */
+		sysfatal("announce %s: %r", addr);
+	elog("file service: %s", addr);
+	for(;;)
+		exportcall(adir);
 }
 
 static void
@@ -1318,17 +1162,24 @@ threadmain(int argc, char **argv)
 	uchar ip[IPaddrlen];
 	Conn *c;
 
+	quotefmtinstall();
 	fmtinstall('V', eipfmt);
 	fmtinstall('I', eipfmt);
 	ARGBEGIN{
-	case 'r':
-		rp = EARGF(usage());
+	case 'a':
+		accountsrv = EARGF(usage());
 		break;
-	case 'o':
-		authorigin = EARGF(usage());
+	case 'f':
+		fport = atoi(EARGF(usage()));
 		break;
-	case 'd':
-		dir = EARGF(usage());
+	case 'X':
+		exportroot = EARGF(usage());
+		break;
+	case 'x':
+		exportpat = EARGF(usage());
+		break;
+	case 'e':
+		egress = 1;
 		break;
 	case 's':
 		srvname = EARGF(usage());
@@ -1365,7 +1216,7 @@ threadmain(int argc, char **argv)
 	default:
 		usage();
 	}ARGEND
-	if(argc != 0 || rp == nil || authorigin == nil)
+	if(argc != 0 || fport <= 0 || fport >= 65536)
 		usage();
 	if(nresolvers == 0){
 		parseip(ip, "9.9.9.9");
@@ -1386,12 +1237,14 @@ threadmain(int argc, char **argv)
 	close(ctl[0]);
 	proccreate(netproc, nil, Stack);
 	proccreate(timerproc, nil, Stack);
+	proccreate(sessproc, nil, Stack);
+	proccreate(exportproc, nil, Stack);
 	for(;;){
 		if((n = read(ctl[1], buf, sizeof buf - 1)) <= 0)
 			sysfatal("ctl: %r");
 		buf[n] = 0;
 		if(tokenize(buf, f, nelem(f)) != 4 || strcmp(f[0], "conn") != 0
-		|| strcmp(f[2], "auth") != 0 && strcmp(f[2], "ether") != 0
+		|| strcmp(f[2], "ether") != 0
 		|| strchr(f[1], '/') != nil || strncmp(f[1], srvname, strlen(srvname)) != 0){
 			elog("ctl: not a connection");
 			continue;
@@ -1408,7 +1261,6 @@ threadmain(int argc, char **argv)
 		c = mallocz(sizeof *c, 1);
 		c->fd = fd;
 		c->addr = strdup(f[3]);
-		c->kind = strcmp(f[2], "auth") == 0 ? Kauth : Kether;
 		c->out = chancreate(sizeof(Msg*), Nout);
 		c->start = time(0);
 		qlock(&lk);
