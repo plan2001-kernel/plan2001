@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Exercise 9pterm's actual interactive keyboard and kbdfs in an isolated VM.
+
+termtest --image UEFI-IMAGE [--9pterm CLIENT]
+The image is read through a disposable qcow2 overlay. No production account
+or service is contacted. Requires the image's native compilers and services.
+"""
+import argparse
+import fcntl
+import hashlib
+import os
+import pty
+import re
+import select
+import struct
+import subprocess
+import sys
+import tempfile
+import termios
+import time
+import unicodedata
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import cpuvieras
+
+
+class Screen:
+    """Small VT screen oracle for ordinary output and ANSI cursor movement."""
+    def __init__(self, cols=80):
+        self.cols = cols
+        self.rows = [[' '] * cols for _ in range(24)]
+        self.x = self.y = 0
+        self.pending = ''
+
+    def newline(self):
+        if self.y == len(self.rows)-1:
+            self.rows.pop(0)
+            self.rows.append([' '] * self.cols)
+        else:
+            self.y += 1
+
+    def feed(self, data):
+        self.pending += data
+        while self.pending:
+            if self.pending.startswith('\x1b'):
+                m = re.match(r'\x1b\[([0-9;]*)([A-Za-z])', self.pending)
+                if not m:
+                    return
+                n = int(m[1] or '1')
+                if m[2] == 'G':
+                    self.x = n - 1
+                elif m[2] == 'A':
+                    self.y = max(0, self.y - n)
+                self.pending = self.pending[len(m[0]):]
+                continue
+            c, self.pending = self.pending[0], self.pending[1:]
+            if c == '\r':
+                self.x = 0
+            elif c == '\n':
+                self.newline()
+            elif c == '\b':
+                self.x = max(0, self.x - 1)
+            elif c == '\t':
+                self.x = min(self.cols, (self.x + 8) & ~7)
+            elif c >= ' ':
+                w = (0 if unicodedata.category(c) in ('Mn', 'Me', 'Cf') else
+                     2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1)
+                if not w:
+                    if self.x:
+                        self.rows[self.y][self.x-1] += c
+                    continue
+                if self.x + w > self.cols:
+                    self.newline()
+                    self.x = 0
+                self.rows[self.y][self.x] = c
+                if w == 2:
+                    self.rows[self.y][self.x+1] = ''
+                self.x += w
+
+    def line(self):
+        return ''.join(self.rows[self.y]).rstrip()
+
+
+class Terminal:
+    def __init__(self, pterm, client, extra=()):
+        import codecs
+        self.decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        self.screen = Screen()
+        self.output = ''
+        self.fd, slave = pty.openpty()
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 80, 0, 0))
+        self.process = subprocess.Popen([
+            client, '-h', 'tcp!127.0.0.1!%d' % pterm.cpuportti,
+            '-a', 'tcp!127.0.0.1!%d' % pterm.authportti,
+            '-u', pterm.kayttaja, '-P', pterm.salasanatiedosto,
+            '-W', '10', '-T', '180', *extra,
+        ], stdin=slave, stdout=slave, stderr=slave)
+        os.close(slave)
+        os.set_blocking(self.fd, False)
+        self.until('cpu% ')
+
+    def read(self, timeout):
+        if not select.select([self.fd], [], [], timeout)[0]:
+            return ''
+        data = os.read(self.fd, 65536)
+        if not data:
+            raise AssertionError('interactive connection ended')
+        text = self.decoder.decode(data)
+        self.output += text
+        self.screen.feed(text)
+        return text
+
+    def until(self, text, timeout=20):
+        start = getattr(self, 'mark', 0)
+        end = time.monotonic() + timeout
+        while text not in self.output[start:]:
+            if time.monotonic() >= end:
+                raise AssertionError('missing %r; last output: %r' % (text, self.output[-300:]))
+            self.read(min(.1, end-time.monotonic()))
+        self.mark = len(self.output)
+        return self.output[start:]
+
+    def send(self, data):
+        data = data.encode() if isinstance(data, str) else data
+        end = time.monotonic() + 60
+        while data:
+            if time.monotonic() >= end:
+                raise AssertionError('PTY input stalled')
+            readable, writable, _ = select.select([self.fd], [self.fd], [], .1)
+            if readable:
+                self.read(0)
+            if writable:
+                n = os.write(self.fd, data[:4096])
+                data = data[n:]
+
+    def settle(self):
+        while self.read(.15):
+            pass
+        self.mark = len(self.output)
+
+    def close(self):
+        self.process.terminate()
+        try:
+            self.process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        os.close(self.fd)
+
+
+def command(p, text):
+    r = p.aja(text)
+    assert not r.status, (text, r)
+    return r.stdout
+
+
+def exercise(p, client):
+    # These are disposable fixtures at the paths of the reported command.
+    command(p, 'mkdir -p /cfg/plan2001 /adm/room; echo auth/keyfs >/cfg/plan2001/cpustart; '
+               'echo auth/keyfs >/adm/room/start')
+    t = Terminal(p, client)
+    try:
+        start = time.monotonic()
+        t.send('x')
+        t.until('x')
+        latency = time.monotonic()-start
+        t.send(b'\x15')
+        t.settle()
+        assert t.screen.line() == 'cpu%', t.screen.line()
+        original = 'grep keyfs /cfg/plan2001/cpustart /adm/room/start'
+        t.send(original+'\r')
+        out = t.until('cpu% ')
+        assert original in out and out.count('auth/keyfs') == 2, out
+        print('OK original grep; key-to-echo %.4f s' % latency, flush=True)
+
+        # Check terminal cells before submitting, then the actual executed input.
+        for text, edits, expected in [
+            ('echo abX', b'\x7fC', 'echo abC'),
+            ('echo å€X', b'\x7f', 'echo å€'),
+            ('echo '+('x'*100), b'\x15echo wrapped', 'echo wrapped'),
+            ('echo \tX', b'\x7f\x7f', 'echo '),
+            ('echo 界X', b'\x7f\x7f', 'echo '),
+            ('echo e\u0301', b'\x7f', 'echo e'),
+        ] * 2:
+            t.send(text)
+            t.settle()
+            t.send(edits)
+            t.settle()
+            assert t.screen.line() == ('cpu% '+expected).rstrip(), (text, t.screen.line())
+            t.send('\r')
+            t.until('cpu% ')
+        print('OK Backspace/Ctrl-U: cells, UTF-8, tabs, wide/combining runes and wrapping', flush=True)
+
+        # No parser boundary in the client may turn this Delete into literal text.
+        for interrupt in (b'\x1b[3~', b'\x03'):
+            t.send('echo CANCELLED')
+            t.settle()
+            for b in interrupt:
+                t.send(bytes([b]))
+                time.sleep(.005)
+            t.until('cpu% ')
+            t.send('sleep 30\r')
+            t.settle()
+            t.send(interrupt)
+            t.until('cpu% ')
+        # UTF-8 and CSI split over separate writes, with and without -K.
+        for b in 'echo ää'.encode():
+            t.send(bytes([b]))
+            time.sleep(.005)
+        t.send('\r')
+        out = t.until('cpu% ')
+        assert 'ää' in out, out
+        print('OK Delete, Ctrl-C, running-command interruption and fragmented input', flush=True)
+
+        t.send('cat >/tmp/termtest.data\r')
+        t.settle()
+        lines = [('%04d-' % i + 'å'*80 + '\n') for i in range(300)]
+        longline = 'Z'*9000
+        data = ''.join(lines) + longline[:-1] + 'Q\x7fZ\n'
+        expected = (''.join(lines)+longline+'\n').encode()
+        start = time.monotonic()
+        t.send(data)
+        t.send(b'\x04')
+        t.until('cpu% ', 60)
+        elapsed = time.monotonic()-start
+        digest = command(p, 'md5sum /tmp/termtest.data').split()[0]
+        assert digest == hashlib.md5(expected).hexdigest(), digest
+        print('OK paste %d bytes, 300 lines and editable 9000-rune line: %.0f B/s' %
+              (len(expected), len(expected)/elapsed), flush=True)
+
+        # Queue completed input while the command is not yet reading cons.
+        t.send('sleep 2; cat >/tmp/termtest.wait\r')
+        t.settle()
+        t.send(''.join('queued-%d\n' % i for i in range(200)))
+        t.send(b'\x04')
+        t.until('cpu% ', 30)
+        expected = ''.join('queued-%d\n' % i for i in range(200)).encode()
+        assert command(p, 'md5sum /tmp/termtest.wait').split()[0] == hashlib.md5(expected).hexdigest()
+        print('OK stopped reader: completed input is retained', flush=True)
+        t.send('sleep 30\r')
+        t.settle()
+        t.send(''.join('echo SHOULD-NOT-RUN-%d\n' % i for i in range(200)))
+        t.send(b'\x03')
+        t.until('cpu% ', 20)
+        t.settle()
+        t.send('echo queue-cleared\r')
+        out = t.until('cpu% ')
+        assert 'queue-cleared' in out and 'SHOULD-NOT-RUN' not in out, out[-300:]
+        print('OK interrupt with completed input waiting for a stopped reader', flush=True)
+    finally:
+        t.close()
+    t = Terminal(p, client, ('-K',))
+    try:
+        t.send('echo drop')
+        t.settle()
+        t.send(b'\x1b[3~')
+        t.until('cpu% ')
+        print('OK Delete with -K', flush=True)
+    finally:
+        t.close()
+    assert command(p, 'echo command-mode') == 'command-mode\n'
+    with tempfile.TemporaryDirectory() as d:
+        data = bytes(range(256))*100
+        source, target = os.path.join(d, 'source'), os.path.join(d, 'target')
+        with open(source, 'wb') as f:
+            f.write(data)
+        assert not p.put(source, '/tmp/termtest.binary').status
+        assert not p._suorita(['get', '/tmp/termtest.binary', target], 'get', 30, 10, b'').status
+        assert open(target, 'rb').read() == data
+    print('OK command mode and real binary put/get', flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--image', required=True)
+    ap.add_argument('--9pterm', dest='client', default=cpuvieras.etsi_9pterm())
+    args = ap.parse_args()
+    os.environ['NINEPTERM'] = os.path.abspath(args.client)
+    with tempfile.TemporaryDirectory(prefix='p2term-') as work:
+        image = os.path.join(work, 'disk.qcow2')
+        subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'raw',
+                        '-b', os.path.abspath(args.image), image], check=True)
+        guest = cpuvieras.CpuVieras(image, work, os.path.join(work, 'console.log'), muoto='qcow2')
+        try:
+            guest.kaynnista()
+            guest.provisioi()
+            exercise(guest.pterm, os.environ['NINEPTERM'])
+        finally:
+            guest.sammuta()
+            guest.siivoa()
+
+
+if __name__ == '__main__':
+    main()

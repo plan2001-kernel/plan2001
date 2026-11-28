@@ -183,6 +183,7 @@ static char jobloop[] =
 	"}\n";
 
 extern void ninetermkbdstart(void);
+extern int ninetermcolumns(void);
 extern int ninetermkeys;
 
 extern void osmsleep(int);
@@ -439,7 +440,11 @@ rcpu(char *host, char *cmd)
 "mount -nc /fd/0 /mnt/term || exit\n"
 "bind -q /mnt/term/dev/cons /dev/cons\n"
 "if(test -r /mnt/term/dev/kbd){\n"
+#ifdef NINEPTERM
+"	</dev/cons >/dev/cons >[2=1] aux/kbdfs -dq -t %d -m /mnt/term/dev\n"
+#else
 "	</dev/cons >/dev/cons >[2=1] aux/kbdfs -dq -m /mnt/term/dev\n"
+#endif
 "	bind -q /mnt/term/dev/cons /dev/cons\n"
 "}\n"
 "</dev/cons >/dev/cons >[2=1] service=cpu %s\n"
@@ -485,7 +490,11 @@ rcpu(char *host, char *cmd)
 #endif
 
 	if(cmd == nil)
+#ifdef NINEPTERM
+		cmd = smprint(script, ninetermcolumns(), "rc -li");
+#else
 		cmd = smprint(script, "rc -li");
+#endif
 	else {
 		char *run = smprint("rc -lc %q", cmd);
 #ifdef NINEPTERM
