@@ -254,3 +254,12 @@ keyfs-rename-pakhash.diff
 		read and when its aeskey is written.  Before, the hash stayed
 		the old name's and the auth server refused the renamed user's
 		dp9ik sign-in until keyfs restarted.  2026-11-27.
+
+cwfs-gidspace-compact.diff
+		cwfs/uidgid.c: newuser GROUP +MEMBER copied the group's
+		member table to the end of gidspace and never reused the old
+		copy (-MEMBER left a hole), and only re-reading /adm/users
+		reset it.  Once conf.gidspace (3 x nuid) was used up, every
+		member addition failed with "conf.gidspace too small" until
+		cwfs restarted.  When an addition would not fit, gidspace is
+		now packed under the uid write lock first.  2026-11-28.

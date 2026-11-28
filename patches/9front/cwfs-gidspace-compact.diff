@@ -1,0 +1,67 @@
+diff --git a/sys/src/cmd/cwfs/uidgid.c b/sys/src/cmd/cwfs/uidgid.c
+index 88ae3b57158b3e53f702f34b0a2276e0b809384c..3c434b1abdf478981691871e34c900158aef4646 100644
+--- a/sys/src/cmd/cwfs/uidgid.c
++++ b/sys/src/cmd/cwfs/uidgid.c
+@@ -159,6 +159,39 @@ cmd_newuser(int argc, char *argv[])
+ 	do_newuser(argc, argv);
+ }
+ 
++/*
++ * adding a member copies the group's table to the end of gidspace
++ * and leaves the old copy behind; deleting one leaves a hole.
++ * pack every group's table to the start of gidspace again, so the
++ * space is not used up until /adm/users is re-read.
++ */
++static void
++gidcompact(void)
++{
++	Userid *t;
++	int i, g;
++
++	t = malloc(conf.gidspace * sizeof(*t));
++	if(t == nil)
++		return;
++	g = 0;
++	for(i = 0; i < cons.nuid; i++) {
++		if(uid[i].ngrp > 0)
++			memmove(t+g, uid[i].gtab, uid[i].ngrp*sizeof(*t));
++		g += uid[i].ngrp;
++	}
++	wlock(&uidgc.uidlock);
++	memmove(gidspace, t, g*sizeof(*t));
++	g = 0;
++	for(i = 0; i < cons.nuid; i++) {
++		uid[i].gtab = gidspace+g;
++		g += uid[i].ngrp;
++	}
++	cons.ngid = g;
++	wunlock(&uidgc.uidlock);
++	free(t);
++}
++
+ void
+ do_newuser(int argc, char *argv[])
+ {
+@@ -255,16 +288,18 @@ do_newuser(int argc, char *argv[])
+ 			return;
+ 		if(u2->uid == ui->uid)
+ 			return;
+-		if(cons.ngid+ui->ngrp+1 >= conf.gidspace) {
+-			print("conf.gidspace too small (%ld)\n", conf.gidspace);
+-			return;
+-		}
+ 		for(i = 0; i < ui->ngrp; i++) {
+ 			if(ui->gtab[i] == u2->uid) {
+ 				print("member already in group\n");
+ 				return;
+ 			}
+ 		}
++		if(cons.ngid+ui->ngrp+1 >= conf.gidspace)
++			gidcompact();
++		if(cons.ngid+ui->ngrp+1 >= conf.gidspace) {
++			print("conf.gidspace too small (%ld)\n", conf.gidspace);
++			return;
++		}
+ 
+ 		wlock(&uidgc.uidlock);
+ 		s = gidspace+cons.ngid;
