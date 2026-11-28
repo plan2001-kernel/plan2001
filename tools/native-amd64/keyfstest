@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Focused real-9pterm keyfs administration and passkey/password regression.
+
+keyfstest --image IMAGE [--9pterm CLIENT]
+Requires an image containing keyfs -s, /lib/namespace's optional keyfs mount,
+accountd and the native compiler toolchain. Build it with mkimage --console 0.
+The image remains unchanged.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import os
+import secrets
+import subprocess
+import sys
+import tempfile
+import time
+import types
+
+sys.dont_write_bytecode = True
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import cpuvieras
+import vm9
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, path)
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
+    loader.exec_module(module)
+    return module
+
+
+terminal = load('termtest', os.path.join(HERE, 'termtest'))
+accounts = load('accounts', os.path.join(HERE, '..', 'test', 'accounts'))
+
+
+def check(p, cmd):
+    result = p.aja(cmd)
+    assert not result.status, (cmd, result.stderr, result.status)
+    return result.stdout
+
+
+def privatefile(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        f.write(text+'\n')
+
+
+class Services:
+    def __init__(self, guest, origin):
+        self.p = guest.pterm
+        self.origin = origin
+        self.jobs = []
+
+    def start(self):
+        p = self.p
+        for command in (
+            'auth/accountd -l -r localhost -o %s -d 9front -c /srv/cwfs.cmd '
+            '>/tmp/keyfstest.account.log >[2=1]' % self.origin,
+            "aux/listen1 'tcp!*!8088' /bin/aux/etherws -C %s "
+            '>/tmp/keyfstest.ws.log >[2=1]' % self.origin,
+        ):
+            self.jobs.append(subprocess.Popen([
+                p.ohjelma, '-h', 'tcp!127.0.0.1!%d' % p.cpuportti,
+                '-a', 'tcp!127.0.0.1!%d' % p.authportti,
+                '-u', 'glenda', '-P', p.salasanatiedosto, '-W', '10',
+                '-T', '300', '-c', command,
+            ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        end = time.monotonic()+15
+        while time.monotonic() < end:
+            if not p.aja("test -e /srv/accountd && grep -s '!8088$' /net/tcp/*/local").status:
+                return
+            if any(job.poll() is not None for job in self.jobs):
+                raise AssertionError('account test service exited during startup')
+            time.sleep(.1)
+        raise AssertionError('account services did not start')
+
+    def stop(self):
+        for job in self.jobs:
+            job.terminate()
+            try:
+                job.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                job.kill()
+                job.wait()
+        self.jobs.clear()
+
+
+def change_password(p, user, password):
+    t = terminal.Terminal(p, p.ohjelma)
+    try:
+        t.send('auth/changeuser '+user+'\r')
+        t.until('assign new Plan 9 password?')
+        t.send('yes\r')
+        t.until('Password:')
+        t.send(password+'\r')
+        t.until('Confirm password:')
+        t.send(password+'\r')
+        t.until('assign new Inferno/POP secret?')
+        t.send('no\r')
+        t.until('Expiration date')
+        t.send('never\r')
+        t.until('Post id')
+        for value, prompt in (
+            ('', "User's full name"), ('test', 'Department #'),
+            ('none', "User's email address"), ('none', "Sponsor's email address"),
+            ('', 'user '+user+' installed for Plan 9'),
+        ):
+            t.send(value+'\r')
+            t.until(prompt)
+        t.until('cpu% ')
+        assert password not in t.output, 'secret echoed by the terminal'
+    finally:
+        t.close()
+
+
+def identity_and_access(p):
+    out = check(p, 'cat /dev/user; echo $home; pwd')
+    name = p.kayttaja
+    assert out == name+'/usr/'+name+'\n/usr/'+name+'\n', out
+    r = p.aja('cat /srv/keyfs')
+    assert r.koodi != 0 and 'permission denied' in r.stderr, r.stderr
+    r = p.aja('mount -c /srv/keyfs /mnt/keys')
+    assert r.koodi != 0 and 'permission denied' in r.stderr, r.stderr
+    assert '/mnt/keys/glenda' not in check(p, 'ls /mnt/keys')
+
+
+def single_service(p):
+    out = check(p, 'ls -l /srv/keyfs; ps | grep keyfs')
+    assert '--rw------- s 0 glenda glenda' in out, out
+    assert sum(line.rstrip().endswith(' keyfs') for line in out.splitlines()) == 1, out
+    assert '/mnt/keys/glenda' in check(p, 'ls /mnt/keys'), 'owner namespace lacks keyfs'
+
+
+def passkey_session(test, key, user):
+    reply = test.login(key)
+    assert reply.startswith('ok '), reply
+    token = reply.split()[1]
+    r = test.aja('auth/asuser cat /dev/user', stdin=(token+'\n').encode())
+    assert r.stdout == user and not r.status, (r.stdout, r.stderr, r.status)
+
+
+def reboot(guest, work):
+    # Retain keys and users: only start services, never provision credentials again.
+    script = '''#!/bin/rc
+ip/ipconfig ether /net/ether0
+rm -f /srv/factotum
+auth/factotum -S -n -sfactotum </dev/null >/tmp/keyfstest.fact.log >[2=1] &
+for(i in `{seq 1 100}) if(! test -e /srv/factotum) sleep 0.1
+auth/keyfs -s keyfs -m /mnt/keys /adm/keys </dev/null >/tmp/keyfstest.key.log >[2=1]
+service=cpu aux/listen -q -t /tmp/svc tcp
+'''
+    local = os.path.join(work, 'startup.rc')
+    with open(local, 'w') as f:
+        f.write(script)
+    name = check(guest.pterm, 'cat /dev/sysname').strip()
+    check(guest.pterm, 'mkdir -p /cfg/'+name)
+    assert not guest.pterm.put(local, '/cfg/'+name+'/termrc').status
+    guest.pterm.aja("@{ rfork s; sleep 1; fshalt -r } </dev/null >'#c/cons' >[2=1] &", aikaraja=30)
+    guest.vm.odota(r'done halting', 120)
+    old = guest.vm
+    old.lopeta()
+    guest.vm = vm9.Kone(old.levyt, old.ovmf, os.path.join(work, 'reboot.log'),
+                       muisti=old.muisti, cpu=old.cpu, ylim=old.ylim, qmp=True)
+    guest.kaynnista()
+    check(guest.pterm, 'cat /dev/user')
+
+
+def exercise(guest, work):
+    p = guest.pterm
+    single_service(p)
+    check(p, "echo 'authdom=9front auth=10.0.2.15' >>/lib/ndb/local; echo -n refresh >/net/cs")
+    origin = 'http://localhost:%d' % guest.portit[8088]
+    test = accounts.Testi(types.SimpleNamespace(tmpdir=work, logdir=None), accounts.Tulos())
+    test.v = guest
+    test.httpportti = guest.portit[8088]
+    test.origin = origin
+    services = Services(guest, origin)
+    user = 'keyfstest'
+    password = 'P2test-'+secrets.token_hex(6)
+    path = os.path.join(work, 'user.pass')
+    privatefile(path, password)
+    native = cpuvieras.Pterm(p.ohjelma, p.cpuportti, p.authportti, user, path)
+    key = accounts.Passkey()
+    try:
+        services.start()
+        reply = test.account('invite', user, '3600')
+        assert reply.startswith('ok '), reply
+        reply = test.enroll(key, reply.split()[1])
+        assert reply.startswith('ok '), reply
+        passkey_session(test, key, user)
+        change_password(p, user, password)
+        identity_and_access(native)
+        wrong = os.path.join(work, 'wrong.pass')
+        privatefile(wrong, 'wrong-password')
+        try:
+            cpuvieras.Pterm(p.ohjelma, p.cpuportti, p.authportti, user, wrong).aja('cat /dev/user')
+            raise AssertionError('wrong password accepted')
+        except cpuvieras.Siirtovirhe as error:
+            assert 'wrong password' in str(error), 'unexpected authentication failure'
+        passkey_session(test, key, user)
+        single_service(p)
+        print('OK owner changeuser, native identity/home, wrong password and denied keyfs access', flush=True)
+        print('OK fresh passkey login and asuser after native password change', flush=True)
+        services.stop()
+        reboot(guest, work)
+        single_service(p)
+        identity_and_access(native)
+        services.start()
+        passkey_session(test, key, user)
+        print('OK controlled reboot: one keyfs, native password and passkey/asuser persist', flush=True)
+    finally:
+        services.stop()
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('--image', required=True)
+    ap.add_argument('--9pterm', dest='client', default=None)
+    args = ap.parse_args()
+    os.environ['NINEPTERM'] = os.path.abspath(args.client or cpuvieras.etsi_9pterm())
+    with tempfile.TemporaryDirectory(prefix='p2keyfs-') as work:
+        image = os.path.join(work, 'disk.qcow2')
+        subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'raw',
+                        '-b', os.path.abspath(args.image), image], check=True)
+        guest = cpuvieras.CpuVieras(image, work, os.path.join(work, 'console.log'),
+                                   muoto='qcow2', lisaportit=(8088,), keyfs_service=True)
+        try:
+            guest.kaynnista()
+            guest.provisioi()
+            exercise(guest, work)
+        finally:
+            guest.sammuta()
+            guest.siivoa()
+
+
+if __name__ == '__main__':
+    main()

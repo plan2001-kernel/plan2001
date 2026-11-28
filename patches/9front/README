@@ -309,3 +309,9 @@ kbdfs-text-terminal.diff
 		order while a slow 9P write completes.
 		Raw console delivery waits for the reader instead of dropping
 		runes. The default echo remains suitable for drawterm and serial.
+
+keyfs-admin-service.diff
+		auth/keyfs -s srv: post the same instance's connection in /srv,
+		host-owner only (0600). cpurc publishes keyfs and /lib/namespace
+		optionally mounts it at /mnt/keys. auth/changeuser in an owner
+		rcpu namespace accesses the running database; no second keyfs.
