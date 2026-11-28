@@ -114,12 +114,13 @@ A public Plan2001 server exposes its web service and nothing else. Native admini
 
 - The initial native AMD64 path is accepted only when UEFI firmware -> Plan2001 EFI loader -> valid BootInfo v1 -> **9front AMD64 kernel -> 9front init -> usable 9front userland** works, including an installed offline UEFI/ESP boot. Loader messages or coloured framebuffer marks alone do not meet acceptance.
 - The existing WASM32 build and browser boot must remain functional, including its existing UI, process execution, Rio input/touch semantics, OPFS and ISO/live workflow.
-- Run targeted builds and smoke/integration tests **locally**. For QEMU KVM with TCG fallback use `-machine accel=kvm:tcg` (or `-accel kvm -accel tcg` where supported), **not** `-accel kvm:tcg`. Include OVMF for AMD64 UEFI tests and Chromium for browser tests. Do not commit diagnostic artifacts. GitHub Actions runs focused builds and functional checks.
+- Use GitHub Actions for repeatable targeted builds and smoke/integration tests; run local or real-target checks only when needed. For QEMU KVM with TCG fallback use `-machine accel=kvm:tcg` (or `-accel kvm -accel tcg` where supported), **not** `-accel kvm:tcg`. Include OVMF for AMD64 UEFI tests and Chromium for browser tests. Do not commit diagnostic artifacts. GitHub Actions runs focused builds and functional checks.
 - ARM64 is a current target: validate QEMU virt boot and bcm64/Pi4 builds locally. RISC-V64 is optional future work and is excluded from current build, release and acceptance requirements.
 
 ## Continuous integration policy
 
 The owner has enabled GitHub Actions for focused builds and functional tests.
+Prefer CI for repeatable checks to reduce agent time and usage spent on testing.
 Use one small centrally maintained workflow per repository. Room integration
 checks compile the affected user-space sources and run focused transport and
 storage tests; do not build unrelated targets or run broad regression campaigns.
