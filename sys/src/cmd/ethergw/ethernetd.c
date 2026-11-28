@@ -22,8 +22,9 @@
  * and nothing else: every 60 seconds, and at once for a new connection,
  * accountd is asked again, and a session ended (logout, revocation,
  * expiry, a disabled account) ends the machine's connection and its file
- * service.  One connection a name: a new one takes the old one's place
- * and address (a page reloaded, a connection lost).
+ * service.  Up to Pername machines a name (a person's phone and laptop
+ * at once); one more ends the name's oldest (a page reloaded, a
+ * connection lost before its end was seen).
  *
  * The machine is a host of NET (-n, 100.64.0.0/24: not the 10.* or
  * 192.168.* this server's own services trust), the gateway its .1, which
@@ -77,6 +78,7 @@ enum {
 	Recheck	= 60,	/* seconds between a session's checks */
 	Ttl	= 60*60,	/* a DHCP lease's seconds */
 	Nexport	= 4,	/* file service connections a machine */
+	Pername	= 4,	/* machines an account: its devices at once */
 	Burst	= 256*1024,
 	Synrate	= 20,
 	Fsynrate	= 1,	/* the file service's new connections a second, a machine: each starts asuser and exportfs */
@@ -819,7 +821,7 @@ etherconn(Conn *c)
 {
 	uchar buf[Maxmsg+1];
 	char *f[3], *name;
-	int n, i, l;
+	int n, i, l, oldest;
 	Conn *old;
 
 	n = read(c->fd, buf, sizeof buf - 1);
@@ -839,17 +841,27 @@ etherconn(Conn *c)
 	strecpy(c->tok, c->tok+sizeof c->tok, f[1]);
 	memset(buf, 0, n);
 	qlock(&lk);
-	/* one machine a name: a new connection takes the old one's place and address, the old one ended */
+	/*
+	 * Pername machines a name: each device its own; one more ends the
+	 * name's oldest, which takes the old one's place and address
+	 */
 	l = 0;
+	n = 0;
+	oldest = 0;
 	for(i = 2; i < Nlease; i++)
 		if((old = leases[i]) != nil && strcmp(old->name, name) == 0){
-			old->dead = 1;
-			leases[i] = nil;
-			endexports(old);
-			endl(old);
-			l = i;
-			break;
+			n++;
+			if(oldest == 0 || old->start < leases[oldest]->start)
+				oldest = i;
 		}
+	if(n >= Pername){
+		old = leases[oldest];
+		old->dead = 1;
+		leases[oldest] = nil;
+		endexports(old);
+		endl(old);
+		l = oldest;
+	}
 	if(l == 0){
 		n = 0;
 		for(i = 2; i < Nlease; i++)
