@@ -3,7 +3,8 @@
 
 keyfstest --image IMAGE [--9pterm CLIENT]
 Requires an image containing keyfs -s, /lib/namespace's optional keyfs mount,
-accountd and the native compiler toolchain. The image remains unchanged.
+accountd and the native compiler toolchain. Build it with mkimage --console 0.
+The image remains unchanged.
 """
 import argparse
 import importlib.machinery
@@ -216,9 +217,9 @@ def exercise(guest, work):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--image', required=True)
-    ap.add_argument('--9pterm', dest='client', default=cpuvieras.etsi_9pterm())
+    ap.add_argument('--9pterm', dest='client', default=None)
     args = ap.parse_args()
-    os.environ['NINEPTERM'] = os.path.abspath(args.client)
+    os.environ['NINEPTERM'] = os.path.abspath(args.client or cpuvieras.etsi_9pterm())
     with tempfile.TemporaryDirectory(prefix='p2keyfs-') as work:
         image = os.path.join(work, 'disk.qcow2')
         subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'raw',
