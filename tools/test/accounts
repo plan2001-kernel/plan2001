@@ -820,7 +820,7 @@ class Testi:
                 return
             tk.ok("selain (%s): kutsun nimi sivulla" % mika, True)
             cdp.js("document.getElementById('enrolllabel').value = 'Työläppäri ' + 'ä'.repeat(40)")
-            klikkaa('#enroll button[data-hint="client-device"]')
+            klikkaa('#enroll button.main')
             if odota("document.getElementById('status').textContent.includes('is made')", "tili luotu"):
                 tk.ok("selain (%s): tili luotu passkeylla tällä laitteella" % mika, True, tila())
                 tk.ok("selain (%s): PRF-tieto" % mika, ("PRF" in tila()) == prf, tila())
@@ -833,7 +833,7 @@ class Testi:
             cdp.call("Network.clearBrowserCookies")
             cdp.call("Page.navigate", url="http://localhost:%d/" % self.httpportti)
             odota("!document.getElementById('signin').hidden", "kirjautumissivu")
-            klikkaa('#signin button[data-hint="client-device"]')
+            klikkaa('#signin button.main')
             if odota("document.getElementById('status').textContent.startsWith('Signed in as %s')" % nimi,
                      "kirjautuminen"):
                 tk.ok("selain (%s): kirjautuminen evästeittä passkeylla" % mika, True)
@@ -849,7 +849,7 @@ class Testi:
             c2 = cdp.call("WebAuthn.getCredentials", authenticatorId=ulko)["credentials"]
             tk.ok("selain (%s): passkey usb-autentikaattorissa" % mika, len(c2) == 1, c2)
             # sama laite uudelleen: excludeCredentials estää
-            klikkaa('#account button[data-hint="client-device"]')
+            klikkaa('#account button[data-op="add"][data-hint=""]')
             odota("document.getElementById('status').className == 'bad'", "sama laite uudelleen estetään", 30)
             tk.ok("selain (%s): sama laite uudelleen estetään" % mika,
                   cdp.js("document.querySelectorAll('#creds li').length") == 2, tila())
@@ -873,7 +873,7 @@ class Testi:
             cdp.call("Network.clearBrowserCookies")
             cdp.call("Page.navigate", url="http://localhost:%d/" % self.httpportti)
             odota("!document.getElementById('signin').hidden", "kirjautumissivu 2")
-            klikkaa('#signin button[data-hint="client-device"]')
+            klikkaa('#signin button.main')
             ok1 = odota("document.getElementById('status').textContent.startsWith('Signed in as')", "kirjautuminen 2")
             if ok1:
                 tk.ok("selain (%s): kirjautuminen jäljellä olevalla passkeylla" % mika, True)
