@@ -70,7 +70,7 @@ wasmapp = lataa("wasmapp", os.path.join(TAMA, "wasmapp"))   # Cdp
 
 WSPORTTI = 8088     # vieraan etherws (accountd)
 WSPORTTI2 = 8089    # vieraan etherws (accountd2: rikkinäinen konsoli)
-WSPORTTI3 = 8090    # vieraan etherws /auth (aux/ethernetd: libwebauthnin toinen käyttäjä)
+WSPORTTI3 = 8090    # vieraan etherws /ether (aux/ethernetd: koneen ensimmäinen viesti on accountd-istunto)
 RP = "localhost"
 
 LAHTEET = [
@@ -271,12 +271,11 @@ class Testi:
             "e=(-A http://none.invalid -E http://none.invalid -C %s)" % self.origin,
             "aux/listen1 'tcp!*!%d' /bin/aux/etherws $e >>[2]/usr/glenda/listen.log &" % WSPORTTI,
             "aux/listen1 'tcp!*!%d' /bin/aux/etherws $e -a accountd2 >>[2]/usr/glenda/listen2.log &" % WSPORTTI2,
-            # ethernetd: vain /auth (kutsut ja passkeyt), ei koneita
-            "mkdir -p /usr/glenda/ether/cred",
-            "echo ethinvitation000001 erkki >/usr/glenda/ether/invites",
-            "aux/ethernetd -l -r %s -o %s -d /usr/glenda/ether -g 10.0.2.2 0 >>[2]/usr/glenda/ethernetd.log &" % (RP, self.origin),
+            # ethernetd: koneen ensimmäinen viesti on sen accountd-istunto (session TOKEN);
+            # -x on pakollinen (vain kotihakemistot viedään)
+            "aux/ethernetd -l -a accountd -x '^/(|usr(|/.*))$' -g 10.0.2.2 0 >>[2]/usr/glenda/ethernetd.log &",
             "for(i in `{seq 1 100}) if(! test -e /srv/ethernetd) sleep 0.1",
-            "aux/listen1 'tcp!*!%d' /bin/aux/etherws -A %s -E http://none.invalid >>[2]/usr/glenda/listen3.log &"
+            "aux/listen1 'tcp!*!%d' /bin/aux/etherws -E %s >>[2]/usr/glenda/listen3.log &"
             % (WSPORTTI3, self.origin),
             "for(p in %d %d %d) for(i in `{seq 1 100}) if(! grep -s '!'^$p^'$' /net/tcp/*/local >[2]/dev/null) sleep 0.1"
             % (WSPORTTI, WSPORTTI2, WSPORTTI3),
@@ -685,44 +684,46 @@ class Testi:
         tk.ok("loki: ei kutsukoodeja", all(k not in loki for k in (ka, kb, kc, kf, kv)))
 
     def ethernetd(self):
-        """aux/ethernetd:n /auth libwebauthnin päällä: luonti vaatii AT:n, kirjautuminen ennallaan."""
+        """aux/ethernetd: koneen ensimmäinen viesti on accountd-istunto; rinnakkaiset tarkistukset."""
         tk = self.tk
 
-        def auth(rivi):
-            w = WS(self.v.portit[WSPORTTI3], self.origin, "/auth")
+        def kone(rivi, tulos=None):
+            w = WS(self.v.portit[WSPORTTI3], self.origin, "/ether")
             try:
-                c = w.text()
-                if not c.startswith("challenge "):
-                    return c
-                return w.ask(rivi(c[10:]))
+                v = w.ask(rivi)
+            except (EOFError, OSError) as e:
+                v = "EOF %s" % e
             finally:
                 w.close()
+            if tulos is not None:
+                tulos.append(v)
+            return v
 
-        from cryptography.hazmat.primitives import serialization
-        pk = Passkey()
-        spki = b64u(pk.key.public_key().public_bytes(serialization.Encoding.DER,
-                                                     serialization.PublicFormat.SubjectPublicKeyInfo))
+        self.odota("ethernetd: alicen istunto", kone("session " + self.ta), "ok")
+        self.odota("ethernetd: keksitty istunto", kone("session " + b64u(os.urandom(32))), "error no such session")
+        self.odota("ethernetd: väärä pyyntö", kone("login " + self.ta), "error bad request")
+        w = WS(self.v.portit[WSPORTTI3], "https://evil.example", "/ether")
+        tk.ok("ethernetd: /ether vain koneen alkuperältä", "403" in w.status, w.status)
+        w.close()
 
-        def enroll(at=True, idlle=None):
-            return auth(lambda c: "enroll ethinvitation000001 %s %s %s %s" % (
-                pk.id, spki, b64u(pk.authdata(RP, 0x05, 0, at=at, idlle=idlle)),
-                b64u(client("webauthn.create", c, self.origin))))
-
-        def login(count, flags=0x05):
-            def rivi(c):
-                a = pk.authdata(RP, flags, count)
-                cl = client("webauthn.get", c, self.origin)
-                sig = pk.key.sign(a + hashlib.sha256(cl).digest(), ec.ECDSA(hashes.SHA256()))
-                return "login %s %s %s %s" % (pk.id, b64u(a), b64u(cl), b64u(sig))
-            return auth(rivi)
-        self.odota("ethernetd: luonti ilman AT:tä", enroll(at=False), "error no attested credential")
-        self.odota("ethernetd: AT:n id ei passkeyn", enroll(idlle=os.urandom(16)), "error not the attested")
-        self.odota("ethernetd: luonti kutsulla", enroll(), "ok ")
-        self.odota("ethernetd: kutsu kerran", enroll(), "error no such invitation")
-        self.odota("ethernetd: kirjautuminen", login(1), "ok ")
-        self.odota("ethernetd: sama laskuri", login(1), "error counter not above")
-        self.odota("ethernetd: ei UV:tä", login(2, flags=0x01), "error the user not verified")
-        self.odota("ethernetd: kirjautuminen 2", login(3), "ok ")
+        # rinnakkaiset accountd-tarkistukset (conn.c: yhteyskohtainen /srv-tiedosto): kirjautunut
+        # kone pääsee verkkoon arvaajien keskellä, eikä /srv:hen jää accountd.PID.*-tiedostoja
+        keksityt, oikea = [], []
+        saikeet = [threading.Thread(target=kone, args=("session " + b64u(os.urandom(32)), keksityt))
+                   for i in range(8)]
+        saikeet.append(threading.Thread(target=kone, args=("session " + self.tb, oikea)))
+        for t in saikeet:
+            t.start()
+        for t in saikeet:
+            t.join(90)
+        tk.ok("ethernetd: bobin istunto rinnakkain arvaajien kanssa", oikea == ["ok"], oikea)
+        tk.ok("ethernetd: arvaajat torjuttu", len(keksityt) == 8 and
+              all(k.startswith("error no such session") for k in keksityt), keksityt)
+        time.sleep(2)
+        t = self.aja("ls /srv | grep -c '^accountd\\.' ; true")
+        tk.ok("ethernetd: ei jääneitä accountd-yhteyksien /srv-tiedostoja", t.stdout.strip() == "0", t.stdout)
+        t = self.aja("cat /usr/glenda/ethernetd.log")
+        tk.ok("ethernetd: lokissa ei istuntotokeneita", self.ta not in t.stdout and self.tb not in t.stdout)
 
     def asuser(self):
         tk = self.tk
@@ -819,7 +820,7 @@ class Testi:
                 return
             tk.ok("selain (%s): kutsun nimi sivulla" % mika, True)
             cdp.js("document.getElementById('enrolllabel').value = 'Työläppäri ' + 'ä'.repeat(40)")
-            klikkaa('#enroll button[data-hint="client-device"]')
+            klikkaa('#enroll button.main')
             if odota("document.getElementById('status').textContent.includes('is made')", "tili luotu"):
                 tk.ok("selain (%s): tili luotu passkeylla tällä laitteella" % mika, True, tila())
                 tk.ok("selain (%s): PRF-tieto" % mika, ("PRF" in tila()) == prf, tila())
@@ -832,7 +833,7 @@ class Testi:
             cdp.call("Network.clearBrowserCookies")
             cdp.call("Page.navigate", url="http://localhost:%d/" % self.httpportti)
             odota("!document.getElementById('signin').hidden", "kirjautumissivu")
-            klikkaa('#signin button[data-hint="client-device"]')
+            klikkaa('#signin button.main')
             if odota("document.getElementById('status').textContent.startsWith('Signed in as %s')" % nimi,
                      "kirjautuminen"):
                 tk.ok("selain (%s): kirjautuminen evästeittä passkeylla" % mika, True)
@@ -848,7 +849,7 @@ class Testi:
             c2 = cdp.call("WebAuthn.getCredentials", authenticatorId=ulko)["credentials"]
             tk.ok("selain (%s): passkey usb-autentikaattorissa" % mika, len(c2) == 1, c2)
             # sama laite uudelleen: excludeCredentials estää
-            klikkaa('#account button[data-hint="client-device"]')
+            klikkaa('#account button[data-op="add"][data-hint=""]')
             odota("document.getElementById('status').className == 'bad'", "sama laite uudelleen estetään", 30)
             tk.ok("selain (%s): sama laite uudelleen estetään" % mika,
                   cdp.js("document.querySelectorAll('#creds li').length") == 2, tila())
@@ -872,7 +873,7 @@ class Testi:
             cdp.call("Network.clearBrowserCookies")
             cdp.call("Page.navigate", url="http://localhost:%d/" % self.httpportti)
             odota("!document.getElementById('signin').hidden", "kirjautumissivu 2")
-            klikkaa('#signin button[data-hint="client-device"]')
+            klikkaa('#signin button.main')
             ok1 = odota("document.getElementById('status').textContent.startsWith('Signed in as')", "kirjautuminen 2")
             if ok1:
                 tk.ok("selain (%s): kirjautuminen jäljellä olevalla passkeylla" % mika, True)

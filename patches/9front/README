@@ -189,8 +189,9 @@ cwfs-fid-check.diff
 
 libwebauthn-mkfile.diff
 		sys/src/mkfile: libwebauthn among LIBS, the relying party's
-		WebAuthn checks (webauthn.h) that aux/ethernetd and
-		auth/accountd share.  2026-11-25.
+		WebAuthn checks (webauthn.h), used by auth/accountd (aux/ethernetd
+		no longer keeps passkeys: it asks accountd for sessions).
+		2026-11-25.
 
 rcpu-script-read.diff
 		rc/bin/service/tcp17019, !il17019 and rconnect's aan server:

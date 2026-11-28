@@ -1,0 +1,8 @@
+</$objtype/mkfile
+
+# aux/jsio: sivun tiedosto-operaatiot koneen nimiavaruudessa (#j/js, devjs.c)
+TARG=jsio
+OFILES=jsio.$O
+BIN=/$objtype/bin/aux
+
+</sys/src/cmd/mkone
