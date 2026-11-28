@@ -117,6 +117,50 @@ A public Plan2001 server exposes its web service and nothing else. Native admini
 - Use GitHub Actions for repeatable targeted builds and smoke/integration tests; run local or real-target checks only when needed. For QEMU KVM with TCG fallback use `-machine accel=kvm:tcg` (or `-accel kvm -accel tcg` where supported), **not** `-accel kvm:tcg`. Include OVMF for AMD64 UEFI tests and Chromium for browser tests. Do not commit diagnostic artifacts. GitHub Actions runs focused builds and functional checks.
 - ARM64 is a current target: validate QEMU virt boot and bcm64/Pi4 builds locally. RISC-V64 is optional future work and is excluded from current build, release and acceptance requirements.
 
+## Operating plan2001.com
+
+The procedure that works today, run from the administrator's Linux host (Kuha). Secrets stay on that host and are never committed; only their paths are given.
+
+**Host prerequisites:** OCI CLI at `~/.local/bin/oci` with `~/.oci/config` (API key `~/.oci/oci_api_key.pem`); 9pterm at `~/bin/9pterm` (build: `tools/clients/drawterm/build.sh 9pterm`); plan9port at `~/plan9port` (WASM32 build); this repository and `plan2001-kernel/room` checked out side by side (`~/Src/plan2001`, `~/Src/room`). Native builds put large temporary files in `TMPDIR`; `/tmp` is a small tmpfs, so use `export TMPDIR=~/.cache/plan2001/tmp`.
+
+### Oracle Cloud
+
+- Instance: `ocid1.instance.oc1.eu-stockholm-1.anqxeljrnngghuyc6g4t6urjauyjl3enxjrswd4thzrfpwzj6g2gaxem365q` (region eu-stockholm-1, VM.Standard.E2.1.Micro, 2 vCPUs). `I=` that OCID; `T=$(grep tenancy ~/.oci/config | head -1 | cut -d= -f2 | tr -d ' ')`.
+- State: `oci compute instance get --instance-id $I --query 'data."lifecycle-state"'`.
+- Serial console history (1 MiB buffer: read both halves, the newest output is at the end): `H=$(oci compute console-history capture --instance-id $I --wait-for-state SUCCEEDED --query data.id --raw-output)`, then `oci compute console-history get-content --instance-console-history-id $H --length 1000000 --file a.txt` and the same with `--offset 1000000`.
+- Live serial console: ssh with key `~/.ssh/plan2001-ubuntu.key`; the inner user is the console connection OCID (`CONN@INSTANCE`), through ProxyCommand to `instance-console.eu-stockholm-1.oci.oraclecloud.com:443` (`oci compute instance-console-connection list --compartment-id $T --instance-id $I` gives the connection and its ssh command). On the serial console, `^T^T r` opens kbdfs's rescue shell (bootfs namespace, works without cwfs; has ps and acid).
+- Liveness without login: `curl -sS -o /dev/null -w '%{http_code}' https://plan2001.com/`. A hang shows as TCP accepted but no reply; disk I/O drops to 0: `oci monitoring metric-data summarize-metrics-data --compartment-id $T --namespace oci_compute --query-text "VolumeReadOps[10m]{resourceId=\"$I\"}.sum()" --start-time … --end-time …`.
+- Emergency restart (cwfs hung, #56): `oci compute instance action --instance-id $I --action RESET`; the site answers again after about a minute. A graceful stop is `fshalt -r` over 9pterm (below). Report a crash to the owner; #56 is not investigated further (CLAUDE.md).
+
+### WireGuard administration tunnel
+
+Native services (auth 567, rcpu 17019, 9P 17020) listen only on the tunnel address; publicly only WireGuard (UDP 51820) and HTTP/HTTPS are open.
+
+- Kuha's keys: `~/.config/plan2001/wg/` (`admin.key`, `admin.addr` = 10.201.0.3, `server.pub`).
+- Up: `tools/wg-admin up` (interface `wgp2001`, endpoint `wg.plan2001.com:51820`, server 10.201.0.1/32 only); down: `tools/wg-admin down`. Check: `ping -c2 10.201.0.1`, `sudo wg show wgp2001`.
+- Server side: `/adm/wg/wg0` and `wg0.peers` (`wgsetup show|peer|remove`), brought up by `/cfg/plan2001/cpustart`; listeners from `/cfg/plan2001/service.wg` and `service.wg.auth`. Never copy those service files to the public service directories.
+
+### Native administration (9pterm)
+
+- Password file: `~/.config/plan2001/plan2001.com.pass` (user glenda, the host owner). `P="-h 10.201.0.1 -a tcp!10.201.0.1!567 -u glenda -P $HOME/.config/plan2001/plan2001.com.pass -W 30"`.
+- Command: `~/bin/9pterm $P -T 60 -c 'ps | grep -c cwfs64x'`. Quoting through `-c` is fragile: for anything with `'`, `|` patterns or awk, write an rc script locally, `put` it and run `rc /tmp/script.rc`.
+- Files: `~/bin/9pterm $P -T 300 put LOCAL /tmp/REMOTE` and `~/bin/9pterm $P get /REMOTE LOCAL`; check with `md5sum` on both ends.
+- A background job started over rcpu (dossrv, aux/listen…) keeps the session open until `-T` ends it; that is expected.
+- Namespace: an rcpu session is not cpurc's. keyfs (`/mnt/keys`), and with it auth/accountd, exist only in the boot namespace started by `/cfg/plan2001/cpustart` → `/adm/room/start`. accountd and ethernetd therefore restart only with the server: `echo dump >>/srv/cwfs.cmd; sleep 60; fshalt -r` (about 3 minutes offline).
+- Logs: `/adm/room/account.log`, `/adm/room/ether.log`, `/adm/room/push.log`, `/sys/log/{www,https,auth,listen,wg}`; `/dev/kmesg`.
+- `/sys/log/*` must stay `a-rw-rw--w-` (`chmod 662; chmod +a`): rc-httpd runs as none.
+
+### Deployment
+
+Always build from current `main`. Keep the previous version of everything replaced.
+
+1. **Native AMD64:** `tools/native-amd64/build --out ~/.cache/plan2001/NAME/deploy` (kernel `9pc64` with the boot file system's cwfs, `root.tar`). A build that stops on lost serial input can simply be run again. Optional check: `tools/native-amd64/mkimage --in …/deploy --out t.img --disk sd00 --console 0`, then `NINEPTERM=~/bin/9pterm tools/native-amd64/boottest --image t.img --disk sd00 --bus vscsi:s0:0:1` (Oracle-like virtio-scsi root).
+2. **Native programs** (accountd, asuser, ethernetd, etherws …): extract them from `root.tar` (`tar xf root.tar amd64/bin/auth/accountd …`), `put` them to `/tmp/d`, copy the old ones to a backup directory (e.g. `/usr/glenda/bakDATE`), `cp` the new ones over `/amd64/bin/…` (cp keeps the target's mode). They take effect at the next restart (above).
+3. **Kernel** (only when it changed): mount the ESP with `dossrv -f '#S/sd00/esp' espX; mount -c /srv/espX /n/esp`, then `cp /n/esp/efi/plan2001/9pc64 /n/esp/efi/plan2001/9pc64.preDATE; cp /tmp/d/9pc64 /n/esp/efi/plan2001/9pc64`, check with `md5sum`. plan9.ini is `/n/esp/efi/plan2001/plan9.ini`. Then restart.
+4. **WASM32 browser firmware** (Room's browser machine): `PLAN9=~/plan9port tools/build` writes `build/live/`. Deploy `9wasm32.wasm`, `app.fs`, `platform.js`, `jsfs.js` and their `.gz` files to `/adm/room/web/wasm/`, and write a new `/adm/room/web/wasm/version.txt` (any new string, e.g. the first 16 hex digits of a sha256 of those files). The page loads the firmware as `?v=VERSION`, so a new version is what makes browsers and installed PWAs fetch it; `platform.js` carries its own SHA-256 stamp (`tools/platstamp`), so never edit a built copy by hand. No restart is needed.
+5. **Room** (`plan2001-kernel/room`, its README "Asennus plan2001.comiin"): `web/*` → `/adm/room/web/`; `native/`: `mk install` on the server (roomctl, roompush, roomfront), `native/room.export` → `/adm/room/export`; `deploy/plan2001.com/start` → `/adm/room/start`. roomctl/roomfront are started per connection by `tcp443`, so new copies apply to the next request; changes to accountd, ethernetd or `/adm/room/start` need the restart.
+6. **Verify:** `curl` returns 200 for `https://plan2001.com/`, `/room/` and `/room/wasm/version.txt` (the new version); over 9pterm, `ps` shows cwfs64x, accountd and ethernetd, `md5sum` of the installed files matches the build, and `tail /adm/room/ether.log` shows a machine `up as 100.64.0.N` with bytes going both ways. Then open Room on a phone. A manual push test: `roomorigin=https://plan2001.com /bin/roompush send ROOM SENDER message >>/adm/room/push.log >[2=1]` (glenda is a member of room Klassikko, `8efa067e2feaa0b1`, for tests; a user's own messages never notify that user's devices).
+
 ## Continuous integration policy
 
 The owner has enabled GitHub Actions for focused builds and functional tests.
