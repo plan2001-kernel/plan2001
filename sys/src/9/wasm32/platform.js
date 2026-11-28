@@ -683,6 +683,13 @@ function imports(env) {
 		},
 		platkbdring: () => env.post({ kring: arg(0) }),
 		platwebauthn: () => env.post({ webauthn: { gen: arg(0), req: arg(1) ? str(arg(1)) : null, buf: arg(2), n: iarg(3), word: arg(4) } }),
+		// #j/js (devjs.c): renkaan osoite sivulle; viesti sivulle, (0, 0): palvelin sulki kanavan
+		platjsring: () => env.post({ jsring: arg(0) }),
+		platjs: () => {
+			if (!arg(0)) { env.post({ js: null }); return; }
+			const b = new Uint8Array(env.mem.buffer).slice(arg(0), arg(0) + iarg(1));
+			env.post({ js: b }, [b.buffer]);
+		},
 	};
 	// a function the kernel wants and the platform has not: say which
 	const platform = new Proxy(fns, { get: (o, k) => k === 'memory' ? env.mem : o[k] ?? (() => { throw new Error('platform: ' + String(k) + ' not here'); }) });
@@ -1557,7 +1564,7 @@ export async function boot(url, front = {}) {
 		ether.ws = ws;
 		ws.onopen = () => {
 			ether.wait = 1000;
-			if (ticket) ws.send('ticket ' + ticket);
+			if (ticket) ws.send((front.ticket.word ?? 'ticket') + ' ' + ticket);	/* word: 'session' tilin istunnolle (ethernetd -a) */
 			else ether.word(8, 1);
 		};
 		ws.onclose = () => {
@@ -1582,6 +1589,39 @@ export async function boot(url, front = {}) {
 	ether.send = (b) => {
 		const ws = ether.ws;
 		if (b.length >= 14 && b.length <= 1514 && ws?.readyState === 1 && ws.bufferedAmount < ETHERQ) ws.send(b);
+	};
+
+	/*
+	 * #j/js (devjs.c): sivun viestikanava koneen natiiviin palvelimeen
+	 * (aux/jsio).  send(bytes) kirjoittaa viestin kernelin renkaaseen
+	 * (pituus 4 tavua little-endian, tavut); mitä ei mahdu tai mitä
+	 * lähetetään ennen kuin palvelin on avannut kanavan, odottaa
+	 * järjestyksessä.  Kernelin viestit menevät front.js(bytes):lle,
+	 * front.js(null): palvelin sulki kanavan
+	 */
+	const NJRING = 512*1024, JSMAX = 128*1024;
+	const jsch = { ring: 0, q: [], timer: 0 };
+	jsch.pump = () => {
+		jsch.timer = 0;
+		if (!jsch.ring) return;
+		const i32 = new Int32Array(mem.buffer), u8 = new Uint8Array(mem.buffer), R = jsch.ring;
+		let w = Atomics.load(i32, (R + 4) >> 2) >>> 0;
+		const w0 = w;
+		while (jsch.q.length && NJRING - ((w - (Atomics.load(i32, R >> 2) >>> 0)) >>> 0) >= 4 + jsch.q[0].length) {
+			const m = jsch.q.shift(), n = m.length;
+			for (const c of [n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, n >>> 24]) u8[R + 8 + (w++ & (NJRING - 1))] = c;
+			for (let i = 0; i < n; i++) u8[R + 8 + (w++ & (NJRING - 1))] = m[i];
+		}
+		if (w !== w0) {
+			Atomics.store(i32, (R + 4) >> 2, w | 0);
+			Atomics.notify(i32, (R + 4) >> 2);
+		}
+		if (jsch.q.length) jsch.timer = setTimeout(jsch.pump, 5);	/* rengas täynnä: kun kernel on lukenut */
+	};
+	jsch.send = (b) => {
+		if (!(b instanceof Uint8Array) || b.length > JSMAX) throw new Error('js: a message of at most ' + JSMAX + ' bytes');
+		jsch.q.push(b);
+		if (!jsch.timer) jsch.pump();
 	};
 
 	/* a test's: the nth Worker of a kind is not made - a fork's child, a helper, an rfork(RFMEM) child's (platform.h) */
@@ -1638,6 +1678,8 @@ export async function boot(url, front = {}) {
 		if (m.ethersend) ether.send(m.ethersend);
 		if (m.kring !== undefined) kring = m.kring;
 		if (m.webauthn) passkey.request(m.webauthn);
+		if (m.jsring !== undefined) { jsch.ring = m.jsring; jsch.pump(); }
+		if (m.js !== undefined) front.js?.(m.js);
 		if (m.halt !== undefined) { console.log('KERNEL-HALT ' + m.halt); front.halt?.(m.halt); }
 	};
 	/* uusi Worker; virheont.po työtä vain poistaa sen poolista */
@@ -1727,6 +1769,8 @@ export async function boot(url, front = {}) {
 		},
 		eia0inb64: (b) => window.plan9.eia0in(Uint8Array.from(atob(b), (c) => c.charCodeAt(0))),
 	};
+	window.plan9.jssend = jsch.send;
 	if (fb) screen.fb(fb);
 	spawn({ module, mem, role: 'boot', arg: pa });
+	return { jssend: jsch.send };
 }

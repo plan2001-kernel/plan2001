@@ -25,5 +25,8 @@ cp "$w/manifest.webmanifest" "$w/icon.svg" "$w"/icon-*.png "$live/"
 sed "s|@VERSION@|$v|" "$w/sw.js" >"$live/sw.js"
 cp "$tree/wasm32/9wasm32.wasm" "$live/"
 cp "$root/build/root.fs" "$live/9wasm32.fs"
+# sovellustila (Room ym.): /boot/app ja aux/jsio ilman rio:ta (app.proto), sivun tiedostoasiakas jsfs.js
+"$here/bootfs" "$tree" "$live/app.fs" "$w/app.proto" >/dev/null
+cp "$w/jsfs.js" "$live/"
 for f in "$live"/*; do gzip -9 -n -k "$f"; done
 echo "build: $live: $(cd "$live" && ls | grep -v '\.gz$' | tr '\n' ' ')"

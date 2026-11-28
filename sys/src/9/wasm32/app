@@ -1,0 +1,24 @@
+#!/bin/rc
+# Sovellustila (/boot/app, plan9.ini:n init=/bin/rc /boot/app): kone ilman
+# rio:ta ja konsolia, jonka näkyvä käyttöliittymä on sivun oma HTML/JS.
+# Verkko kuten initissä (DHCP ether0:lla, kun yhdyskäytävä on ottanut
+# linkin), sitten aux/jsio palvelee sivun tiedosto-operaatioita #j/js:n
+# kautta tämän koneen nimiavaruudessa.  Sivu liittää palvelimen
+# tiedostot itse (jsio:n mount), joten katkennut yhteys liitetään
+# uudelleen ilman uudelleenkäynnistystä.  Tila näkyy sivulle #t/eia0:n
+# riveinä "app: ...".
+rfork e
+cat /adm/timezone/local >/env/timezone
+mntgen -s slashn /n
+mntgen -s slashmnt /mnt
+# linkki ja DHCP taustalla: jsio vastaa sivulle heti
+@{
+	while(! ~ `{sed -n 's/^link: //p' /net/ether0/stats >[2]/dev/null} 1)
+		sleep 1
+	if(ip/ipconfig ether /net/ether0 >[2]/dev/null)
+		echo app: net `{sed -n 's/.*ipgw=([^ ]*).*/\1/p' /net/ndb}
+	if not
+		echo app: nonet
+} &
+echo app: ready
+exec aux/jsio
