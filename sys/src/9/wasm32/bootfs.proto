@@ -10,7 +10,7 @@
 adm
 	timezone
 		GMT
-		local
+		local	- sys sys /adm/timezone/GMT	# Git-puussa ei ole asennuksen tekemää local-tiedostoa
 boot
 	init	- sys sys /sys/src/9/wasm32/init
 	console	- sys sys /sys/src/9/wasm32/console
@@ -80,7 +80,7 @@ bin	- sys sys /wasm32/bin
 		mkfs
 		prep
 lib
-	ndb
+	ndb	- sys sys /sys/lib/dist/ndb	# Git-puussa dist-asennuksen lähteet
 		local
 		common
 		dnsroot
@@ -103,7 +103,7 @@ sys
 			basic
 			fileaddr
 usr
-	glenda
+	glenda	- sys sys /sys/lib/dist/usr/glenda
 		bin
 			rc
 				riostart

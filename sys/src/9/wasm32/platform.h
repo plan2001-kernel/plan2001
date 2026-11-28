@@ -49,3 +49,6 @@ void	platether(void*);			/* frames in into the ring: r, w, link, drops, b[256K] 
 void	platethersend(void*, long);		/* a frame out */
 /* WebAuthn (devwebauthn.c): request gen to the page, which shows a button; its answer into buf (at most n), then its length in the word (-1 none); a nil request takes the page's button away */
 void	platwebauthn(ulong, char*, char*, long, long*);
+/* #j/js (devjs.c): sivun viestit renkaaseen r, w, b[512K] (kukin pituus, 4 tavua, ja tavut); viesti sivulle, (nil, 0): palvelin sulki kanavan */
+void	platjsring(void*);
+void	platjs(void*, long);

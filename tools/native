@@ -139,8 +139,8 @@ fi
 # (mkrunetype, from /lib/ucd's text), awk's proctab.c (maketab, from
 # yacc's y.tab.h) and jpg's ycbcr.h and rgbv.h (rgbycc, rgbrgbv).  Made
 # here with plan9port's 9c and 9l from the tree's own programs.
-hostmade() {	# DIR PROGRAM: build DIR/PROGRAM.c for the host into $m/PROGRAM
-	cp "$1/$2.c" "$m/$2.c" && (cd "$m" && PATH=$PLAN9/bin:$PATH 9c "$2.c" >/dev/null && PATH=$PLAN9/bin:$PATH 9l -o "$2" "$2.o")
+hostmade() {	# DIR PROGRAM: build DIR/PROGRAM.c for the host into $m/PROGRAM (DIR's headers on -I)
+	cp "$1/$2.c" "$m/$2.c" && (cd "$m" && PATH=$PLAN9/bin:$PATH 9c -I"$1" "$2.c" >/dev/null && PATH=$PLAN9/bin:$PATH 9l -o "$2" "$2.o")
 }
 u=$tree/sys/src/libc/ucd
 if [ -e "$u/mkrunetype.c" ] && [ ! -e "$u/runeistypedata" ]; then
@@ -171,8 +171,8 @@ fi
 # what the kernel and the boot file system's programs need, in order, and
 # those programs (sys/src/9/wasm32/bootfs.proto)
 libs="libc libthread libmp libsec libbio libregexp libString libauth libauthsrv lib9p libip libndb libdraw libmemdraw libmemlayer libframe libcomplete libplumb libcontrol libflate libdisk libavl libjson libwebauthn"
-one="basename cat cleanname cp date dd echo ls mkdir mv rm sleep sort touch wc xd bind unmount ns sed mount pwd ps read test chmod tlsclient mntgen ramfs tar stats webcookies clock"
-cmds="cmd/rc cmd/hjfs cmd/rio cmd/aux/kbdfs cmd/auth/factotum cmd/auth/secstore:secstore.install,aescbc.install cmd/aux/seckeys cmd/exportfs cmd/plumb cmd/disk/prep cmd/disk:format.install,mkfs.install,mkext.install cmd/dossrv cmd/9660srv cmd/gefs cmd/cwfs cmd/gzip:gunzip.install cmd/webfs cmd/ip/ipconfig cmd/ip:ping.install cmd/ndb:cs.install cmd/aux:listen1.install,dial.install cmd/ethergw cmd:$(echo $one | "$hostsed" 's/\([^ ]*\)/\1.install/g; s/ /,/g')"
+one="basename cat cleanname cp date dd echo ls mkdir mv rm sleep sort touch wc xd bind unmount ns sed mount pwd ps read test chmod tlsclient mntgen ramfs tar stats webcookies clock srv"
+cmds="cmd/rc cmd/hjfs cmd/rio cmd/aux/kbdfs cmd/auth/factotum cmd/auth/secstore:secstore.install,aescbc.install cmd/aux/seckeys cmd/exportfs cmd/plumb cmd/disk/prep cmd/disk:format.install,mkfs.install,mkext.install cmd/dossrv cmd/9660srv cmd/gefs cmd/cwfs cmd/gzip:gunzip.install cmd/webfs cmd/ip/ipconfig cmd/ip:ping.install cmd/ndb:cs.install cmd/aux:listen1.install,dial.install cmd/ethergw cmd/jsio cmd:$(echo $one | "$hostsed" 's/\([^ ]*\)/\1.install/g; s/ /,/g')"
 dirs=${*:-$libs 9/wasm32 $cmds}
 # /lib/ucd: libc/ucd's tables are made from it (above, by the host's
 # mkrunetype); stand-ins older than the tables.  aux/kbdfs's latin1.h, made from

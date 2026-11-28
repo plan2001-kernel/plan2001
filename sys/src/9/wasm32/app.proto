@@ -1,0 +1,24 @@
+# Sovellustilan (/boot/app) boot-tiedostojärjestelmä: vain mitä app ja
+# aux/jsio tarvitsevat - ei rio:ta, fontteja eikä levyn palvelimia.
+# tools/bootfs TREE OUT app.proto (muoto kuten bootfs.proto).
+adm
+	timezone
+		local	- sys sys /adm/timezone/GMT
+boot
+	app	- sys sys /sys/src/9/wasm32/app
+bin	- sys sys /wasm32/bin
+	rc
+	echo
+	cat
+	sed
+	sleep
+	test
+	mntgen
+	ip
+		ipconfig
+	aux
+		jsio
+rc
+	bin	d775	# inituser sitoo /rc/bin:n /bin:n perään
+	lib
+		rcmain	- sys sys /sys/src/cmd/rc/rcmain.plan9

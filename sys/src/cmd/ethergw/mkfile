@@ -1,9 +1,14 @@
 </$objtype/mkfile
 
-# the wasm32 machines' network on a server (docs/network.md): ethernetd,
-# its gateway, and etherws, the WebSockets' end for it
+# the wasm32 machines' network on a server (README.md): ethernetd,
+# its gateway, and etherws, the WebSockets' end for it; accountd's
+# connections from ../accounts
 TARG=ethernetd etherws
+OFILES=conn.$O
 LIB=/$objtype/lib/libwebauthn.a
 BIN=/$objtype/bin/aux
 
 </sys/src/cmd/mkmany
+
+conn.$O:	../accounts/conn.c ../accounts/conn.h
+	$CC $CFLAGS ../accounts/conn.c

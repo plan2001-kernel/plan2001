@@ -1,0 +1,357 @@
+diff --git a/sys/src/cmd/cwfs/9p2.c b/sys/src/cmd/cwfs/9p2.c
+index a0ad338dc52516e19e84d1c25622723b8516d08d..337f9719f4acf31af637c88f86081a42f29b718a 100644
+--- a/sys/src/cmd/cwfs/9p2.c
++++ b/sys/src/cmd/cwfs/9p2.c
+@@ -222,9 +222,10 @@ auth(Chan* chan, Fcall* f, Fcall* r)
+ 	r->aqid = file->qid;
+ out:
+ 	if(file != nil){
+-		qunlock(file);
++		/* vapautus lukon alla kuten _clunkissa: ei kilpaa saman fidin kanssa */
+ 		if(error)
+ 			freefp(file);
++		qunlock(file);
+ 	}
+ 	return error;
+ }
+@@ -351,9 +352,10 @@ out:
+ 	if(p != nil)
+ 		putbuf(p);
+ 	if(file != nil){
+-		qunlock(file);
++		/* vapautus lukon alla kuten _clunkissa: ei kilpaa saman fidin kanssa */
+ 		if(error)
+ 			freefp(file);
++		qunlock(file);
+ 	}
+ 	return error;
+ }
+@@ -594,8 +596,9 @@ walk(Chan* chan, Fcall* f, Fcall* r)
+ 		 */
+ 		if(error){
+ 			freewp(nfile->wpath);
+-			qunlock(nfile);
++			nfile->wpath = 0;
+ 			freefp(nfile);
++			qunlock(nfile);
+ 		} else
+ 			qunlock(nfile);
+ 	} else if(r->nwqid < f->nwname){
+@@ -606,9 +609,10 @@ walk(Chan* chan, Fcall* f, Fcall* r)
+ 		 * walked OK.
+ 		 */
+ 		freewp(nfile->wpath);
++		nfile->wpath = 0;
+ 		if(nfile != &tfile){
+-			qunlock(nfile);
+ 			freefp(nfile);
++			qunlock(nfile);
+ 		}
+ 		if(r->nwqid != 0)
+ 			error = 0;
+@@ -1399,6 +1403,7 @@ _clunk(File* file, int remove)
+ 		error = doremove(file);
+ 	file->open = 0;
+ 	freewp(file->wpath);
++	file->wpath = 0;
+ 	authfree(file->auth);
+ 	file->auth = 0;
+ 	freefp(file);
+diff --git a/sys/src/cmd/cwfs/cw.c b/sys/src/cmd/cwfs/cw.c
+index 49d8924d9c7b0c2b8b65a3654e1f3d4ff8f67387..bc60cf1e74d88c1c4a3176c6fd3c705ff0339e9b 100644
+--- a/sys/src/cmd/cwfs/cw.c
++++ b/sys/src/cmd/cwfs/cw.c
+@@ -1225,6 +1225,11 @@ rewalk(Cw *cw)
+ 	int h;
+ 	File *f;
+ 
++	/*
++	 * dump pitää mainlockia, mutta srvi/srvo (fileinit) muuttavat
++	 * ketjuja ilman sitä: ketjut käydään läpi flockin alla
++	 */
++	lock(&flock);
+ 	for(h=0; h<nelem(flist); h++)
+ 		for(f=flist[h]; f; f=f->next) {
+ 			if(!f->fs)
+@@ -1235,6 +1240,7 @@ rewalk(Cw *cw)
+ 			if(cw->rodev == f->fs->dev)
+ 				f->addr = rewalk2(cw, f->addr, f->slot, f->wpath);
+ 		}
++	unlock(&flock);
+ }
+ 
+ Off
+diff --git a/sys/src/cmd/cwfs/srv.c b/sys/src/cmd/cwfs/srv.c
+index d745cdf8ed6d76d73ea86bff8cb5e034652a9e17..884df98c0750dabf82391478df6393a05c52bcdb 100644
+--- a/sys/src/cmd/cwfs/srv.c
++++ b/sys/src/cmd/cwfs/srv.c
+@@ -27,6 +27,15 @@ chanhangup(Chan *chan, char *msg)
+ 	Srv *srv;
+ 	int cfd;
+ 
++	/*
++	 * kanavan Filet vapautetaan heti, myös srv-kanavan: srvputin
++	 * vapautus odottaisi vastausta jokaiseen pyyntöön, eikä virheelliseen
++	 * viestiin vastata, jolloin yhteyden Filet jäisivät pysyviksi.
++	 * Turvallista, vaikka srv-prosessit käsittelevät yhä kanavan pyyntöjä:
++	 * fileinit irrottaa Filen ennen siivousta, freefp vapauttaa vain itse
++	 * irrottamansa, ja filep tarkistaa omistajan qlockin jälkeen.
++	 * srvput siivoaa katkaisun jälkeen syntyneet.
++	 */
+ 	fileinit(chan);
+ 	srv = chan->pdata;
+ 	if(chan == cons.chan || srv == nil || srv->chan != chan)
+diff --git a/sys/src/cmd/cwfs/sub.c b/sys/src/cmd/cwfs/sub.c
+index 294e1e5eb598fadd9f754324237441a5b8176967..5405cbfaa373a8aad7674d4a7b5fe04462b3149c 100644
+--- a/sys/src/cmd/cwfs/sub.c
++++ b/sys/src/cmd/cwfs/sub.c
+@@ -61,6 +61,12 @@ fs_chaninit(int count, int data)
+ 	return icp;
+ }
+ 
++/*
++ * vapauttaa kanavan kaikki Filet.  File irrotetaan ketjusta flockin alla,
++ * ja vain irrottaja vapauttaa sen (cp = 0): freefp ei vapauta Filea, jota
++ * se ei löydä ketjusta, joten paikka ei voi siirtyä uudelle omistajalle
++ * ennen kuin siivous tässä on tehty.
++ */
+ void
+ fileinit(Chan *cp)
+ {
+@@ -91,6 +97,7 @@ loop:
+ 			if(f->open & FREMOV)
+ 				doremove(f);
+ 			freewp(f->wpath);
++			f->wpath = 0;
+ 			f->open = 0;
+ 			authfree(f->auth);
+ 			f->auth = 0;
+@@ -212,7 +219,12 @@ freefp(File *fp)
+ 				flist[h] = f->next;
+ 			break;
+ 		}
+-	fp->cp = 0;
++	/*
++	 * vain ketjusta irrotettu File vapautetaan; jos sitä ei löytynyt,
++	 * fileinit on jo irrottanut sen ja vapauttaa sen itse
++	 */
++	if(f != nil)
++		fp->cp = 0;
+ 	unlock(&flock);
+ }
+ 
+diff --git a/sys/src/cmd/cwfs/uidgid.c b/sys/src/cmd/cwfs/uidgid.c
+index 3c434b1abdf478981691871e34c900158aef4646..13aa395f2fb3dc47a961d24cf4fc1ff025db51f1 100644
+--- a/sys/src/cmd/cwfs/uidgid.c
++++ b/sys/src/cmd/cwfs/uidgid.c
+@@ -19,11 +19,13 @@ struct {
+ 
+ static char buf[4096];
+ static Rune ichar[] = L"?=+-/:";
++/* /adm/users luettiin vajaana (gidspace täynnä tai liian pitkä rivi): ei kirjoiteta takaisin */
++static int usersvajaa;
+ 
+ Uid*	chkuid(char *name, int chk);
+ void	do_newuser(int, char*[]);
+ char*	getword(char*, Rune, char*, int);
+-void	pentry(char*, Uid*);
++int	pentry(char*, char*, Uid*);
+ int	readln(char*, int);
+ void	setminusers(void);
+ Uid*	uidtop(int);
+@@ -55,20 +57,30 @@ cmd_users(int argc, char *argv[])
+ 	uidgc.find = 0;
+ 	cons.offset = 0;
+ 	cons.nuid = 0;
++	usersvajaa = 0;
+ 
+ 	u = 0;
+ 	line = 0;
++	/*
++	 * muistista pois jäävä rivi tekee luvusta vajaan (usersvajaa): muuten
++	 * seuraava newuser kirjoittaisi /adm/usersin uudelleen ilman sitä
++	 */
+ 	while(readln(buf, sizeof buf) != 0) {
+ 		line++;
+ 		p = getword(buf, L':', "no : after number", line);
+-		if(p == nil)
++		if(p == nil){
++			usersvajaa = 1;
+ 			continue;
++		}
+ 		ulead = getword(p, L':', "no : after name", line);
+-		if(ulead == nil)
++		if(ulead == nil){
++			usersvajaa = 1;
+ 			continue;
++		}
+ 
+ 		if(strlen(p) > NAMELEN-1) {
+ 			print("%s: name too long\n", p);
++			usersvajaa = 1;
+ 			continue;
+ 		}
+ 		strcpy(uid[u].name, p);
+@@ -77,7 +89,10 @@ cmd_users(int argc, char *argv[])
+ 		uid[u].ngrp = 0;
+ 		u++;
+ 		if(u >= conf.nuid) {
+-			print("conf.nuid too small (%ld)\n", conf.nuid);
++			if(readln(buf, sizeof buf) != 0){
++				print("conf.nuid too small (%ld)\n", conf.nuid);
++				usersvajaa = 1;
++			}
+ 			break;
+ 		}
+ 	}
+@@ -129,6 +144,12 @@ cmd_users(int argc, char *argv[])
+ 			unext = getword(p, L',', 0, 0);
+ 			o = strtouid(p);
+ 			if(o >= 0) {
++				if(g >= conf.gidspace) {
++					print("conf.gidspace too small (%ld): group %s: members from %s on not read\n",
++						conf.gidspace, uname, p);
++					usersvajaa = 1;
++					break;
++				}
+ 				gidspace[g++] = o;
+ 				ui->ngrp++;
+ 			}
+@@ -224,7 +245,7 @@ do_newuser(int argc, char *argv[])
+ 		ui = chkuid(argv[1], 1);
+ 		if(ui == 0)
+ 			return;
+-		pentry(buf, ui);
++		pentry(buf, buf+sizeof(buf), ui);
+ 		n = strlen(buf);
+ 		p = buf;
+ 		while(n > PRINTSIZE-5) {
+@@ -300,13 +321,18 @@ do_newuser(int argc, char *argv[])
+ 			print("conf.gidspace too small (%ld)\n", conf.gidspace);
+ 			return;
+ 		}
++		/* ryhmän rivin on mahduttava /adm/usersiin uuden jäsenen kanssa */
++		if(pentry(buf, buf+sizeof(buf)-(strlen(u2->name)+1), ui) < 0) {
++			print("group %s: entry in /adm/users would be too long\n", ui->name);
++			return;
++		}
+ 
+ 		wlock(&uidgc.uidlock);
+ 		s = gidspace+cons.ngid;
+ 		memmove(s, ui->gtab, ui->ngrp*sizeof(*s));
+ 		ui->gtab = s;
+ 		s[ui->ngrp++] = u2->uid;
+-		cons.ngid += ui->ngrp+1;
++		cons.ngid += ui->ngrp;
+ 		wunlock(&uidgc.uidlock);
+ 		break;
+ 
+@@ -360,6 +386,18 @@ do_newuser(int argc, char *argv[])
+ 	}
+ 
+ 
++	/* tiedostoa ei katkaista, ellei jokainen rivi mahdu kokonaan */
++	if(usersvajaa) {
++		print("/adm/users was read incompletely; not rewritten\n");
++		return;
++	}
++	for(i = 0; i < cons.nuid; i++)
++		if(pentry(buf, buf+sizeof(buf), &uid[i]) < 0) {
++			print("entry for %s is longer than %d bytes; /adm/users not rewritten\n",
++				uid[i].name, (int)sizeof(buf));
++			return;
++		}
++
+ 	if(walkto("/adm/users") || con_open(FID2, OWRITE|OTRUNC)) {
+ 		print("can't open /adm/users for write\n");
+ 		return;
+@@ -367,7 +405,7 @@ do_newuser(int argc, char *argv[])
+ 
+ 	cons.offset = 0;
+ 	for(i = 0; i < cons.nuid; i++) {
+-		pentry(buf, &uid[i]);
++		pentry(buf, buf+sizeof(buf), &uid[i]);
+ 		l = strlen(buf);
+ 		n = con_write(FID2, buf, cons.offset, l);
+ 		if(l != n)
+@@ -399,28 +437,34 @@ chkuid(char *name, int chk)
+ 	return u;
+ }
+ 
+-void
+-pentry(char *buf, Uid *u)
++/*
++ * käyttäjän rivi puskuriin buf..e; -1, jos rivi ei mahtunut
++ * (seprint pysähtyy e-1:een, joten täysi puskuri tulkitaan ylitykseksi)
++ */
++int
++pentry(char *buf, char *e, Uid *u)
+ {
+-	int i, posn;
++	int i;
++	char *q;
+ 	Uid *p;
+ 
+-	posn = sprint(buf, "%d:%s:", u->uid, u->name);
++	q = seprint(buf, e, "%d:%s:", u->uid, u->name);
+ 	p = uidtop(u->lead);
+ 	if(p && u->lead != 0)
+-		posn += sprint(buf+posn, "%s", p->name);
++		q = seprint(q, e, "%s", p->name);
+ 
+-	posn += sprint(buf+posn, ":");
++	q = seprint(q, e, ":");
+ 	for(i = 0; i < u->ngrp; i++) {
+ 		p = uidtop(u->gtab[i]);
+ 		if(i != 0)
+-			posn += sprint(buf+posn, ",");
++			q = seprint(q, e, ",");
+ 		if(p != 0)
+-			posn += sprint(buf+posn, "%s", p->name);
++			q = seprint(q, e, "%s", p->name);
+ 		else
+-			posn += sprint(buf+posn, "%d", u->gtab[i]);
++			q = seprint(q, e, "%d", u->gtab[i]);
+ 	}
+-	sprint(buf+posn, "\n");
++	q = seprint(q, e, "\n");
++	return q < e-1 ? 0 : -1;
+ }
+ 
+ void
+@@ -599,19 +643,27 @@ fchar(void)
+ 	return (uchar)uidgc.uidbuf->iobuf[uidgc.find++];
+ }
+ 
++/*
++ * rivi p:hen, enintään len-1 merkkiä ja NUL; liian pitkän rivin loppu
++ * ohitetaan, ja tiedosto merkitään vajaaksi
++ */
+ int
+ readln(char *p, int len)
+ {
+-	int n, c;
++	int n, c, pitka;
+ 
+ 	n = 0;
+-	while(len--) {
+-		c = fchar();
+-		if(c == -1 || c == '\n')
+-			break;
+-		n++;
+-		*p++ = c;
++	pitka = 0;
++	while((c = fchar()) != -1 && c != '\n') {
++		if(n < len-1)
++			p[n++] = c;
++		else
++			pitka = 1;
++	}
++	p[n] = '\0';
++	if(pitka) {
++		print("cmd_users: line longer than %d bytes: rest ignored\n", len-1);
++		usersvajaa = 1;
+ 	}
+-	*p = '\0';
+ 	return n;
+ }

@@ -17,7 +17,7 @@ PORTFILES=alarm alloc allocb auth chan dev devcons devdraw devdup devenv\
 	pgrp portclock print qio qlock sysfile taslock tod xalloc\
 	bootargs bootinfo
 
-ARCHFILES=arch bootarch cache clock devkbd devproc devrootfs devsdw devswap devtab devwebauthn\
+ARCHFILES=arch bootarch cache clock devjs devkbd devproc devrootfs devsdw devswap devtab devwebauthn\
 	etherwasm32 main proc screen sysproc trap uartwasm32
 
 # 9front's IP stack, as pc's config has it (devtab.c: ipprotoinit, links)
