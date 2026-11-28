@@ -21,17 +21,14 @@ Read the root README.md before making changes. It is the **sole authoritative st
 
 This policy applies to every agent, every task, every branch, and all Plan2001 components. Read and follow it at the start of every task.
 
-## CI: disabled
+## CI: enabled
 
-**CI IS DISABLED. Do not create, enable, modify, import or run GitHub Actions workflows or any other automated CI pipelines.** This prohibition applies to `main`, feature branches, and migrations from other repositories. Do not copy existing source-repository workflow directories.
+**CI and GitHub Actions are allowed and enabled.** Use focused automated builds and functional tests to reduce agent time and usage spent on repetitive testing.
 
-1. **Complete the assigned task autonomously.** Never stop work to request CI approval; simply leave CI disabled and finish the coding task.
-2. **Test locally.** Create and run relevant tests as ordinary source files or scripts when needed. Do not convert them to automatic CI jobs.
-3. **Do not create temporary or branch-specific workflows.** No `.github/workflows/` files are permitted while CI remains disabled.
-4. **Only an explicit project-owner decision to enable CI may change this policy.** If CI is enabled later, the default design is one small centrally controlled workflow, not feature-by-feature CI.
-5. **Do not bypass repository protections or weaken tests to finish a task.** Report an external blocker in the final response if it cannot be resolved without changing policy.
-6. **No CI artifacts or work documentation in Git.** Do not commit test output, screenshots, hashes, logs or task reports.
-
-**CI is not a dependency for completing software tasks.**
+1. Prefer the existing small, centrally maintained workflow per repository. Create or modify workflows when necessary for the assigned task; avoid temporary or redundant pipelines.
+2. Use CI for repeatable checks instead of duplicating them locally. Run only the local or real-target verification needed to establish actual functionality.
+3. Do not build unrelated targets, run broad regression campaigns without a concrete reason, weaken tests or bypass repository protections.
+4. CI success does not authorize merging or production deployment; obtain owner approval as required.
+5. Do not commit test output, screenshots, logs or work reports.
 
 The repository must contain **software and its current requirements**, not a history of how agents worked on it.
