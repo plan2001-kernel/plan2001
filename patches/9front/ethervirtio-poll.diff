@@ -1,0 +1,218 @@
+diff --git a/sys/src/9/pc/ethervirtio.c b/sys/src/9/pc/ethervirtio.c
+index 71e969f4629e72e3678f3eefded616277566546b..8ac7166eca567d66e99c321b43fecd697f8feca1 100644
+--- a/sys/src/9/pc/ethervirtio.c
++++ b/sys/src/9/pc/ethervirtio.c
+@@ -138,6 +138,8 @@ struct Vqueue
+ 
+ 	uint	nintr;
+ 	uint	nnote;
++	uint	nkysely;	/* valmistuneita, jotka löytyivät ilman keskeytystä */
++	uint	nnobuf;		/* vastaanottopuskurit loppuivat */
+ };
+ 
+ struct Ctlr {
+@@ -171,6 +173,23 @@ vhasroom(void *v)
+ 	return q->lastused != q->used->idx;
+ }
+ 
++/*
++ * odottaa jonon valmistunutta puskuria enintään sekunnin.  Keskeytys voi
++ * kadota (KVM-pilvet, vrt. OpenBSD:n vio(4), 7.9), ja vastaanotto jää
++ * odottamaan ilman sitä myös, kun puskurit loppuivat eikä renkaassa ole
++ * yhtään: kutsuja tarkistaa jonon ja täyttää renkaan joka kierroksella.
++ */
++static void
++vqodota(Vqueue *q)
++{
++	uint n;
++
++	n = q->nintr;
++	tsleep(q, vhasroom, q, 1000);
++	if(vhasroom(q) && q->nintr == n)
++		q->nkysely++;
++}
++
+ static void
+ vqnotify(Ctlr *ctlr, int x)
+ {
+@@ -242,7 +261,7 @@ txproc(void *v)
+ 
+ 			/* ring full, wait and retry */
+ 			if(!vhasroom(q))
+-				sleep(q, vhasroom, q);
++				vqodota(q);
+ 		}
+ 
+ 		/* slot is free, fill in descriptor */
+@@ -268,7 +287,7 @@ rxproc(void *v)
+ 	Vqueue *q;
+ 	Vused *u;
+ 	Block *b;
+-	int i, j;
++	int i, j, ennen;
+ 
+ 	edev = v;
+ 	ctlr = edev->ctlr;
+@@ -301,12 +320,15 @@ rxproc(void *v)
+ 
+ 	for(;;){
+ 		/* replenish receive ring */
++		ennen = q->avail->idx;
+ 		do {
+ 			i = q->avail->idx & (q->qmask >> 1);
+ 			if(blocks[i] != nil)
+ 				break;
+-			if((b = iallocbp(&ctlr->pool)) == nil)
++			if((b = iallocbp(&ctlr->pool)) == nil){
++				q->nnobuf++;
+ 				break;
++			}
+ 			blocks[i] = b;
+ 			j = (i << 1) | 1;
+ 			q->desc[j].addr = PADDR(b->rp);
+@@ -314,11 +336,13 @@ rxproc(void *v)
+ 			coherence();
+ 			q->avail->idx++;
+ 		} while(q->avail->idx != q->used->idx);
+-		vqnotify(ctlr, Vrxq);
++		/* ajastettu kierros ilman uusia puskureita ei herätä laitetta */
++		if(q->avail->idx != ennen)
++			vqnotify(ctlr, Vrxq);
+ 
+ 		/* wait for any packets to complete */
+ 		if(!vhasroom(q))
+-			sleep(q, vhasroom, q);
++			vqodota(q);
+ 
+ 		/* retire completed packets */
+ 		while((i = q->lastused) != q->used->idx) {
+@@ -382,7 +406,7 @@ vctlcmd(Ether *edev, uchar class, uchar cmd, uchar *data, int ndata)
+ 	q->avail->idx++;
+ 	vqnotify(ctlr, Vctlq);
+ 	while(!vhasroom(q))
+-		sleep(q, vhasroom, q);
++		vqodota(q);
+ 	q->lastused = q->used->idx;
+ 	q->avail->flags |= Rnointerrupt;
+ 
+@@ -464,8 +488,9 @@ ifstat(void *a, char *p, char *e)
+ 	for(i = 0; i < ctlr->nqueue; i++){
+ 		q = &ctlr->queue[i];
+ 		p = seprint(p, e,
+-			"vq%d %#p size %d avail->idx %d used->idx %d lastused %hud nintr %ud nnote %ud\n",
+-			i, q, q->qsize, q->avail->idx, q->used->idx, q->lastused, q->nintr, q->nnote);
++			"vq%d %#p size %d avail->idx %d used->idx %d lastused %hud nintr %ud nnote %ud npoll %ud nnobuf %ud\n",
++			i, q, q->qsize, q->avail->idx, q->used->idx, q->lastused, q->nintr, q->nnote,
++			q->nkysely, q->nnobuf);
+ 	}
+ 
+ 	return p;
+diff --git a/sys/src/9/port/ethervirtio10.c b/sys/src/9/port/ethervirtio10.c
+index 72cde1c30f009be12f6fe74320fbafee5ad3ac21..1442ffe390e9c92ca3f76ce8318db5c6e8ce72eb 100644
+--- a/sys/src/9/port/ethervirtio10.c
++++ b/sys/src/9/port/ethervirtio10.c
+@@ -109,6 +109,8 @@ struct Vqueue
+ 
+ 	uint	nintr;
+ 	uint	nnote;
++	uint	nkysely;	/* valmistuneita, jotka löytyivät ilman keskeytystä */
++	uint	nnobuf;		/* vastaanottopuskurit loppuivat */
+ 
+ 	/* notify register */
+ 	Vio	notify;
+@@ -150,6 +152,23 @@ vhasroom(void *v)
+ 	return q->lastused != q->used->idx;
+ }
+ 
++/*
++ * odottaa jonon valmistunutta puskuria enintään sekunnin.  Keskeytys voi
++ * kadota (KVM-pilvet, vrt. OpenBSD:n vio(4), 7.9), ja vastaanotto jää
++ * odottamaan ilman sitä myös, kun puskurit loppuivat eikä renkaassa ole
++ * yhtään: kutsuja tarkistaa jonon ja täyttää renkaan joka kierroksella.
++ */
++static void
++vqodota(Vqueue *q)
++{
++	uint n;
++
++	n = q->nintr;
++	tsleep(q, vhasroom, q, 1000);
++	if(vhasroom(q) && q->nintr == n)
++		q->nkysely++;
++}
++
+ static void
+ vqnotify(Ctlr *ctlr, int x)
+ {
+@@ -221,7 +240,7 @@ txproc(void *v)
+ 
+ 			/* ring full, wait and retry */
+ 			if(!vhasroom(q))
+-				sleep(q, vhasroom, q);
++				vqodota(q);
+ 		}
+ 
+ 		/* slot is free, fill in descriptor */
+@@ -247,7 +266,7 @@ rxproc(void *v)
+ 	Vqueue *q;
+ 	Vused *u;
+ 	Block *b;
+-	int i, j;
++	int i, j, ennen;
+ 
+ 	edev = v;
+ 	ctlr = edev->ctlr;
+@@ -280,12 +299,15 @@ rxproc(void *v)
+ 
+ 	for(;;){
+ 		/* replenish receive ring */
++		ennen = q->avail->idx;
+ 		do {
+ 			i = q->avail->idx & (q->qmask >> 1);
+ 			if(blocks[i] != nil)
+ 				break;
+-			if((b = iallocbp(&ctlr->pool)) == nil)
++			if((b = iallocbp(&ctlr->pool)) == nil){
++				q->nnobuf++;
+ 				break;
++			}
+ 			blocks[i] = b;
+ 			j = (i << 1) | 1;
+ 			q->desc[j].addr = PADDR(b->rp);
+@@ -293,11 +315,13 @@ rxproc(void *v)
+ 			coherence();
+ 			q->avail->idx++;
+ 		} while(q->avail->idx != q->used->idx);
+-		vqnotify(ctlr, Vrxq);
++		/* ajastettu kierros ilman uusia puskureita ei herätä laitetta */
++		if(q->avail->idx != ennen)
++			vqnotify(ctlr, Vrxq);
+ 
+ 		/* wait for any packets to complete */
+ 		if(!vhasroom(q))
+-			sleep(q, vhasroom, q);
++			vqodota(q);
+ 
+ 		/* retire completed packets */
+ 		while((i = q->lastused) != q->used->idx) {
+@@ -360,7 +384,7 @@ vctlcmd(Ether *edev, uchar class, uchar cmd, uchar *data, int ndata)
+ 	q->avail->idx++;
+ 	vqnotify(ctlr, Vctlq);
+ 	while(!vhasroom(q))
+-		sleep(q, vhasroom, q);
++		vqodota(q);
+ 	q->lastused = q->used->idx;
+ 	q->avail->flags |= Rnointerrupt;
+ 
+@@ -444,8 +468,9 @@ ifstat(void *a, char *s, char *e)
+ 	for(i = 0; i < ctlr->nqueue; i++){
+ 		q = &ctlr->queue[i];
+ 		s = seprint(s, e,
+-			"vq%d %#p size %d avail->idx %d used->idx %d lastused %hud nintr %ud nnote %ud\n",
+-			i, q, q->qsize, q->avail->idx, q->used->idx, q->lastused, q->nintr, q->nnote);
++			"vq%d %#p size %d avail->idx %d used->idx %d lastused %hud nintr %ud nnote %ud npoll %ud nnobuf %ud\n",
++			i, q, q->qsize, q->avail->idx, q->used->idx, q->lastused, q->nintr, q->nnote,
++			q->nkysely, q->nnobuf);
+ 	}
+ 	return s;
+ }

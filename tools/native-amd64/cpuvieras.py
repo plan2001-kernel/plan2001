@@ -243,7 +243,10 @@ class CpuVieras:
                   "hostfwd=tcp:127.0.0.1:%d-:%d,hostfwd=tcp:127.0.0.1:%d-:%d"
                   % (self.cpuportti, CPU_PORTTI, self.authportti, AUTH_PORTTI)
                   + "".join(",hostfwd=tcp:127.0.0.1:%d-:%d" % (h, v) for v, h in self.portit.items()),
-                  "-device", "virtio-net-pci,netdev=ohj,mac=" + OHJAUS_MAC]
+                  "-device", "virtio-net-pci,netdev=ohj,mac=" + OHJAUS_MAC
+                  # PLAN2001_VIRTIONET=",disable-legacy=on": virtio 1.0 -kortti
+                  # (ethervirtio10) legacy-ajurin (ethervirtio) sijaan
+                  + os.environ.get("PLAN2001_VIRTIONET", "")]
         for i, mac in enumerate(testi_nicit):
             verkko += ["-netdev", "hubport,id=t%d,hubid=%d" % (i, 10 + i),
                        "-device", "virtio-net-pci,netdev=t%d,mac=%s" % (i, mac)]
