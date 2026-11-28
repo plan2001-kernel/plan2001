@@ -39,6 +39,7 @@ none.
 
 ## Tests
 
-`tools/test/run ethergw` (only when named) tests `aux/ethernetd` and
-`aux/etherws` on `tools/gateway -n`; `tools/test/run net` and
-`tools/test/etherclient` test the switch, DHCP, ARP, ping and NAT.  A public gateway can use the same `tools/gateway` with a TAP and host NAT.
+`tools/test/accounts` tests `aux/ethernetd`'s session sign-in through
+`aux/etherws` (a valid, forged and malformed session, the machine origin,
+concurrent checks); `tools/test/run net` tests the switch, DHCP, ARP, ping
+and NAT.  A public gateway can use the same `tools/gateway` with a TAP and host NAT.
