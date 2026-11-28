@@ -145,6 +145,7 @@ struct Net
 static char *accountsrv = "accountd";
 static char *exportroot = "/";
 static char *exportpat;
+static char *eventservice; /* optional owner-only local 9P service */
 static int fport = 564;
 static int egress;
 static char *srvname = "ethernetd";
@@ -1047,7 +1048,7 @@ netsetup(void)
 static void
 usage(void)
 {
-	fprint(2, "usage: aux/ethernetd -x pattern [-a accountsrv] [-s srvname] [-n net] [-f port] [-X root] [-e] [-g gate ifc] [-D resolver]... [-m max] [-i idle] [-R rate] [-l] [-v]\n");
+	fprint(2, "usage: aux/ethernetd -x pattern [-a accountsrv] [-s srvname] [-n net] [-f port] [-X root] [-E service] [-e] [-g gate ifc] [-D resolver]... [-m max] [-i idle] [-R rate] [-l] [-v]\n");
 	threadexitsall("usage");
 }
 
@@ -1061,7 +1062,7 @@ static void
 exportcall(char *adir)
 {
 	char ldir[40], path[64], raddr[64], *p, *tok;
-	int lcfd, dfd, l, i, slot, pid, pfd[2];
+	int lcfd, dfd, l, i, slot, pid, pfd[2], ev;
 	uchar ip[IPaddrlen];
 	Conn *c;
 
@@ -1127,9 +1128,26 @@ exportcall(char *adir)
 		/* nothing else of this process's: the other machines' calls, the pkt interface, the srv pipes */
 		for(i = 4; i < 1024; i++)
 			close(i);
-		/* exportfs serves fds 0 and 1: the call's, once asuser has read the session from 0 */
-		p = smprint("exec /bin/exportfs -r %q%s%q <[0=3] >[1=3] >[2]/dev/null",
-			exportroot, exportpat != nil ? " -P " : "", exportpat != nil ? exportpat : "");
+		/* Only the host owner opens the raw service channel. Mount it
+		 * after asuser has changed identity; exportfs exports the mounted
+		 * files, never the channel or /srv. The optional service must
+		 * trust the kernel-generated attach user on this private channel.
+		 */
+		ev = -1;
+		if(eventservice != nil){
+			ev = open(eventservice, ORDWR);
+			if(ev >= 0 && ev != 4){
+				i = dup(ev, 4);
+				close(ev);
+				ev = i;
+			}
+			if(ev < 0)
+				elog("event service: %r");
+		}
+		p = smprint("%sexec /bin/exportfs -r %q%s%q <[0=3] >[1=3] >[2]/dev/null%s",
+			ev >= 0 ? "/bin/mount -n /fd/4 /n/events >[2]/dev/null; " : "",
+			exportroot, exportpat != nil ? " -P " : "", exportpat != nil ? exportpat : "",
+			ev >= 0 ? " >[4=]" : "");
 		execl("/bin/auth/asuser", "asuser", "/bin/rc", "-c", p, nil);
 		_exits("exec");
 	default:
@@ -1207,6 +1225,11 @@ threadmain(int argc, char **argv)
 		break;
 	case 'x':
 		exportpat = EARGF(usage());
+		break;
+	case 'E':
+		eventservice = EARGF(usage());
+		if(strncmp(eventservice, "/srv/", 5) != 0 || strchr(eventservice+5, '/') != nil)
+			usage();
 		break;
 	case 'e':
 		egress = 1;
