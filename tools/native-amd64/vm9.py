@@ -84,6 +84,9 @@ class Kone:
         self.lokitiedosto = None
         # QMP: koneen ohjaus (lopetus, tila) ilman sarjakonsolia
         self.qmppolku = os.path.join(self.tyohak, "qmp.sock") if qmp else None
+        # vain bootstrap-9frontille (kaynnista_9front): Plan2001:n omien
+        # kuvien testeissä syötteen katoaminen on vika, jota ei peitetä
+        self.tarkista_syote = False
 
     def komento(self):
         muuttujat = os.path.join(self.tyohak, "vars.fd")
@@ -207,14 +210,44 @@ class Kone:
         loppu = "P2L" + tunnus
         rivi = ("echo P2A^%s; { %s } </dev/null; echo P2L^%s^' '^$status^' 'P2Z\n"
                 % (tunnus, komento, tunnus))
-        self.laheta(rivi)
-        self.odota(re.escape(alku) + r"\r?\n", aikaraja)
+        if self.tarkista_syote:
+            self._kirjoita_rivi(rivi, alku, aikaraja)
+        else:
+            self.laheta(rivi)
+            self.odota(re.escape(alku) + r"\r?\n", aikaraja)
         m = self.odota(re.escape(loppu) + r" ?(.*?) P2Z", aikaraja)
         tuloste = self.kaikki_ennen(m)
         status = m.group(1).decode("latin-1").strip()
         if status and not sallittu_virhe:
             raise VirheVM("komento epäonnistui (%s): %s\n%s" % (status, komento, tuloste[-3000:]))
         return tuloste, status
+
+    def _kirjoita_rivi(self, rivi, alku, aikaraja):
+        """
+        Kirjoita rc-rivi bootstrap-9frontille niin, ettei syötteen katoaminen
+        (#62) riko ajoa.  Sen kbdfs (lukittu, ilman kbdfs-cooked-input.diffiä)
+        hukkaa merkin rivinvaihdon jälkeen ja koko rivin, jos rc ei juuri lue
+        konsolia (lineproc: nbsendp), eikä se kaiuta syötettä sarjaportille.
+        Koko komento kulkee siksi yhdessä rc-muuttujassa, ja rc ajaa sen vain,
+        jos sen md5 on isännän laskema: vahingoittunut rivi ei käynnisty
+        lainkaan.  Jos aloitusmerkkiä ei tule, rivi kirjoitetaan uudelleen.
+        """
+        komento = rivi.rstrip("\n")
+        tiiviste = hashlib.md5(komento.encode()).hexdigest()
+        teksti = "p2c='%s'; if(~ `{echo -n $p2c | md5sum} %s) eval $p2c" % (
+            komento.replace("'", "''"), tiiviste)
+        if len(teksti) >= 256:
+            # lineproc katkaisee rivin 256 merkin kohdalta
+            raise VirheVM("rivi on liian pitkä bootstrap-konsolille (%d merkkiä)" % len(teksti))
+        for yritys in range(5):
+            time.sleep(0.5)  # rc ehtii takaisin lukemaan konsolia
+            self.laheta(teksti + "\n")
+            try:
+                self.odota(re.escape(alku) + r"\r?\n", min(aikaraja, 60))
+                return
+            except VirheVM:
+                continue
+        raise VirheVM("bootstrap-konsoli hukkasi rivin viidesti: %s" % komento[:200])
 
     def kaikki_ennen(self, m):
         # odota() on jo kuluttanut puskurin; tuloste haetaan kokonaislokista
@@ -322,7 +355,10 @@ def kaynnista_9front(vm, aikaraja=300):
             vm.laheta("glenda\n")
         elif i in (4, 5):
             # rio ei käynnisty, kun konsoli on sarjaportissa ilman näyttöä;
-            # kehote riittää komentojen ajoon
+            # kehote riittää komentojen ajoon.  Tämä on lukittu
+            # bootstrap-9front, jonka kbdfs hukkaa syötettä (#62): aja()
+            # tarkistaa siksi kirjoittamansa rivit (Kone._kirjoita_rivi)
+            vm.tarkista_syote = True
             return m.group(0).decode().strip()
         elif i == 6:
             raise VirheVM("/boot/boot kysyy juurta: bootargs ei kelpaa\n" +
