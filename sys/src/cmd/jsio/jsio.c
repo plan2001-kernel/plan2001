@@ -419,7 +419,15 @@ request(Req *r)
 		w->fd = fd;
 		w->off = strtoll(f[3], nil, 0);
 		w->n = atol(f[4]);
-		proccreate(waitproc, w, Stack);
+		if(proccreate(waitproc, w, Stack) < 0){
+			close(fd);
+			free(w);
+			qlock(&waitlk);
+			nwait--;
+			qunlock(&waitlk);
+			werrstr("cannot start blocking read");
+			fail(f[0]);
+		}
 	}else if(strcmp(f[1], "write") == 0 && nf == 4){
 		if(ndata > Maxio){
 			werrstr("write too large");

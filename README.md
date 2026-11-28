@@ -86,6 +86,7 @@ A web application such as Room is a **Plan2001 user program running on a real WA
 - **Network and identity.** The machine's Ethernet is a WebSocket to its own origin's `/ether` (`aux/etherws`, `aux/ethernetd`). The first message is the page's `auth/accountd` session (`session TOKEN`); `aux/ethernetd` checks it with accountd, gives the machine an address on 100.64.0.0/24 and checks the session again every minute: logout, expiry, revocation or a disabled account end the link and its file service. A session is network permission only.
 - **File service.** TCP from a machine to its gateway's port 564 reaches the server's stack; `aux/ethernetd` serves the call with `exportfs` as the machine's account, started by `auth/asuser` with that session (a genuine dp9ik exchange, the user's own namespace; never the host owner's). A required export pattern (`-x`) limits what is exported (Room: `/usr`, `/adm/users`, `/adm/room/rooms`; without one the user's whole namespace, `/net` included, would be exported); the file server's owner and group permissions decide the rest, so a native rc or Drawterm write and the browser see the same files. One long-lived mount per page, at most four exports a machine and one new call a second (four at once), hung up with its link. A group change (membership revocation) applies at the next open; a removed member cannot read even within an established session.
 - **No routing beyond the server.** Without `-e` a browser machine reaches only this file service: not the Internet, the WireGuard administration network or other services. `-e` restores the historical restricted egress (TCP 80, 443, 9418, DNS to fixed resolvers) and is not used for Room.
+- **Change hints.** An optional private native 9P service is mounted by `aux/ethernetd -E /srv/SERVICE` after `auth/asuser` changes identity, at `/n/events`, and exported through the existing restricted mount. Only the host owner opens the raw service pipe; the service may trust local kernel-generated attach identities only while that pipe stays private. JSFS `wait(fid, offset, count)` performs an ordinary blocking read in a bounded separate JSIO process, holding a duplicate descriptor until completion; cancel through the service before closing the fid. No kernel, CWFS, 9P protocol or extra WebSocket mechanism is required. Room documents its event and control files, canonical reaction records and private monotonic read cursors in its own root README. External writers may explicitly signal invalidation; otherwise their writes appear on open, resume, reconnect or refresh.
 - **Assets.** `9wasm32.wasm`, `app.fs`, `platform.js` and `jsfs.js` (and their `.gz`) are served versioned (`?v=`) and cached; the page is cross-origin isolated (COOP/COEP) for the machine's shared memory. Files read are cached only in memory; the server's files are authoritative.
 
 ## Network access and administration
@@ -113,18 +114,17 @@ A public Plan2001 server exposes its web service and nothing else. Native admini
 
 - The initial native AMD64 path is accepted only when UEFI firmware -> Plan2001 EFI loader -> valid BootInfo v1 -> **9front AMD64 kernel -> 9front init -> usable 9front userland** works, including an installed offline UEFI/ESP boot. Loader messages or coloured framebuffer marks alone do not meet acceptance.
 - The existing WASM32 build and browser boot must remain functional, including its existing UI, process execution, Rio input/touch semantics, OPFS and ISO/live workflow.
-- Run targeted builds and smoke/integration tests **locally**. For QEMU KVM with TCG fallback use `-machine accel=kvm:tcg` (or `-accel kvm -accel tcg` where supported), **not** `-accel kvm:tcg`. Include OVMF for AMD64 UEFI tests and Chromium for browser tests. Do not commit diagnostic artifacts. CI stays disabled.
+- Run targeted builds and smoke/integration tests **locally**. For QEMU KVM with TCG fallback use `-machine accel=kvm:tcg` (or `-accel kvm -accel tcg` where supported), **not** `-accel kvm:tcg`. Include OVMF for AMD64 UEFI tests and Chromium for browser tests. Do not commit diagnostic artifacts. GitHub Actions runs focused builds and functional checks.
 - ARM64 is a current target: validate QEMU virt boot and bcm64/Pi4 builds locally. RISC-V64 is optional future work and is excluded from current build, release and acceptance requirements.
 
 ## Continuous integration policy
 
-**CI is disabled until the project owner explicitly decides to enable it.** There are no GitHub Actions workflows in the repository, and none are to be created, enabled or imported during normal development or migration.
-
-- Agents must complete assigned software work without requesting CI decisions or pausing for CI approval. Integration tasks may be developed concurrently on isolated branches, with shared ABI ownership assigned to exactly one branch; a single integration owner merges and tests the combined result after the individual branches are ready.
-- Agents may write, update and run appropriate **local tests**, but must not create GitHub Actions workflows, automatic test triggers, required CI checks, matrices or external CI pipelines.
-- No feature-branch or temporary CI workflows are permitted while CI is disabled. Do not import CI configuration from the source repositories.
-- If the owner later enables CI, prefer one centrally maintained minimal workflow; its scope and triggers must be defined by the owner separately.
-- Do not commit logs, reports, screenshots, hashes or other work documentation to the repository.
+The owner has enabled GitHub Actions for focused builds and functional tests.
+Use one small centrally maintained workflow per repository. Room integration
+checks compile the affected user-space sources and run focused transport and
+storage tests; do not build unrelated targets or run broad regression campaigns.
+CI does not authorize merging or deployment. Never commit test output, logs,
+screenshots or work reports.
 
 ## Repository and agent policy
 
