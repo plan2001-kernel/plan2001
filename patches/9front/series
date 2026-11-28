@@ -43,3 +43,4 @@ iproute-lookupskip.diff		integration	local
 pc64-wg.diff			integration	local
 
 kbdfs-text-terminal.diff	integration	local
+keyfs-admin-service.diff	integration	local

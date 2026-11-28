@@ -128,7 +128,7 @@ def _rc_lainaus(s):
     return "'" + s.replace("'", "''") + "'"
 
 
-def provisiointiskripti(tunnus, ohjaus_mac, userpw):
+def provisiointiskripti(tunnus, ohjaus_mac, userpw, keyfs_service=False):
     """
     rc-skripti, jonka vieras ajaa sdE1:ltä.  Vastaukset auth/wrkeylle ja
     auth/changeuserille kulkevat putken kautta (readcons lukee /dev/consia
@@ -192,7 +192,7 @@ def provisiointiskripti(tunnus, ohjaus_mac, userpw):
         "for(i in `{seq 1 100}) if(! test -e /srv/factotum) sleep 0.1",
         "test -e /srv/factotum || virhe factotum",
         "vaihe keyfs",
-        "auth/keyfs -m /mnt/keys /adm/keys >[2]/tmp/keyfs.log &",
+        "auth/keyfs " + ("-s keyfs " if keyfs_service else "") + "-m /mnt/keys /adm/keys >[2]/tmp/keyfs.log &",
         "for(i in `{seq 1 100}) if(! ns | grep -s ' /mnt/keys( |$)') sleep 0.1",
         "ns | grep -s ' /mnt/keys( |$)' || virhe keyfs",
         "vaihe changeuser",
@@ -219,7 +219,7 @@ class CpuVieras:
     """
 
     def __init__(self, levy, tyohak, loki, muoto="raw", testi_nicit=(), muisti="2048", cpu="2",
-                 laji="hd", kone="q35", provisiointi=("hd", "sdE1"), lisalevyt=(), lisaportit=()):
+                 laji="hd", kone="q35", provisiointi=("hd", "sdE1"), lisalevyt=(), lisaportit=(), keyfs_service=False):
         self.tyohak = tyohak
         self.cpuportti = vapaa_portti()
         self.authportti = vapaa_portti()
@@ -230,7 +230,7 @@ class CpuVieras:
         os.write(fd, (self.userpw + "\n").encode())
         os.close(fd)
         self.kiinnike = os.path.join(tyohak, "provisiointi.img")
-        data = provisiointiskripti(self.tunnus, OHJAUS_MAC, self.userpw).encode()
+        data = provisiointiskripti(self.tunnus, OHJAUS_MAC, self.userpw, keyfs_service).encode()
         # rc lopettaa exit-riviin; täyte rivinvaihtoja eikä nollia
         koko = max(1 << 20, (len(data) + 511) & ~511)
         fd = os.open(self.kiinnike, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

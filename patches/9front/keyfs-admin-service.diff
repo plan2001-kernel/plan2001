@@ -1,0 +1,148 @@
+diff --git a/sys/src/cmd/auth/keyfs.c b/sys/src/cmd/auth/keyfs.c
+index 2cde94b555464a90abd25cc8a2d41e4c799f3b07..9052a7b4f25d1335fb61ac59c9b4ddd88e1e8d46 100644
+--- a/sys/src/cmd/auth/keyfs.c
++++ b/sys/src/cmd/auth/keyfs.c
+@@ -138,10 +138,39 @@ char 	*(*fcalls[])(Fid*) = {
+ static void
+ usage(void)
+ {
+-	fprint(2, "usage: %s [-p] [-r] [-m mtpt] [-w warn] [keyfile]\n", argv0);
++	fprint(2, "usage: %s [-p] [-r] [-m mtpt] [-s srv] [-w warn] [keyfile]\n", argv0);
+ 	exits("usage");
+ }
+ 
++/* keyfs's attach trusts its caller: access is restricted by the srv file. */
++static void
++publish(char *name, int pipefd)
++{
++	char owner[ANAMELEN], *path;
++	int fd, n;
++
++	fd = open("#c/hostowner", OREAD);
++	if(fd < 0)
++		error("can't read host owner: %r");
++	n = read(fd, owner, sizeof owner-1);
++	close(fd);
++	if(n <= 0)
++		error("can't read host owner");
++	owner[n] = 0;
++	if(strcmp(owner, getuser()) != 0)
++		error("only host owner may publish keyfs");
++	path = smprint("/srv/%s", name);
++	fd = create(path, OWRITE|OCEXEC, 0600);
++	if(fd < 0)
++		error("can't publish %s: %r", path);
++	if(fprint(fd, "%d", pipefd) < 0){
++		remove(path);
++		error("can't post %s: %r", path);
++	}
++	close(fd);
++	free(path);
++}
++
+ static int
+ haveaeskey(void)
+ {
+@@ -151,15 +180,21 @@ haveaeskey(void)
+ void
+ main(int argc, char *argv[])
+ {
+-	char *mntpt;
++	char *mntpt, *srv;
+ 	int p[2];
+ 
+ 	fmtinstall('W', weirdfmt);
+ 	mntpt = "/mnt/keys";
++	srv = nil;
+ 	ARGBEGIN{
+ 	case 'm':
+ 		mntpt = EARGF(usage());
+ 		break;
++	case 's':
++		srv = EARGF(usage());
++		if(*srv == 0 || strchr(srv, '/') != nil || strcmp(srv, ".") == 0 || strcmp(srv, "..") == 0)
++			usage();
++		break;
+ 	case 'p':
+ 		usepass = 1;
+ 		break;
+@@ -212,8 +247,17 @@ main(int argc, char *argv[])
+ 		error("fork");
+ 	default:
+ 		close(p[1]);
+-		if(mount(p[0], -1, mntpt, MREPL|MCREATE, "") == -1)
++		if(srv != nil)
++			publish(srv, p[0]);
++		if(mount(p[0], -1, mntpt, MREPL|MCREATE, "") == -1){
++			if(srv != nil){
++				char *path;
++				path = smprint("/srv/%s", srv);
++				remove(path);
++				free(path);
++			}
+ 			error("can't mount: %r");
++		}
+ 		exits(0);
+ 	}
+ }
+diff --git a/rc/bin/cpurc b/rc/bin/cpurc
+index b319d11b04f958ab12f131befe8761a1ae5ac01b..ea2029feacde29b167825fa1afa4afd8198997ab 100755
+--- a/rc/bin/cpurc
++++ b/rc/bin/cpurc
+@@ -102,7 +102,7 @@ if(@{
+ 	exit 'no'
+ }){
+ 	# cpu+auth server
+-	auth/keyfs -wp -m /mnt/keys /adm/keys
++	auth/keyfs -wp -s keyfs -m /mnt/keys /adm/keys
+ 	aux/listen -q -t /rc/bin/service.auth -d $serviced tcp
+ }
+ if not {
+diff --git a/lib/namespace b/lib/namespace
+index 40218f243febef385334e540e212f3d4c17b5e37..4e571aa4048b1ed8bba3effcc1441134f39479e2 100644
+--- a/lib/namespace
++++ b/lib/namespace
+@@ -18,6 +18,8 @@ mount -a /srv/slashmnt /mnt
+ mount -a /srv/mntexport /mnt/exportfs
+ 
+ # authentication
++# Optional host-owner service; opening it is the access check.
++mount -c /srv/keyfs /mnt/keys
+ mount /srv/factotum /mnt/factotum factotum
+ bind -q /mnt/factotum/factotum /mnt/factotum
+ 
+diff --git a/sys/man/4/keyfs b/sys/man/4/keyfs
+index 960598f864dc5375cc8fe17e956427d7837d74d0..e995474ec250def0136c9c8262e76435fe39a5f9 100644
+--- a/sys/man/4/keyfs
++++ b/sys/man/4/keyfs
+@@ -14,6 +14,9 @@ keyfs, warning \- authentication database files
+ .BI -m mntpt
+ ]
+ [
++.BI -s srv
++]
++[
+ .B -r
+ ]
+ [
+@@ -50,6 +53,20 @@ which is by default read from
+ (see
+ .IR rtc (3)).
+ With option
++.BR -s ,
++.I keyfs
++also posts the same connection at
++.BI /srv/ srv
++before mounting it.
++Only the host owner may publish this service; its file is owned by the
++host owner with mode 0600.  Other host-owner namespaces may mount this
++service at
++.BR /mnt/keys ,
++without starting another keyfs or reopening the database.
++The service file is the access boundary: keyfs does not authenticate attaches.
++No service is published by default.
++.PP
++With option
+ .BR -p ,
+ .I keyfs
+ prompts for a password from which the key is derived.
