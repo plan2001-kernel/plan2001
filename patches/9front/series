@@ -8,6 +8,7 @@
 hjfs-auth.diff			fix		local; upstream candidate
 arp-first-request.diff		fix		local; upstream candidate
 sdvirtio-scsi-lun.diff		fix		local; upstream candidate
+sdiahci-reset-drdy.diff		fix		local; upstream candidate
 kbdfs-cooked-input.diff		fix		local; upstream candidate
 rcpu-script-read.diff		fix		local; upstream candidate
 keyfs-rename-pakhash.diff	fix		local; upstream candidate

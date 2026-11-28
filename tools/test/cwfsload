@@ -1,0 +1,1179 @@
+#!/usr/bin/env python3
+"""
+cwfs:n kuormatoisto (#56): plan2001.comin kokoonpano ja liikenne QEMU:ssa,
+kunnes cwfs kaatuu tai jumittuu tai aika loppuu.  Ei tuotantopalvelinta.
+
+Vieras (tools/native-amd64/cpuvieras.py) kuten OCI:n VM.Standard.E2.1.Micro:
+
+- muisti 1 GiB, 2 suoritinta (--muisti, --cpu); juuri virtio-scsi:n
+  target 0 LUN 1 (sd00) kuten OCI:n paravirtualisoitu levy, provisiointi
+  target 1 LUN 0 (sd01); --cpuquota rajoittaa QEMU:n suoritinajan
+  (systemd-run, kuten OCI:n 1/8 OCPU:n purskeraja)
+- levykuva tools/native-amd64/mkimage --disk sd00 tuotannon omasta
+  käännöksestä (sama ydin, bootfs:n cwfs64x ja käyttäjätila)
+- palvelut kuten plan2001.comissa (Roomin deploy/plan2001.com): tlssrv
+  portissa 443 (roomfront: /room/ ja /account roomhttp:lle isäntäomistajana,
+  muu rc-httpd:lle käyttäjänä none), rc-httpd portissa 80 (none),
+  auth/accountd (-g 'room*', cwfs:n konsoli), Roomin natiivit ohjelmat
+  (roomhttp, roomapi, roomwrite, exportfs-unioni) ja authsrv 567
+
+Kuorma isännältä (QEMU:n loopback-porttiohjaukset), rinnakkain:
+
+- Room-käyttäjät: passkey-tilin luonti kutsulla (WebSocket /account),
+  kirjautuminen, /api/me, viestilistat, teksti- ja kuvaviestit (PNG 1 KiB -
+  2 MiB), kuvat, kuittaukset, omien poisto; osa pyynnöistä katkaistaan
+  kesken (otsakkeet, runko, vastaus; TCP RST)
+- staattinen HTTPS ja HTTP (rc-httpd), Roomin sivut
+- skannerien kaltaiset yhteydet: pelkkä TCP, puolikas ClientHello,
+  kättely ilman pyyntöä, roskaa, hitaat otsakkeet
+- tilien vaihtuvuus: uusia käyttäjiä ja huoneita, liittymisiä, accountd:n
+  rename (cwfs:n konsolikomennot); yksi suuri huone kaikille
+- natiivi rcpu (9pterm): lyhyitä komentoja, osa katkaistaan (-T)
+- vieraan sisäinen tiedostojärjestelmäkuorma (luonti, uudelleennimeäminen,
+  poisto, hakemistojen luku, du) ja cwfs:n dump --dump minuutin välein
+
+Valvonta: sarjakonsoli koko ajan (corrupt fid chain, suicide, fid in use,
+incall queue full, out of files, panic), terveystarkistus rcpu:lla ja
+HTTP:llä.  Kaatuessa tai jumittuessa kuorma pysäytetään, sarjakonsolin
+pelastusshellillä (^T^T r) kerätään prosessit, cwfs-prosessien acid-pinot
+ja kmesg, QMP:llä tallennetaan vieraan muisti (--ei-muistivedosta estää)
+ja levykuva säilytetään.  Tulokset: --lokit (oletus
+~/.cache/plan2001/cwfsload/ajo-AIKA): sarja.log, tapahtumat.log,
+diagnoosi.log, yhteenveto.txt; paluuarvo 0 (aika loppui, ei kaatumista),
+1 (cwfs kaatui tai jumittui), 2 (testin oma virhe).
+
+    tools/test/cwfsload --kuva KUVA [--kesto MIN] [--room HAK] [--lokit HAK]
+                        [--muisti MiB] [--cpu N] [--cpuquota PROS]
+                        [--kayttajat N] [--maxkayttajat N] [--dump MIN] [--keep]
+
+Kuva: tools/native-amd64/mkimage --disk sd00 --console 0.  Room-lähde:
+--room (oletus ../room tämän puun vieressä).  Vaatii 9ptermin
+(NINEPTERM), mtoolsin ja Pythonin cryptography-paketin.
+"""
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import random
+import re
+import secrets
+import shutil
+import socket
+import ssl
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import zlib
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.x509.oid import NameOID
+
+sys.dont_write_bytecode = True
+TAMA = os.path.dirname(os.path.abspath(__file__))
+JUURI = os.path.dirname(os.path.dirname(TAMA))
+sys.path.insert(0, os.path.join(JUURI, "tools", "native-amd64"))
+import vm9  # noqa: E402
+import cpuvieras  # noqa: E402
+
+RP = "localhost"
+ORIGIN = "https://localhost"
+AUTHDOM = "9front"
+BOOTSTRAP_HUONE = "load0"
+
+# Sarjakonsolin rivit: kaatuminen pysäyttää kuorman, havainto kirjataan
+KAATUMINEN = [
+    re.compile(rb"corrupt fid chain"),
+    re.compile(rb"cwfs[^\r\n]*suicide"),
+    re.compile(rb"panic: "),
+]
+HAVAINTO = [
+    re.compile(rb"fid in use"),
+    re.compile(rb"incall queue full"),
+    re.compile(rb"out of files"),
+    re.compile(rb"suicide"),
+    re.compile(rb"sys: trap"),
+    re.compile(rb"cwfs[^\r\n]*: "),
+    re.compile(rb"no free buffers|out of memory|no memory"),
+]
+
+
+def b64u(b):
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def rc_lainaus(s):
+    return "'" + s.replace("'", "''") + "'"
+
+
+# --- kirjanpito ---
+
+class Tilasto:
+    """Säieturvalliset laskurit toiminnoittain ja tapahtumaloki."""
+
+    def __init__(self, lokihak):
+        self.lukko = threading.Lock()
+        self.ok = {}
+        self.virhe = {}
+        self.viive = {}
+        self.viimeinen = {}
+        self.alku = time.time()
+        self.tapahtumat = open(os.path.join(lokihak, "tapahtumat.log"), "a", buffering=1)
+
+    def kirjaa(self, toiminto, onnistui, kesto=0.0, tieto=""):
+        with self.lukko:
+            d = self.ok if onnistui else self.virhe
+            d[toiminto] = d.get(toiminto, 0) + 1
+            n, s, m = self.viive.get(toiminto, (0, 0.0, 0.0))
+            self.viive[toiminto] = (n + 1, s + kesto, max(m, kesto))
+            if not onnistui and tieto:
+                self.viimeinen[toiminto] = tieto[:300]
+
+    def tapahtuma(self, teksti):
+        rivi = "%s %7.0f s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), time.time() - self.alku, teksti)
+        with self.lukko:
+            self.tapahtumat.write(rivi + "\n")
+        print(rivi)
+        sys.stdout.flush()
+
+    def raportti(self):
+        with self.lukko:
+            rivit = ["%-24s %8s %8s %9s %9s" % ("toiminto", "ok", "virhe", "ka. s", "max s")]
+            for t in sorted(set(self.ok) | set(self.virhe)):
+                n, s, m = self.viive.get(t, (0, 0.0, 0.0))
+                rivit.append("%-24s %8d %8d %9.2f %9.2f" % (t, self.ok.get(t, 0), self.virhe.get(t, 0),
+                                                           s / n if n else 0, m))
+            if self.viimeinen:
+                rivit.append("")
+                rivit.append("viimeisimmät virheet:")
+                for t, v in sorted(self.viimeinen.items()):
+                    rivit.append("  %s: %s" % (t, v.replace("\n", " | ")))
+            return "\n".join(rivit)
+
+
+class Sarja:
+    """
+    Sarjakonsoli tyhjennetään koko kuorman ajan (QEMU:n stdout-putki ei saa
+    täyttyä) ja sen rivit verrataan kaatumis- ja havaintomalleihin.
+    """
+
+    def __init__(self, vm, tilasto):
+        self.vm = vm
+        self.tilasto = tilasto
+        self.seis = threading.Event()
+        self.kaatui = threading.Event()
+        self.kaatumisrivi = ""
+        self.havainnot = {}
+        self.vajaa = b""
+        self.saie = threading.Thread(target=self._aja, daemon=True)
+
+    def kaynnista(self):
+        self.saie.start()
+
+    def pysayta(self):
+        self.seis.set()
+        self.saie.join(10)
+
+    def _aja(self):
+        while not self.seis.is_set():
+            ennen = len(self.vm.kaikki)
+            try:
+                self.vm._lue(0.5)
+            except vm9.VirheVM as e:
+                self.kaatumisrivi = "QEMU: %s" % e
+                self.kaatui.set()
+                return
+            uusi = self.vm.kaikki[ennen:]
+            # muisti ei kasva rajatta: loki on levyllä
+            if len(self.vm.kaikki) > (4 << 20):
+                self.vm.kaikki = self.vm.kaikki[-(1 << 20):]
+            self.vm.puskuri = self.vm.puskuri[-65536:]
+            if uusi:
+                self._rivit(uusi)
+
+    def _rivit(self, data):
+        data = self.vajaa + data
+        rivit = data.split(b"\n")
+        self.vajaa = rivit.pop()
+        if len(self.vajaa) > 4096:
+            rivit.append(self.vajaa)
+            self.vajaa = b""
+        for r in rivit:
+            for m in KAATUMINEN:
+                if m.search(r):
+                    teksti = r.decode("latin-1").strip()
+                    self.tilasto.tapahtuma("KAATUMINEN: " + teksti)
+                    if not self.kaatui.is_set():
+                        self.kaatumisrivi = teksti
+                        self.kaatui.set()
+                    break
+            else:
+                for m in HAVAINTO:
+                    if m.search(r):
+                        avain = m.pattern.decode("latin-1")
+                        self.havainnot[avain] = self.havainnot.get(avain, 0) + 1
+                        if self.havainnot[avain] <= 20:
+                            self.tilasto.tapahtuma("havainto: " + r.decode("latin-1").strip())
+                        break
+
+
+# --- HTTPS/HTTP ja WebSocket isännältä ---
+
+def tls_konteksti():
+    k = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    k.check_hostname = False
+    k.verify_mode = ssl.CERT_NONE
+    return k
+
+
+TLS = tls_konteksti()
+
+
+def rst(s):
+    """Yhteys poikki TCP RST:llä (SO_LINGER 0), kuten katkeava mobiiliyhteys."""
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+    except OSError:
+        pass
+    try:
+        s.close()
+    except OSError:
+        pass
+
+
+def yhdista(portti, tls, aikaraja):
+    raaka = socket.create_connection(("127.0.0.1", portti), timeout=aikaraja)
+    if not tls:
+        return raaka, raaka
+    try:
+        return TLS.wrap_socket(raaka, server_hostname=RP), raaka
+    except Exception:
+        rst(raaka)
+        raise
+
+
+def pyynto(portti, metodi, polku, tls=True, otsakkeet=None, runko=b"", aikaraja=120, katkaisu=None):
+    """
+    Yksi HTTP/1.1-pyyntö (Connection: close).  katkaisu: None, "otsakkeet"
+    (puolet otsakkeista), "runko" (otsakkeet ja puolet rungosta) tai
+    "vastaus" (luetaan vastauksen alku); niissä yhteys katkaistaan RST:llä.
+    Palauttaa (status, otsakkeet, runko); katkaisussa status on 0.
+    """
+    s, raaka = yhdista(portti, tls, aikaraja)
+    try:
+        h = "%s %s HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" % (metodi, polku)
+        for k, v in (otsakkeet or {}).items():
+            h += "%s: %s\r\n" % (k, v)
+        if runko or metodi == "POST":
+            h += "Content-Length: %d\r\n" % len(runko)
+        h = (h + "\r\n").encode()
+        if katkaisu == "otsakkeet":
+            s.sendall(h[:max(1, len(h) // 2)])
+            time.sleep(random.uniform(0, 0.5))
+            rst(raaka)
+            return 0, {}, b""
+        s.sendall(h)
+        if katkaisu == "runko":
+            if runko:
+                s.sendall(runko[:len(runko) // 2])
+            time.sleep(random.uniform(0, 0.5))
+            rst(raaka)
+            return 0, {}, b""
+        if runko:
+            s.sendall(runko)
+        if katkaisu == "vastaus":
+            try:
+                s.recv(random.choice((1, 16, 200)))
+            except (OSError, ssl.SSLError):
+                pass
+            rst(raaka)
+            return 0, {}, b""
+        data = b""
+        while True:
+            try:
+                x = s.recv(65536)
+            except ssl.SSLError as e:
+                # tlssrv sulkee ilman close_notifya
+                if "EOF" in str(e) or "UNEXPECTED" in str(e):
+                    break
+                raise
+            if not x:
+                break
+            data += x
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+    paa, _, runko = data.partition(b"\r\n\r\n")
+    rivit = paa.decode("latin-1").split("\r\n")
+    if not rivit or not rivit[0].startswith("HTTP/"):
+        raise IOError("ei HTTP-vastausta: %r" % data[:120])
+    status = int(rivit[0].split()[1])
+    ots = {}
+    for r in rivit[1:]:
+        k, _, v = r.partition(":")
+        ots[k.strip().lower()] = v.strip()
+    return status, ots, runko
+
+
+class WSS:
+    """Roomin /account-WebSocket TLS:n yli (roomfront -> roomhttp -> etherws -> accountd)."""
+
+    def __init__(self, portti, aikaraja=120):
+        self.s, self.raaka = yhdista(portti, True, aikaraja)
+        key = base64.b64encode(os.urandom(16)).decode()
+        h = ("GET /account HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+             "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\nOrigin: %s\r\n\r\n" % (key, ORIGIN))
+        self.s.sendall(h.encode())
+        r = b""
+        while b"\r\n\r\n" not in r:
+            x = self.s.recv(1)
+            if not x:
+                break
+            r += x
+        self.status = r.split(b"\r\n")[0].decode("latin-1")
+        if " 101 " not in self.status:
+            self.close()
+            raise IOError("WebSocket: %s" % self.status)
+
+    def send(self, text):
+        d = text.encode()
+        n = len(d)
+        h = bytes([0x81]) + (bytes([0x80 | n]) if n < 126 else bytes([0x80 | 126]) + struct.pack(">H", n))
+        m = os.urandom(4)
+        self.s.sendall(h + m + bytes(c ^ m[i % 4] for i, c in enumerate(d)))
+
+    def _n(self, n):
+        b = b""
+        while len(b) < n:
+            x = self.s.recv(n - len(b))
+            if not x:
+                raise EOFError("WebSocket päättyi")
+            b += x
+        return b
+
+    def text(self):
+        while True:
+            b0, b1 = self._n(2)
+            n = b1 & 0x7f
+            if n == 126:
+                n = struct.unpack(">H", self._n(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", self._n(8))[0]
+            d = self._n(n)
+            if b0 & 0x0f == 8:
+                raise EOFError("WebSocket close")
+            if b0 & 0x0f == 1:
+                return d.decode()
+
+    def ask(self, line):
+        self.send(line)
+        return self.text()
+
+    def close(self, katkaise=False):
+        if katkaise:
+            rst(self.raaka)
+            return
+        try:
+            self.s.close()
+        except OSError:
+            pass
+
+
+class Passkey:
+    """Ohjelmistopasskey (P-256), kuten tools/test/accounts."""
+
+    def __init__(self):
+        self.key = ec.generate_private_key(ec.SECP256R1())
+        self.rawid = os.urandom(16)
+        self.id = b64u(self.rawid)
+
+    def cose(self):
+        n = self.key.public_key().public_numbers()
+        return (bytes([0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20]) + n.x.to_bytes(32, "big")
+                + bytes([0x22, 0x58, 0x20]) + n.y.to_bytes(32, "big"))
+
+    def authdata(self, at=False):
+        a = hashlib.sha256(RP.encode()).digest() + bytes([0x05 | (0x40 if at else 0)]) + struct.pack(">I", 0)
+        if at:
+            a += bytes(16) + struct.pack(">H", len(self.rawid)) + self.rawid + self.cose()
+        return a
+
+
+def clientdata(tyyppi, chal):
+    return json.dumps({"type": tyyppi, "challenge": chal, "origin": ORIGIN, "crossOrigin": False}).encode()
+
+
+def png(koko):
+    """Kelvollinen PNG, jonka koko on noin koko tavua (satunnainen, ei pakkaudu)."""
+    leveys = 256
+    korkeus = max(1, koko // (leveys * 3 + 1))
+    raaka = b"".join(b"\0" + os.urandom(leveys * 3) for _ in range(korkeus))
+
+    def pala(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + pala(b"IHDR", struct.pack(">IIBBBBB", leveys, korkeus, 8, 2, 0, 0, 0))
+            + pala(b"IDAT", zlib.compress(raaka, 0)) + pala(b"IEND", b""))
+
+
+class Kayttaja:
+    """Room-käyttäjä: passkey, istunto ja jäsenyydet."""
+
+    def __init__(self, testi, nimi):
+        self.t = testi
+        self.nimi = nimi
+        self.pk = Passkey()
+        self.token = None
+        self.huoneet = []
+        self.omat = {}          # huone -> omat viestit (seq)
+        self.lukko = threading.Lock()
+
+    def enroll(self, kutsu):
+        st, _, b = pyynto(self.t.https, "POST", "/room/api/enroll", otsakkeet=self.t.post_otsakkeet(),
+                          runko=json.dumps({"invite": kutsu, "name": self.nimi}).encode())
+        if st != 200:
+            raise IOError("enroll %s: %d %s" % (self.nimi, st, b[:200]))
+        koodi = json.loads(b)["invite"]
+        w = WSS(self.t.https)
+        try:
+            r = w.ask("challenge enroll " + koodi)
+            if not r.startswith("challenge "):
+                raise IOError("enroll-haaste: " + r)
+            chal = r.split(" ")[1]
+            a = self.pk.authdata(at=True)
+            r = w.ask("enroll %s %s %s %s -" % (koodi, self.pk.id, b64u(a),
+                                               b64u(clientdata("webauthn.create", chal))))
+        finally:
+            w.close()
+        if not r.startswith("ok "):
+            raise IOError("enroll %s: %s" % (self.nimi, r))
+        self.token = r.split(" ")[1]
+
+    def login(self):
+        w = WSS(self.t.https)
+        try:
+            r = w.ask("challenge login")
+            if not r.startswith("challenge "):
+                raise IOError("login-haaste: " + r)
+            a = self.pk.authdata()
+            cl = clientdata("webauthn.get", r.split(" ")[1])
+            sig = self.pk.key.sign(a + hashlib.sha256(cl).digest(), ec.ECDSA(hashes.SHA256()))
+            r = w.ask("login %s %s %s %s -" % (self.pk.id, b64u(a), b64u(cl), b64u(sig)))
+        finally:
+            w.close()
+        if not r.startswith("ok "):
+            raise IOError("login %s: %s" % (self.nimi, r))
+        f = r.split(" ")
+        self.token = f[1]
+        if len(f) > 2:
+            self.nimi = f[2]
+
+    def api(self, metodi, polku, runko=b"", tyyppi=None, katkaisu=None, aikaraja=120):
+        """Roomin API istunnolla; 401 kirjaa uudelleen sisään (rename, vanhentunut istunto) kerran."""
+        for yritys in (0, 1):
+            ots = {"Cookie": "p2session=%s" % self.token}
+            if metodi == "POST":
+                ots.update(self.t.post_otsakkeet())
+                if tyyppi:
+                    ots["Content-Type"] = tyyppi
+            st, h, b = pyynto(self.t.https, metodi, "/room" + polku, otsakkeet=ots, runko=runko,
+                              katkaisu=katkaisu, aikaraja=aikaraja)
+            if st == 401 and yritys == 0:
+                self.login()
+                continue
+            return st, b
+        return st, b
+
+
+# --- testi ---
+
+class Testi:
+    def __init__(self, a):
+        self.a = a
+        os.makedirs(a.lokit, exist_ok=True)
+        self.tilasto = Tilasto(a.lokit)
+        self.tyo = tempfile.mkdtemp(prefix="cwfsload-", dir=a.tyohak)
+        self.v = None
+        self.sarja = None
+        self.seis = threading.Event()
+        self.kayttajat = []
+        self.klukko = threading.Lock()
+        self.huoneet = [BOOTSTRAP_HUONE]
+        self.kutsut = {}
+        self.saikeet = []
+        self.nimilaskuri = 0
+        self.jumi = None
+
+    # --- vieras ---
+
+    def aja(self, komento, aikaraja=120, stdin=b""):
+        return self.v.pterm.aja(komento, aikaraja=aikaraja, stdin=stdin)
+
+    def aja_ok(self, komento, aikaraja=120):
+        t = self.aja(komento, aikaraja)
+        if t.koodi != 0:
+            raise vm9.VirheVM("%s: %s %s %s" % (komento[:120], t.status, t.stdout[-800:], t.stderr[-800:]))
+        return t
+
+    def put(self, paikallinen, eta):
+        t = self.v.pterm.put(paikallinen, eta)
+        if t.koodi != 0:
+            raise vm9.VirheVM("put %s: %s %s" % (eta, t.status, t.stderr))
+
+    def post_otsakkeet(self):
+        return {"Origin": ORIGIN}
+
+    def kaynnista(self):
+        a = self.a
+        self.levy = os.path.join(self.tyo, "levy.img")
+        subprocess.check_call(["cp", "--sparse=always", a.kuva, self.levy])
+        if a.cpuquota:
+            kaare = os.path.join(self.tyo, "qemu-quota")
+            with open(kaare, "w") as f:
+                f.write("#!/bin/sh\nexec systemd-run --user --scope -q -p CPUQuota=%d%% %s \"$@\"\n"
+                        % (a.cpuquota, os.environ.get("QEMU", "qemu-system-x86_64")))
+            os.chmod(kaare, 0o755)
+            os.environ["QEMU"] = kaare
+        # OCI: juuri virtio-scsi target 0 LUN 1 (sd00); provisiointi target 1 LUN 0 (sd01)
+        self.v = cpuvieras.CpuVieras(self.levy, self.tyo, os.path.join(a.lokit, "sarja.log"),
+                                     laji="vscsi:s0:0:1", muisti=str(a.muisti), cpu=str(a.cpu),
+                                     provisiointi=("vscsi:s0:1:0", "sd01"), lisaportit=(443, 80))
+        self.https = self.v.portit[443]
+        self.http = self.v.portit[80]
+        self.v.kaynnista()
+        t = self.v.provisioi()
+        if t.stdout != "glenda":
+            raise vm9.VirheVM("provisiointi: %r" % (t,))
+        self.tilasto.tapahtuma("vieras käynnissä: %s MiB, %s suoritinta, juuri sd00 (vscsi t0 l1)"
+                               % (a.muisti, a.cpu))
+
+    def tls_avain(self):
+        avain = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        nimi = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, RP)])
+        nyt = time.time()
+        import datetime
+        alku = datetime.datetime.fromtimestamp(nyt - 86400, datetime.timezone.utc)
+        loppu = datetime.datetime.fromtimestamp(nyt + 30 * 86400, datetime.timezone.utc)
+        cert = (x509.CertificateBuilder().subject_name(nimi).issuer_name(nimi).public_key(avain.public_key())
+                .serial_number(x509.random_serial_number()).not_valid_before(alku).not_valid_after(loppu)
+                .add_extension(x509.SubjectAlternativeName([x509.DNSName(RP)]), critical=False)
+                .sign(avain, hashes.SHA256()))
+        crt = os.path.join(self.tyo, "tls.crt")
+        key = os.path.join(self.tyo, "tls.key")
+        open(crt, "wb").write(cert.public_bytes(serialization.Encoding.PEM))
+        fd = os.open(key, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.write(fd, avain.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
+                                         serialization.NoEncryption()))
+        os.close(fd)
+        return crt, key
+
+    def room_lahteet(self):
+        room = self.a.room
+        natiivi = os.path.join(room, "native")
+        if not os.path.exists(os.path.join(natiivi, "roomhttp.c")):
+            raise vm9.VirheVM("Room-lähde puuttuu: %s" % natiivi)
+        self.aja_ok("mkdir -p /tmp/room/native /tmp/room/web")
+        for n in sorted(os.listdir(natiivi)):
+            p = os.path.join(natiivi, n)
+            if os.path.isfile(p):
+                self.put(p, "/tmp/room/native/" + n)
+        web = os.path.join(room, "web")
+        for n in sorted(os.listdir(web)):
+            p = os.path.join(web, n)
+            if os.path.isfile(p):
+                self.put(p, "/tmp/room/web/" + n)
+        t = self.aja("cd /tmp/room/native && mk install >[2=1]", aikaraja=900)
+        if t.koodi != 0:
+            raise vm9.VirheVM("Roomin käännös: %s" % t.stdout[-2000:])
+        self.tilasto.tapahtuma("Room käännetty vieraassa (%s)" % subprocess.run(
+            ["git", "-C", room, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip())
+
+    def asetukset(self):
+        """Palvelut kuten plan2001.comissa (Roomin deploy/plan2001.com), testin nimillä."""
+        for b in ("/bin/auth/accountd", "/bin/auth/asuser", "/bin/auth/account", "/bin/aux/etherws",
+                  "/bin/tlssrv", "/bin/exportfs", "/bin/auth/pemdecode", "/bin/auth/asn12rsa"):
+            self.aja_ok("test -x " + b)
+        crt, key = self.tls_avain()
+        self.aja_ok("mkdir -p /cfg/load/service /cfg/load/service.auth")
+        self.put(crt, "/cfg/load/tls.crt")
+        self.put(key, "/cfg/load/tls.key")
+        self.room_lahteet()
+        kutsu = secrets.token_hex(24)
+        self.kutsut[BOOTSTRAP_HUONE] = kutsu
+        tiedostot = {
+            # cpustart: TLS-avain factotumiin; tcp443 kuten Roomin deploy/plan2001.com/tcp443
+            "/cfg/load/service.auth/tcp443": "\n".join([
+                "#!/bin/rc",
+                "roomorigin=" + ORIGIN,
+                "exec tlssrv -c /cfg/load/tls.crt -l https /bin/roomfront /bin/auth/none /bin/rc -c "
+                "'HTTPS=on; exec /rc/bin/rc-httpd/rc-httpd' >>[2]/sys/log/https", ""]),
+            # plan2001.com: rc-httpd käyttäjänä none portissa 80
+            "/cfg/load/service/tcp80": "#!/bin/rc\nexec /rc/bin/rc-httpd/rc-httpd >>[2]/sys/log/www\n",
+            "/rc/bin/rc-httpd/select-handler": "\n".join([
+                "#!/bin/rc", "PATH_INFO=$location", "FS_ROOT=/usr/web", "exec static-or-index", ""]),
+            # cpustartin Room-osa: accountd isäntäomistajana tämän (sarjakonsolin) nimiavaruudessa
+            "/cfg/load/palvelut.rc": "\n".join([
+                "#!/bin/rc",
+                "rfork e",
+                "mount -b /srv/factotum /mnt || { echo P2LOAD-VIRHE factotum; exit }",
+                "auth/pemdecode 'RSA PRIVATE KEY' /cfg/load/tls.key | auth/asn12rsa -t "
+                "'service=tls role=client owner=*' >/mnt/factotum/ctl || { echo P2LOAD-VIRHE tls-avain; exit }",
+                "@{ rfork s; auth/accountd -r %s -o %s -d %s -c /srv/cwfs.cmd -g 'room*' -l "
+                "</dev/null >/dev/null >[2]/adm/room/account.log & }" % (RP, ORIGIN, AUTHDOM),
+                "for(i in `{seq 1 50}) if(! test -e /srv/accountd) sleep 0.1",
+                "test -e /srv/accountd || { echo P2LOAD-VIRHE accountd; exit }",
+                "@{ rfork s; aux/listen -q -t /cfg/load/service.auth -d /cfg/load/service tcp "
+                "</dev/null >/dev/null >[2]/sys/log/listen.load & }",
+                "for(p in 443 80) for(i in `{seq 1 50}) if(! grep -s '!'^$p^'$' /net/tcp/*/local >[2]/dev/null) sleep 0.1",
+                "for(p in 443 80) grep -s '!'^$p^'$' /net/tcp/*/local >[2]/dev/null || { echo P2LOAD-VIRHE listen $p; exit }",
+                "echo P2LOAD-VALMIS", ""]),
+            # vieraan oma tiedostojärjestelmäkuorma; loppuu, kun /tmp/kuorma/seis on olemassa
+            "/cfg/load/kuorma.rc": "\n".join([
+                "#!/bin/rc",
+                "rfork e",
+                "h=/tmp/kuorma/$1",
+                "mkdir -p $h",
+                "while(! test -e /tmp/kuorma/seis){",
+                "\tfor(i in `{seq 1 40}){",
+                "\t\techo $i `{date -n} >$h/f$i",
+                "\t\tmv $h/f$i $h/g$i",
+                "\t\tcat $h/g$i >/dev/null",
+                "\t}",
+                "\tmkdir -p $h/d/e/f",
+                "\tcp /lib/words $h/d/e/f/sanat >[2]/dev/null",
+                "\tdu -a $h >/dev/null",
+                "\trm -rf $h/*",
+                "\tswitch($1){",
+                "\tcase a",
+                "\t\tdu -a /sys/src/cmd >/dev/null",
+                "\tcase b",
+                "\t\t@{ rfork n; bind -a $h /mnt; ls -l /mnt >/dev/null }",
+                "\t\tgrep -s glenda /adm/users",
+                "\tcase c",
+                "\t\tls -l /usr/*/room/* >[2]/dev/null | wc -l >/dev/null",
+                "\t}",
+                "}", ""]),
+            "/adm/room/rooms/%s/name" % BOOTSTRAP_HUONE: "Kuormahuone",
+            "/adm/room/rooms/%s/invite" % BOOTSTRAP_HUONE: kutsu,
+            "/adm/room/invites/" + kutsu: BOOTSTRAP_HUONE,
+            "/adm/room/export.pattern": open(os.path.join(self.a.room, "native", "export.pattern")).read(),
+            "/usr/web/index.html": "<html><body><p>Plan2001 cwfs-kuorma</p></body></html>\n",
+        }
+        self.aja_ok("mkdir -p /adm/room/rooms/%s /adm/room/invites /adm/room/push /adm/room/web /usr/web/sivut"
+                    " && chmod 755 /adm/room /adm/room/rooms /adm/room/rooms/%s /adm/room/web"
+                    " && chmod 700 /adm/room/invites /adm/room/push" % (BOOTSTRAP_HUONE, BOOTSTRAP_HUONE))
+        for polku, sisalto in tiedostot.items():
+            p = os.path.join(self.tyo, "asetus")
+            open(p, "w").write(sisalto)
+            self.put(p, polku)
+        self.aja_ok("chmod 755 /cfg/load/service.auth/tcp443 /cfg/load/service/tcp80 "
+                    "/rc/bin/rc-httpd/select-handler && chmod 644 /adm/room/rooms/%s/name "
+                    "&& chmod 600 /adm/room/rooms/%s/invite /adm/room/invites/* /cfg/load/tls.key"
+                    % (BOOTSTRAP_HUONE, BOOTSTRAP_HUONE))
+        self.aja_ok("cp /tmp/room/web/* /adm/room/web/ && chmod 644 /adm/room/web/*")
+        # sivusto: pieniä ja suuria tiedostoja rc-httpd:lle
+        self.aja_ok("for(i in `{seq 1 100}) echo sivu $i >/usr/web/sivut/s$i.html; "
+                    "dd -if /dev/zero -of /usr/web/iso.bin -bs 65536 -count 32 >[2]/dev/null; "
+                    "cp /lib/words /usr/web/sanat.txt; chmod a+r /usr/web/* /usr/web/sivut/*")
+        # tlssrv:n loki kuten plan2001.comissa (distprotossa ei ole sitä); muut lokit
+        # mkimage.rc tekee distproton mukaan (a662 sys sys)
+        self.aja_ok("touch /sys/log/https; chmod 662 /sys/log/https; chmod +a /sys/log/https")
+        # auth/asuserin factotum löytää auth-palvelimen ndb:stä (plan2001.com: auth=plan2001)
+        self.aja_ok("echo 'authdom=%s auth=10.0.2.15' >>/lib/ndb/local && echo -n refresh >/net/cs" % AUTHDOM)
+        # palvelut sarjakonsolin nimiavaruudessa (keyfs /mnt/keys, cwfs:n konsoli), kuten cpustart
+        self.v.vm.laheta("rc /cfg/load/palvelut.rc\n")
+        i, m = self.v.vm.odota_jokin([r"P2LOAD-VALMIS", r"P2LOAD-VIRHE ([^\r\n]*)"], 120)
+        if i != 0:
+            raise vm9.VirheVM("palvelut: %s" % m.group(1).decode("latin-1"))
+        self.tilasto.tapahtuma("palvelut: tlssrv 443 (roomfront), rc-httpd 80, accountd, authsrv 567")
+
+    def tarkista_palvelut(self):
+        # sarjakonsoli tyhjennetään tästä eteenpäin koko ajan
+        self.sarja = Sarja(self.v.vm, self.tilasto)
+        self.sarja.kaynnista()
+        st, _, b = pyynto(self.https, "GET", "/index.html")
+        if st != 200 or b"cwfs-kuorma" not in b:
+            raise vm9.VirheVM("HTTPS rc-httpd: %d %r" % (st, b[:200]))
+        st, _, b = pyynto(self.http, "GET", "/sivut/s1.html", tls=False)
+        if st != 200:
+            raise vm9.VirheVM("HTTP 80: %d %r" % (st, b[:200]))
+        st, _, b = pyynto(self.https, "GET", "/room/")
+        if st != 200:
+            raise vm9.VirheVM("Room /room/: %d %r" % (st, b[:200]))
+        # ensimmäinen käyttäjä bootstrap-huoneeseen
+        k = self.uusi_kayttaja(BOOTSTRAP_HUONE)
+        st, b = k.api("GET", "/api/me")
+        if st != 200:
+            raise vm9.VirheVM("/api/me: %d %r" % (st, b[:300]))
+        st, b = k.api("POST", "/api/rooms/%s/messages" % BOOTSTRAP_HUONE, json.dumps({"text": "alku"}).encode(),
+                      "application/json")
+        if st != 200:
+            raise vm9.VirheVM("ensimmäinen viesti: %d %r" % (st, b[:300]))
+        self.tilasto.tapahtuma("Room toimii: käyttäjä %s, viesti lähetetty" % k.nimi)
+
+    def uusi_nimi(self):
+        with self.klukko:
+            self.nimilaskuri += 1
+            return "k%s%d" % (secrets.token_hex(2), self.nimilaskuri)
+
+    def uusi_kayttaja(self, huone):
+        k = Kayttaja(self, self.uusi_nimi())
+        alku = time.time()
+        k.enroll(self.kutsut[huone])
+        st, b = k.api("POST", "/api/join", json.dumps({"invite": self.kutsut[huone]}).encode(), "application/json")
+        if st != 200:
+            raise IOError("join %s: %d %r" % (huone, st, b[:200]))
+        k.huoneet.append(huone)
+        self.tilasto.kirjaa("tili: luonti", True, time.time() - alku)
+        with self.klukko:
+            self.kayttajat.append(k)
+        return k
+
+    # --- kuorma ---
+
+    def saie(self, nimi, f, *args):
+        def kaari():
+            while not self.seis.is_set():
+                try:
+                    f(*args)
+                except Exception as e:
+                    self.tilasto.kirjaa(nimi + ": poikkeus", False, 0, "%s: %s" % (type(e).__name__, e))
+                    self.seis.wait(1)
+        t = threading.Thread(target=kaari, name=nimi, daemon=True)
+        t.start()
+        self.saikeet.append(t)
+
+    def mittaa(self, toiminto, f, hyva=lambda r: True):
+        alku = time.time()
+        try:
+            r = f()
+            ok = hyva(r)
+            self.tilasto.kirjaa(toiminto, ok, time.time() - alku, "" if ok else repr(r)[:300])
+            return r if ok else None
+        except Exception as e:
+            self.tilasto.kirjaa(toiminto, False, time.time() - alku, "%s: %s" % (type(e).__name__, e))
+            return None
+
+    def satunnainen_kayttaja(self):
+        with self.klukko:
+            return random.choice(self.kayttajat) if self.kayttajat else None
+
+    def room_kierros(self):
+        k = self.satunnainen_kayttaja()
+        if k is None or not k.huoneet:
+            self.seis.wait(1)
+            return
+        if not k.lukko.acquire(blocking=False):
+            return
+        try:
+            h = random.choice(k.huoneet)
+            x = random.random()
+            ok2 = lambda r: r is not None and r[0] == 200  # noqa: E731
+            if x < 0.15:
+                self.mittaa("room: me", lambda: k.api("GET", "/api/me"), ok2)
+            elif x < 0.45:
+                # PWA hakee viimeiset; joskus koko historia (jokainen viesti luetaan exportfs-unionista)
+                q = "?limit=50" if random.random() < 0.85 else ""
+                r = self.mittaa("room: viestit", lambda: k.api("GET", "/api/rooms/%s/messages%s" % (h, q)), ok2)
+                if r and random.random() < 0.3:
+                    try:
+                        kuvat = [m["image"] for m in json.loads(r[1]) if m.get("image")]
+                    except (ValueError, KeyError, TypeError):
+                        kuvat = []
+                    if kuvat:
+                        s = random.choice(kuvat)
+                        self.mittaa("room: kuva luku", lambda: k.api("GET", "/api/rooms/%s/images/%s" % (h, s)), ok2)
+            elif x < 0.65:
+                teksti = "viesti %s %s" % (time.strftime("%H:%M:%S"), secrets.token_hex(random.choice((4, 64, 900))))
+                r = self.mittaa("room: teksti", lambda: k.api("POST", "/api/rooms/%s/messages" % h,
+                                                              json.dumps({"text": teksti}).encode(),
+                                                              "application/json"), ok2)
+                self._muista(k, h, r)
+            elif x < 0.75:
+                koko = random.choice((1024, 20000, 200000, 2000000))
+                r = self.mittaa("room: kuva %dk" % (koko // 1000), lambda: k.api(
+                    "POST", "/api/rooms/%s/images" % h, png(koko), "image/png", aikaraja=300), ok2)
+                self._muista(k, h, r)
+            elif x < 0.83:
+                omat = k.omat.get(h) or []
+                if omat:
+                    s = random.choice(omat)
+                    self.mittaa("room: kuittaus", lambda: k.api("POST", "/api/rooms/%s/reactions" % h, json.dumps(
+                        {"seq": s, "kind": random.choice(("ok", "no", "seen", ""))}).encode(), "application/json"), ok2)
+            elif x < 0.88:
+                omat = k.omat.get(h) or []
+                if len(omat) > 5:
+                    s = omat.pop(0)
+                    self.mittaa("room: poisto", lambda: k.api("POST", "/api/rooms/%s/remove" % h,
+                                                              json.dumps({"seq": s}).encode(), "application/json"), ok2)
+            else:
+                # katkeava pyyntö: otsakkeet, runko tai vastaus kesken (RST)
+                tapa = random.choice(("otsakkeet", "runko", "vastaus", "vastaus"))
+                if tapa == "runko":
+                    f = lambda: k.api("POST", "/api/rooms/%s/images" % h, png(400000), "image/png",  # noqa: E731
+                                      katkaisu=tapa)
+                else:
+                    f = lambda: k.api("GET", "/api/rooms/%s/messages?limit=50" % h, katkaisu=tapa)  # noqa: E731
+                self.mittaa("room: katkaisu " + tapa, f)
+        finally:
+            k.lukko.release()
+
+    def _muista(self, k, h, r):
+        if not r:
+            return
+        try:
+            s = json.loads(r[1]).get("seq")
+        except (ValueError, AttributeError):
+            return
+        if s:
+            k.omat.setdefault(h, []).append(s)
+
+    def staattinen_kierros(self):
+        x = random.random()
+        ok = lambda r: r is not None and r[0] == 200  # noqa: E731
+        if x < 0.35:
+            n = random.randint(1, 100)
+            self.mittaa("https: sivu", lambda: pyynto(self.https, "GET", "/sivut/s%d.html" % n), ok)
+        elif x < 0.5:
+            self.mittaa("https: iso", lambda: pyynto(self.https, "GET", "/iso.bin"), ok)
+        elif x < 0.7:
+            n = random.randint(1, 100)
+            self.mittaa("http80: sivu", lambda: pyynto(self.http, "GET", "/sivut/s%d.html" % n, tls=False), ok)
+        elif x < 0.8:
+            self.mittaa("http80: hakemisto", lambda: pyynto(self.http, "GET", "/sivut/", tls=False), ok)
+        else:
+            p = random.choice(("/room/", "/room/app.js", "/room/style.css", "/room/sw.js", "/room/account.html"))
+            self.mittaa("room: sivu", lambda: pyynto(self.https, "GET", p), ok)
+
+    def skanneri_kierros(self):
+        """Internetin skannerien kaltaiset yhteydet: tlssrv:n auth_proxy short read -tilanteet."""
+        x = random.random()
+        portti = self.https if random.random() < 0.8 else self.http
+
+        def tcp():
+            s = socket.create_connection(("127.0.0.1", portti), timeout=30)
+            time.sleep(random.uniform(0, 2))
+            rst(s) if random.random() < 0.5 else s.close()
+
+        def puoli_hello():
+            s = socket.create_connection(("127.0.0.1", self.https), timeout=30)
+            # TLS 1.2 ClientHellon alku: tietue ja kättelyn otsake, sitten katkaisu
+            s.sendall(bytes([0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc, 0x03, 0x03]) + os.urandom(20))
+            time.sleep(random.uniform(0, 1))
+            rst(s)
+
+        def kattely():
+            s, raaka = yhdista(self.https, True, 30)
+            time.sleep(random.uniform(0, 1))
+            rst(raaka)
+
+        def roska():
+            s = socket.create_connection(("127.0.0.1", portti), timeout=30)
+            s.sendall(os.urandom(random.randint(1, 600)))
+            time.sleep(random.uniform(0, 1))
+            rst(s)
+
+        def hidas():
+            s = socket.create_connection(("127.0.0.1", self.http), timeout=60)
+            for c in b"GET /sivut/s1.html HTTP/1.1\r\nHost: localhost\r\n":
+                s.sendall(bytes([c]))
+                if self.seis.wait(0.3):
+                    break
+            rst(s)
+
+        if x < 0.3:
+            self.mittaa("skanneri: tcp", tcp)
+        elif x < 0.55:
+            self.mittaa("skanneri: puoli hello", puoli_hello)
+        elif x < 0.8:
+            self.mittaa("skanneri: kättely", kattely)
+        elif x < 0.95:
+            self.mittaa("skanneri: roska", roska)
+        else:
+            self.mittaa("skanneri: hidas", hidas)
+        self.seis.wait(random.uniform(0.2, 2))
+
+    def tili_kierros(self):
+        """Uusia tilejä ja huoneita, liittymisiä ja accountd:n rename."""
+        self.seis.wait(random.uniform(0.5, 1.5) * self.a.tilivali)
+        if self.seis.is_set():
+            return
+        with self.klukko:
+            n = len(self.kayttajat)
+        x = random.random()
+        if n < self.a.maxkayttajat and (x < 0.5 or n < self.a.kayttajat):
+            # uusi käyttäjä: suureen huoneeseen tai satunnaiseen
+            h = BOOTSTRAP_HUONE if random.random() < 0.7 else random.choice(self.huoneet)
+            k = self.mittaa("tili: uusi", lambda: self.uusi_kayttaja(h))
+            if k and random.random() < 0.4:
+                self.mittaa("huone: luonti", lambda: self._luo_huone(k))
+        elif x < 0.75:
+            k = self.satunnainen_kayttaja()
+            muut = [h for h in self.huoneet if k and h not in k.huoneet]
+            if k and muut:
+                h = random.choice(muut)
+                self.mittaa("huone: liittyminen", lambda: self._liity(k, h))
+        elif x < 0.9:
+            k = self.satunnainen_kayttaja()
+            if k and k.nimi != self.kayttajat[0].nimi:
+                with k.lukko:
+                    uusi = self.uusi_nimi()
+                    t = self.mittaa("tili: rename", lambda: self.aja("auth/account rename %s %s" % (k.nimi, uusi), 60),
+                                    lambda t: t.koodi == 0 and t.stdout.startswith("ok"))
+                    if t:
+                        k.nimi = uusi
+                        self.mittaa("tili: login renamen jälkeen", k.login)
+        else:
+            self.mittaa("tili: users", lambda: self.aja("auth/account users >/dev/null; auth/account sessions >/dev/null",
+                                                         60), lambda t: t.koodi == 0)
+
+    def _luo_huone(self, k):
+        st, b = k.api("POST", "/api/rooms", json.dumps({"name": "Huone " + secrets.token_hex(3)}).encode(),
+                      "application/json")
+        if st != 200:
+            raise IOError("huone: %d %r" % (st, b[:200]))
+        d = json.loads(b)
+        h = d["room"]["id"] if isinstance(d.get("room"), dict) else d.get("room")
+        st, b = k.api("GET", "/api/rooms/%s/invite" % h)
+        if st != 200:
+            raise IOError("kutsu: %d %r" % (st, b[:200]))
+        self.kutsut[h] = json.loads(b)["invite"]
+        k.huoneet.append(h)
+        self.huoneet.append(h)
+        return h
+
+    def _liity(self, k, h):
+        st, b = k.api("POST", "/api/join", json.dumps({"invite": self.kutsut[h]}).encode(), "application/json")
+        if st != 200:
+            raise IOError("join: %d %r" % (st, b[:200]))
+        k.huoneet.append(h)
+
+    def natiivi_kierros(self):
+        komennot = [
+            "ls -l /usr | wc -l",
+            "cat /adm/users | wc -l",
+            "du -s /usr >[2]/dev/null",
+            "ls -lR /adm/room/rooms >/dev/null; echo ok",
+            "f=/tmp/natiivi.$pid; dd -if /dev/random -of $f -bs 8192 -count 16 >[2]/dev/null; "
+            "cmp $f $f && rm $f && echo ok",
+            "ps | wc -l",
+        ]
+        x = random.random()
+        if x < 0.15:
+            # katkaistu istunto: 9pterm -T kesken pitkän komennon
+            self.mittaa("rcpu: katkaisu", lambda: self.aja("du -a /sys/src >/dev/null", aikaraja=2))
+        else:
+            k = random.choice(komennot)
+            self.mittaa("rcpu: komento", lambda: self.aja(k, 120), lambda t: t.koodi == 0)
+        self.seis.wait(random.uniform(1, 6))
+
+    def dump_kierros(self):
+        if self.seis.wait(self.a.dump * 60):
+            return
+        self.mittaa("cwfs: dump", lambda: self.aja("echo dump >>/srv/cwfs.cmd", 60), lambda t: t.koodi == 0)
+        self.tilasto.tapahtuma("cwfs: dump pyydetty")
+
+    def terveys(self):
+        """Jumin tunnistus: rcpu ja HTTP 80 eivät vastaa kahdesti peräkkäin."""
+        perakkain = 0
+        while not self.seis.wait(30):
+            alku = time.time()
+            r1 = self.mittaa("terveys: rcpu", lambda: self.aja("cat /dev/sysstat >/dev/null; ls /adm >/dev/null; "
+                                                                "echo ok", 90),
+                             lambda t: t.koodi == 0 and "ok" in t.stdout)
+            r2 = self.mittaa("terveys: http80", lambda: pyynto(self.http, "GET", "/sivut/s2.html", tls=False,
+                                                                aikaraja=90),
+                             lambda r: r[0] == 200)
+            if r1 is None and r2 is None:
+                perakkain += 1
+                self.tilasto.tapahtuma("terveys: ei vastausta (%d/2, %.0f s)" % (perakkain, time.time() - alku))
+                if perakkain >= 2:
+                    self.jumi = "rcpu ja HTTP 80 eivät vastaa"
+                    self.sarja.kaatumisrivi = self.sarja.kaatumisrivi or "JUMI: " + self.jumi
+                    self.sarja.kaatui.set()
+                    return
+            else:
+                perakkain = 0
+
+    def tilanne(self):
+        while not self.seis.wait(600):
+            with self.klukko:
+                n = len(self.kayttajat)
+            self.tilasto.tapahtuma("tilanne: %d käyttäjää, %d huonetta, havainnot %s"
+                                   % (n, len(self.huoneet), self.sarja.havainnot or "-"))
+            open(os.path.join(self.a.lokit, "yhteenveto.txt"), "w").write(self.tilasto.raportti() + "\n")
+
+    def kuorma(self):
+        a = self.a
+        # alkukäyttäjät
+        while len(self.kayttajat) < a.kayttajat:
+            self.mittaa("tili: uusi", lambda: self.uusi_kayttaja(BOOTSTRAP_HUONE))
+        self.tilasto.tapahtuma("alkukäyttäjät: %d" % len(self.kayttajat))
+        # vieraan oma tiedostojärjestelmäkuorma omassa note-ryhmässään
+        # sarjakonsolilta: rcpu-istunto ei pääty, kun taustaprosessin nimiavaruus viittaa sen /mnt/termiin
+        self.aja_ok("rm -rf /tmp/kuorma; mkdir -p /tmp/kuorma")
+        self.v.vm.laheta("for(x in a b c) @{ rfork s; rc /cfg/load/kuorma.rc $x </dev/null >/dev/null "
+                         ">[2]/tmp/kuorma/$x.err & }\n")
+        for i in range(a.room_saikeet):
+            self.saie("room%d" % i, self.room_kierros)
+        for i in range(a.staattiset):
+            self.saie("staattinen%d" % i, self.staattinen_kierros)
+        for i in range(a.skannerit):
+            self.saie("skanneri%d" % i, self.skanneri_kierros)
+        self.saie("tilit", self.tili_kierros)
+        self.saie("natiivi", self.natiivi_kierros)
+        if a.dump > 0:
+            self.saie("dump", self.dump_kierros)
+        for f in (self.terveys, self.tilanne):
+            t = threading.Thread(target=f, daemon=True)
+            t.start()
+            self.saikeet.append(t)
+        self.tilasto.tapahtuma("kuorma käynnissä: %d Room-, %d staattista, %d skanneri-, tili-, rcpu- ja dump-säie; "
+                               "kesto %d min" % (a.room_saikeet, a.staattiset, a.skannerit, a.kesto))
+        loppu = time.time() + a.kesto * 60
+        while time.time() < loppu and not self.sarja.kaatui.is_set():
+            self.sarja.kaatui.wait(min(10, max(0.1, loppu - time.time())))
+        kaatui = self.sarja.kaatui.is_set()
+        self.seis.set()
+        for t in self.saikeet:
+            t.join(60)
+        return kaatui
+
+    # --- kaatumisen tai jumin diagnoosi ---
+
+    def diagnoosi(self):
+        """Pelastusshell sarjakonsolilla (ei tarvitse cwfs:ää), sitten muistivedos QMP:llä."""
+        self.sarja.pysayta()
+        vm = self.v.vm
+        polku = os.path.join(self.a.lokit, "diagnoosi.log")
+        alku = len(vm.kaikki)
+        vm.puskuri = b""
+        vm.laheta("\x14\x14r")
+        try:
+            vm.odota(r"rescue# ", 30)
+        except vm9.VirheVM as e:
+            self.tilasto.tapahtuma("pelastusshell ei avautunut: %s" % str(e)[-200:])
+        komennot = [
+            "bind '#p' /proc; cd /proc",
+            "for(p in `{ls}) { echo '##' $p `{cat $p/args >[2]/dev/null} `{cat $p/status >[2]/dev/null} }",
+            # cwfs-prosessien pinot; Broken-tilainen on kaatunut (lukko jää varatuksi)
+            "for(p in `{ls}) if(grep -s cwfs $p/status >[2]/dev/null) { echo '###' $p `{cat $p/status}; "
+            "echo 'lstk()' | acid $p >[2=1] }",
+            "cat /dev/kmesg",
+            "cat '#S/sdctl'",
+        ]
+        for k in komennot:
+            tunnus = secrets.token_hex(3)
+            vm.laheta("%s; echo P2D^%s\n" % (k, tunnus))
+            try:
+                vm.odota(r"P2D" + tunnus, 300)
+            except vm9.VirheVM:
+                self.tilasto.tapahtuma("diagnoosi: komento ei päättynyt: %s" % k[:80])
+        open(polku, "wb").write(vm.kaikki[alku:])
+        self.tilasto.tapahtuma("diagnoosi: %s" % polku)
+        if self.a.muistivedos:
+            vedos = os.path.join(self.a.lokit, "muisti.elf")
+            try:
+                vm.qmp("dump-guest-memory", aikaraja=600, paging=False, protocol="file:" + vedos)
+                self.tilasto.tapahtuma("muistivedos: %s" % vedos)
+            except Exception as e:
+                self.tilasto.tapahtuma("muistivedos epäonnistui: %s" % e)
+
+    def lopetus(self, kaatui):
+        if kaatui:
+            self.diagnoosi()
+            self.v.vm.lopeta()
+            sail = os.path.join(self.a.lokit, "levy.img")
+            shutil.move(self.levy, sail)
+            self.tilasto.tapahtuma("levykuva säilytetty: %s" % sail)
+            return
+        # ei kaatumista: vieraan kuorma pois, cwfs alas hallitusti
+        self.sarja.pysayta()
+        try:
+            self.aja("touch /tmp/kuorma/seis", 60)
+            time.sleep(5)
+            t = self.aja("cat /adm/users | wc -l; ls /usr | wc -l; cat /tmp/kuorma/*.err", 60)
+            self.tilasto.tapahtuma("loppu: users-rivit, kotihakemistot, vieraan kuorman virheet: %s"
+                                   % t.stdout.strip().replace("\n", " | ")[:500])
+            # palvelujen lokit (tlssrv, roomhttp, asuser, accountd, listen) talteen
+            t = self.aja("for(f in /sys/log/https /sys/log/www /sys/log/listen.load /sys/log/listen "
+                         "/sys/log/auth /adm/room/account.log /adm/room/push.log) "
+                         "if(test -e $f) { echo '####' $f; cat $f }", 120)
+            open(os.path.join(self.a.lokit, "vieraan-lokit.txt"), "w").write(t.stdout)
+        except vm9.VirheVM as e:
+            self.tilasto.tapahtuma("loppu: rcpu ei vastannut: %s" % e)
+        valmis = self.v.sammuta()
+        self.tilasto.tapahtuma("fshalt %s" % ("valmis" if valmis else "EI valmistunut"))
+        if self.a.keep:
+            sail = os.path.join(self.a.lokit, "levy.img")
+            shutil.move(self.levy, sail)
+            self.tilasto.tapahtuma("levykuva säilytetty: %s" % sail)
+
+    def siivoa(self):
+        if self.v:
+            self.v.siivoa()
+        shutil.rmtree(self.tyo, ignore_errors=True)
+
+
+def main():
+    oletus_lokit = os.path.join(os.path.expanduser("~/.cache/plan2001/cwfsload"),
+                                "ajo-" + time.strftime("%Y%m%d-%H%M%S"))
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--kuva", required=True, help="mkimage --disk sd00 --console 0 -kuva (ei muuteta)")
+    ap.add_argument("--room", default=os.path.join(os.path.dirname(JUURI), "room"))
+    ap.add_argument("--lokit", default=oletus_lokit)
+    ap.add_argument("--tyohak", default=None, help="kertakäyttöisen levykopion hakemisto")
+    ap.add_argument("--kesto", type=int, default=480, help="minuuttia (oletus 480)")
+    ap.add_argument("--muisti", type=int, default=1024, help="MiB (OCI E2.1.Micro: 1024)")
+    ap.add_argument("--cpu", type=int, default=2)
+    ap.add_argument("--cpuquota", type=int, default=0, help="QEMU:n suoritinaika %% (0: ei rajaa)")
+    ap.add_argument("--kayttajat", type=int, default=6, help="käyttäjiä alussa")
+    ap.add_argument("--maxkayttajat", type=int, default=60)
+    ap.add_argument("--tilivali", type=float, default=40, help="tilitoimintojen keskiväli sekunteina")
+    ap.add_argument("--room-saikeet", type=int, default=6)
+    ap.add_argument("--staattiset", type=int, default=3)
+    ap.add_argument("--skannerit", type=int, default=3)
+    ap.add_argument("--dump", type=int, default=30, help="cwfs:n dump minuutin välein (0: ei)")
+    ap.add_argument("--ei-muistivedosta", dest="muistivedos", action="store_false")
+    ap.add_argument("--keep", action="store_true", help="säilytä levykuva myös ilman kaatumista")
+    a = ap.parse_args()
+    a.kuva = os.path.abspath(a.kuva)
+    os.makedirs(a.lokit, exist_ok=True)
+    if a.tyohak is None:
+        a.tyohak = a.lokit
+    t = Testi(a)
+    paluu = 2
+    tulos = "keskeytetty"
+    try:
+        t.kaynnista()
+        t.asetukset()
+        t.tarkista_palvelut()
+        kaatui = t.kuorma()
+        t.lopetus(kaatui)
+        paluu = 1 if kaatui else 0
+        tulos = ("KAATUI/JUMI: " + t.sarja.kaatumisrivi) if kaatui else "ei kaatumista"
+    except Exception as e:
+        tulos = "TESTIN VIRHE: %s" % e
+        traceback.print_exc()
+    finally:
+        try:
+            raportti = "%s\n\n%s\n\nsarjakonsolin havainnot: %s\n" % (
+                tulos, t.tilasto.raportti(), t.sarja.havainnot if t.sarja else "-")
+        except Exception:
+            raportti = "raportti epäonnistui\n"
+        open(os.path.join(a.lokit, "yhteenveto.txt"), "w").write(raportti)
+        print(raportti)
+        t.siivoa()
+    sys.exit(paluu)
+
+
+if __name__ == "__main__":
+    main()
