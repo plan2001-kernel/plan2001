@@ -137,6 +137,7 @@ The procedure that works today, run from the administrator's Linux host (Kuha). 
 Native services (auth 567, rcpu 17019, 9P 17020) listen only on the tunnel address; publicly only WireGuard (UDP 51820) and HTTP/HTTPS are open.
 
 - Kuha's keys: `~/.config/plan2001/wg/` (`admin.key`, `admin.addr` = 10.201.0.3, `server.pub`).
+- The interface does not survive a reboot of Kuha: if `ping 10.201.0.1` fails and 9pterm says "no connection", run `tools/wg-admin up` first (needs sudo).
 - Up: `tools/wg-admin up` (interface `wgp2001`, endpoint `wg.plan2001.com:51820`, server 10.201.0.1/32 only); down: `tools/wg-admin down`. Check: `ping -c2 10.201.0.1`, `sudo wg show wgp2001`.
 - Server side: `/adm/wg/wg0` and `wg0.peers` (`wgsetup show|peer|remove`), brought up by `/cfg/plan2001/cpustart`; listeners from `/cfg/plan2001/service.wg` and `service.wg.auth`. Never copy those service files to the public service directories.
 
