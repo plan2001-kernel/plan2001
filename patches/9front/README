@@ -171,14 +171,21 @@ rescue-shell.diff
 		hung or broken process (/proc/N, acid N) there.  2026-11-27.
 
 cwfs-fid-check.diff
-		cmd/cwfs/sub.c: filep, freefp and fileinit check every fid
-		chain pointer (flist[h], File.next) is nil or an element of
+		cmd/cwfs/sub.c, cw.c: filep, freefp, fileinit and rewalk
+		(the dump's walk, without flock) check every fid chain
+		pointer (flist[h], File.next) is nil or an element of
 		files[].  Any other value is memory overwritten: cwfs prints
 		it, the chain, the previous File and the memory around it to
 		the console and aborts, leaving the process Broken for acid
 		(rescue-shell.diff).  Diagnostics for issue #56, where a
 		non-canonical chain pointer crashed filep with flock held and
-		froze the file server.  2026-11-27.
+		froze the file server.  2026-11-27.  The bad word is also
+		read again at once, its whole page is printed, and it is read
+		on each processor in turn (wired, through #p and #c, as cwfs
+		runs in the bootfs namespace), to tell memory that really
+		changed from one processor seeing a wrong page: on 2026-11-28
+		the word held a random value when walked and 0 when dumped.
+		2026-11-28.
 
 libwebauthn-mkfile.diff
 		sys/src/mkfile: libwebauthn among LIBS, the relying party's
@@ -247,3 +254,12 @@ keyfs-rename-pakhash.diff
 		read and when its aeskey is written.  Before, the hash stayed
 		the old name's and the auth server refused the renamed user's
 		dp9ik sign-in until keyfs restarted.  2026-11-27.
+
+cwfs-gidspace-compact.diff
+		cwfs/uidgid.c: newuser GROUP +MEMBER copied the group's
+		member table to the end of gidspace and never reused the old
+		copy (-MEMBER left a hole), and only re-reading /adm/users
+		reset it.  Once conf.gidspace (3 x nuid) was used up, every
+		member addition failed with "conf.gidspace too small" until
+		cwfs restarted.  When an addition would not fit, gidspace is
+		now packed under the uid write lock first.  2026-11-28.

@@ -382,7 +382,12 @@ def main():
     ap.add_argument("--memory", default=KP.muisti, help="muisti MiB")
     a = ap.parse_args()
     KP.levy, KP.vayla, KP.kone, KP.muisti = a.disk, a.bus, a.machine, a.memory
-    if KP.vayla != "hd":
+    if KP.vayla.startswith("vscsi:s0:0:"):
+        # OCI:n kaltainen virtio-scsi-juuri: provisiointi saman ohjaimen
+        # target 1 LUN 0:aan (sd01) kuten tools/test/cwfsload; virtio-blk ei
+        # ole sdF:nä, koska q35:n ja vm9:n AHCI-ohjaimet ovat sdE ja sdF
+        KP.provisiointi = ("vscsi:s0:1:0", "sd01")
+    elif KP.vayla != "hd":
         KP.provisiointi = ("vblk", "sdF1" if KP.vayla.startswith("vblk") else "sdF0")
     if a.ninepterm:
         os.environ["NINEPTERM"] = os.path.abspath(a.ninepterm)

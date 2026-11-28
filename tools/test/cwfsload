@@ -42,12 +42,14 @@ ja levykuva säilytetään.  Tulokset: --lokit (oletus
 diagnoosi.log, yhteenveto.txt; paluuarvo 0 (aika loppui, ei kaatumista),
 1 (cwfs kaatui tai jumittui), 2 (testin oma virhe).
 
-    tools/test/cwfsload --kuva KUVA [--kesto MIN] [--room HAK] [--lokit HAK]
+    tools/test/cwfsload --kuva KUVA [--kesto MIN] [--room HAK] [--room-rev REV] [--lokit HAK]
                         [--muisti MiB] [--cpu N] [--cpuquota PROS]
                         [--kayttajat N] [--maxkayttajat N] [--dump MIN] [--keep]
 
 Kuva: tools/native-amd64/mkimage --disk sd00 --console 0.  Room-lähde:
---room (oletus ../room tämän puun vieressä).  Vaatii 9ptermin
+--room (oletus ../room tämän puun vieressä), commit --room-rev (oletus
+4cc670a: viimeinen Room, jossa on tämän kuorman käyttämä vanha datataso
+roomhttp/roomapi/roomwrite).  Vaatii 9ptermin
 (NINEPTERM), mtoolsin ja Pythonin cryptography-paketin.
 """
 
@@ -576,7 +578,18 @@ class Testi:
         return crt, key
 
     def room_lahteet(self):
-        room = self.a.room
+        # Room kiinnitettyyn committiin (--room-rev): tämä kuorma käyttää
+        # Roomin vanhaa datatasoa (roomhttp, roomapi, roomwrite), jonka
+        # uudempi Room poisti; työpuun tila ei vaikuta ajoon
+        room = os.path.join(self.tyo, "room")
+        os.makedirs(room)
+        arkisto = subprocess.run(["git", "-C", self.a.room, "archive", self.a.room_rev, "native", "web"],
+                                 capture_output=True)
+        if arkisto.returncode != 0:
+            raise vm9.VirheVM("Room %s ei löydy hakemistosta %s: %s"
+                              % (self.a.room_rev, self.a.room, arkisto.stderr.decode(errors="replace")))
+        subprocess.run(["tar", "xf", "-", "-C", room], input=arkisto.stdout, check=True)
+        self.room = room
         natiivi = os.path.join(room, "native")
         if not os.path.exists(os.path.join(natiivi, "roomhttp.c")):
             raise vm9.VirheVM("Room-lähde puuttuu: %s" % natiivi)
@@ -593,8 +606,7 @@ class Testi:
         t = self.aja("cd /tmp/room/native && mk install >[2=1]", aikaraja=900)
         if t.koodi != 0:
             raise vm9.VirheVM("Roomin käännös: %s" % t.stdout[-2000:])
-        self.tilasto.tapahtuma("Room käännetty vieraassa (%s)" % subprocess.run(
-            ["git", "-C", room, "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip())
+        self.tilasto.tapahtuma("Room käännetty vieraassa (%s)" % self.a.room_rev)
 
     def asetukset(self):
         """Palvelut kuten plan2001.comissa (Roomin deploy/plan2001.com), testin nimillä."""
@@ -664,7 +676,7 @@ class Testi:
             "/adm/room/rooms/%s/name" % BOOTSTRAP_HUONE: "Kuormahuone",
             "/adm/room/rooms/%s/invite" % BOOTSTRAP_HUONE: kutsu,
             "/adm/room/invites/" + kutsu: BOOTSTRAP_HUONE,
-            "/adm/room/export.pattern": open(os.path.join(self.a.room, "native", "export.pattern")).read(),
+            "/adm/room/export.pattern": open(os.path.join(self.room, "native", "export.pattern")).read(),
             "/usr/web/index.html": "<html><body><p>Plan2001 cwfs-kuorma</p></body></html>\n",
         }
         self.aja_ok("mkdir -p /adm/room/rooms/%s /adm/room/invites /adm/room/push /adm/room/web /usr/web/sivut"
@@ -1129,6 +1141,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--kuva", required=True, help="mkimage --disk sd00 --console 0 -kuva (ei muuteta)")
     ap.add_argument("--room", default=os.path.join(os.path.dirname(JUURI), "room"))
+    ap.add_argument("--room-rev", default="4cc670a",
+                    help="Roomin commit (vanha datataso roomhttp/roomapi/roomwrite)")
     ap.add_argument("--lokit", default=oletus_lokit)
     ap.add_argument("--tyohak", default=None, help="kertakäyttöisen levykopion hakemisto")
     ap.add_argument("--kesto", type=int, default=480, help="minuuttia (oletus 480)")
