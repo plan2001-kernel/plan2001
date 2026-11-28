@@ -19,6 +19,9 @@
  *	open PATH MODE			<- ok FID IOUNIT
  *	create PATH MODE PERM		<- ok FID		(PERM numerona, DMDIR mukaan lukien)
  *	read FID OFFSET COUNT		<- ok N\nDATA
+ *	wait FID OFFSET COUNT		<- ok N\nDATA	(kuten read, mutta omassa prosessissaan:
+ *					   estävä luku, esim. aux/fseventsin tapahtumat, ei varaa
+ *					   työprosessia; enintään Maxwait kerralla)
  *	write FID OFFSET\nDATA		<- ok N
  *	dirread FID			<- ok N\nDIR...	(N 0: hakemisto luettu loppuun)
  *	close FID			<- ok
@@ -48,6 +51,7 @@ enum {
 	Dirbatch	= 8192,	/* hakemiston lukuerä (dirreadreply) */
 	Nfid	= 512,
 	Maxwork	= 16,
+	Maxwait	= 8,	/* yhtäaikaiset wait-luvut */
 };
 
 typedef struct Req Req;
@@ -57,10 +61,21 @@ struct Req
 	char	b[1];
 };
 
+typedef struct Wait Wait;
+struct Wait
+{
+	char	tag[32];
+	int	fd;
+	vlong	off;
+	long	n;
+};
+
 static int jsfd;
 static Channel *reqc;
 static QLock fidlk;
 static int fids[Nfid];
+static QLock waitlk;
+static int nwait;
 
 static void
 usage(void)
@@ -135,6 +150,25 @@ getfd(char *s)
 	return fd;
 }
 
+/* Keep the underlying channel alive independently of a reused fid slot. */
+static int
+dupwaitfd(char *s)
+{
+	int i, fd;
+
+	i = atoi(s);
+	if(i <= 0 || i >= Nfid){
+		werrstr("bad fid");
+		return -1;
+	}
+	qlock(&fidlk);
+	fd = fids[i] == 0 ? -1 : dup(fids[i]-1, -1);
+	qunlock(&fidlk);
+	if(fd < 0)
+		werrstr("bad wait fid");
+	return fd;
+}
+
 static int
 dropfid(char *s)
 {
@@ -154,6 +188,42 @@ dropfid(char *s)
 		return -1;
 	}
 	return close(fd);
+}
+
+static void
+readreply(char *tag, int fd, vlong off, long n)
+{
+	char line[64], *buf;
+
+	if(n < 0 || n > Maxio)
+		n = Maxio;
+	if((buf = malloc(n+1)) == nil){
+		fail(tag);
+		return;
+	}
+	if((n = pread(fd, buf, n, off)) < 0)
+		fail(tag);
+	else{
+		snprint(line, sizeof line, "ok %ld", n);
+		answer(tag, line, buf, n);
+	}
+	free(buf);
+}
+
+/* estävä luku omassa prosessissaan: työprosessit palvelevat muita pyyntöjä sillä välin */
+static void
+waitproc(void *v)
+{
+	Wait *w;
+
+	w = v;
+	threadsetname("jsio wait");
+	readreply(w->tag, w->fd, w->off, w->n);
+	close(w->fd);
+	free(w);
+	qlock(&waitlk);
+	nwait--;
+	qunlock(&waitlk);
 }
 
 static char*
@@ -282,6 +352,7 @@ request(Req *r)
 	long n, ndata;
 	vlong off;
 	Dir d, *dp;
+	Wait *w;
 
 	nl = memchr(r->b, '\n', r->n);
 	if(nl == nil)
@@ -316,20 +387,39 @@ request(Req *r)
 			answer(f[0], line, nil, 0);
 		}
 	}else if(strcmp(f[1], "read") == 0 && nf == 5){
-		n = atol(f[4]);
-		if(n < 0 || n > Maxio)
-			n = Maxio;
-		if((fd = getfd(f[2])) < 0 || (buf = malloc(n+1)) == nil){
+		if((fd = getfd(f[2])) < 0)
+			fail(f[0]);
+		else
+			readreply(f[0], fd, strtoll(f[3], nil, 0), atol(f[4]));
+	}else if(strcmp(f[1], "wait") == 0 && nf == 5){
+		if((fd = dupwaitfd(f[2])) < 0){
 			fail(f[0]);
 			return;
 		}
-		if((n = pread(fd, buf, n, strtoll(f[3], nil, 0))) < 0)
+		qlock(&waitlk);
+		if(nwait >= Maxwait){
+			qunlock(&waitlk);
+			close(fd);
+			werrstr("too many waits");
 			fail(f[0]);
-		else{
-			snprint(line, sizeof line, "ok %ld", n);
-			answer(f[0], line, buf, n);
+			return;
 		}
-		free(buf);
+		nwait++;
+		qunlock(&waitlk);
+		w = mallocz(sizeof *w, 1);
+		if(w == nil){
+			close(fd);
+			qlock(&waitlk);
+			nwait--;
+			qunlock(&waitlk);
+			fail(f[0]);
+			return;
+		}
+		strecpy(w->tag, w->tag+sizeof w->tag, f[0]);
+		w->fd = fd;
+		w->off = strtoll(f[3], nil, 0);
+		w->n = atol(f[4]);
+		proccreate(waitproc, w, Stack);
 	}else if(strcmp(f[1], "write") == 0 && nf == 4){
 		if(ndata > Maxio){
 			werrstr("write too large");
