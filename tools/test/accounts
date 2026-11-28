@@ -238,8 +238,10 @@ class Testi:
             t = self.v.pterm.put(os.path.join(JUURI, paik), eta)
             if t.koodi != 0:
                 raise vm9.VirheVM("put %s: %s %s" % (eta, t.status, t.stderr))
-        t = self.aja("cd /sys/src/libwebauthn && mk install >[2=1] && cd /sys/src/cmd/accounts && mk install >[2=1]"
-                     " && cd /sys/src/cmd/ethergw && mk install >[2=1]", aikaraja=900)
+        # mk -a: kuvan binäärien aikaleimat voivat olla tuotujen lähteiden jälkeen
+        # (käännöskoneen kello), jolloin mk pitäisi ne ajan tasalla ja testi ajaisi kuvan omia
+        t = self.aja("cd /sys/src/libwebauthn && mk -a install >[2=1] && cd /sys/src/cmd/accounts && mk -a install >[2=1]"
+                     " && cd /sys/src/cmd/ethergw && mk -a install >[2=1]", aikaraja=900)
         self.tk.ok("vieras: libwebauthn, auth/accountd, account, asuser, aux/etherws käännetty (amd64)",
                    t.koodi == 0, t.stdout[-1500:] + t.status)
         if t.koodi != 0:
@@ -273,7 +275,7 @@ class Testi:
             "aux/listen1 'tcp!*!%d' /bin/aux/etherws $e -a accountd2 >>[2]/usr/glenda/listen2.log &" % WSPORTTI2,
             # ethernetd: koneen ensimmäinen viesti on sen accountd-istunto (session TOKEN);
             # -x on pakollinen (vain kotihakemistot viedään)
-            "aux/ethernetd -l -a accountd -x '^/(|usr(|/.*))$' -g 10.0.2.2 0 >>[2]/usr/glenda/ethernetd.log &",
+            "aux/ethernetd -l -v -a accountd -x '^/(|usr(|/.*))$' -g 10.0.2.2 0 >>[2]/usr/glenda/ethernetd.log &",
             "for(i in `{seq 1 100}) if(! test -e /srv/ethernetd) sleep 0.1",
             "aux/listen1 'tcp!*!%d' /bin/aux/etherws -E %s >>[2]/usr/glenda/listen3.log &"
             % (WSPORTTI3, self.origin),
@@ -705,6 +707,29 @@ class Testi:
         w = WS(self.v.portit[WSPORTTI3], "https://evil.example", "/ether")
         tk.ok("ethernetd: /ether vain koneen alkuperältä", "403" in w.status, w.status)
         w.close()
+
+        # saman tilin kaksi laitetta (puhelin ja toinen puhelin): kumpikin pysyy verkossa
+        a = WS(self.v.portit[WSPORTTI3], self.origin, "/ether")
+        b = WS(self.v.portit[WSPORTTI3], self.origin, "/ether")
+        try:
+            ra = a.ask("session " + self.ta)
+            rb = b.ask("session " + self.ta)
+            a.s.settimeout(3)
+            try:
+                tapahtui = "teksti: " + a.text()
+                elossa = False
+            except (socket.timeout, TimeoutError):
+                tapahtui = "aikaraja (yhteys auki)"
+                elossa = True
+            except (EOFError, OSError) as e:
+                tapahtui = "%s: %s" % (type(e).__name__, e)
+                elossa = False
+            loki = "" if elossa else self.aja("tail -6 /usr/glenda/ethernetd.log").stdout
+            tk.ok("ethernetd: saman tilin kaksi konetta verkossa yhtä aikaa",
+                  ra == "ok" and rb == "ok" and elossa, (ra, rb, tapahtui, loki))
+        finally:
+            a.close()
+            b.close()
 
         # rinnakkaiset accountd-tarkistukset (conn.c: yhteyskohtainen /srv-tiedosto): kirjautunut
         # kone pääsee verkkoon arvaajien keskellä, eikä /srv:hen jää accountd.PID.*-tiedostoja
