@@ -129,6 +129,12 @@ ls -l /n/newfs/rc/lib/rcmain /n/newfs/rc/bin/termrc /n/newfs/sys/include/libc.h 
 	awk '{ if(substr($1, 9, 1) != "r") print }' | grep -s . && die 'järjestelmätiedostot eivät ole kaikkien luettavissa'
 test -f /n/newfs/sys/include/bootinfo.h || die 'BootInfo-otsake puuttuu'
 test -f /n/newfs/lib/ndb/local -a -f /n/newfs/sys/man/1/INDEX || die 'dist-tiedostot tai man-indeksit puuttuvat'
+# lokit kuten distproto: a662 sys sys.  root.tar ei säilytä tilaa (vm9.py
+# _tar_suodata antaa 664), joten mkfs -U kopioisi lokit muiden kuin
+# omistajan kirjoittamattomina (rc-httpd, listen ym. ajavat käyttäjänä none)
+for(f in `{walk -f /n/newfs/sys/log}){
+	chmod 662 $f && chmod +a $f && chgrp -u sys $f && chgrp sys $f || die 'lokin tila: '^$f
+}
 
 # Plan2001:n ydin ja loader myös asennettuun järjestelmään, jotta
 # 9frontin omat työkalut (inst/bootsetup, 9fs 9fat) käyttävät niitä
