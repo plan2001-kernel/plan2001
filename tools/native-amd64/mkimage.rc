@@ -131,7 +131,11 @@ test -f /n/newfs/sys/include/bootinfo.h || die 'BootInfo-otsake puuttuu'
 test -f /n/newfs/lib/ndb/local -a -f /n/newfs/sys/man/1/INDEX || die 'dist-tiedostot tai man-indeksit puuttuvat'
 # lokit kuten distproto: a662 sys sys.  root.tar ei säilytä tilaa (vm9.py
 # _tar_suodata antaa 664), joten mkfs -U kopioisi lokit muiden kuin
-# omistajan kirjoittamattomina (rc-httpd, listen ym. ajavat käyttäjänä none)
+# omistajan kirjoittamattomina (rc-httpd, listen ym. ajavat käyttäjänä none).
+# wg (wgsetup up cpustartissa) ja https (tcp443:n rc-httpd) eivät ole
+# jakelussa; luodaan ne tässä, ettei ensimmäinen >> luo niitä oletustilassa
+for(f in wg https)
+	test -e /n/newfs/sys/log/$f || touch /n/newfs/sys/log/$f || die 'lokin luonti: '^$f
 for(f in `{walk -f /n/newfs/sys/log}){
 	chmod 662 $f && chmod +a $f && chgrp -u sys $f && chgrp sys $f || die 'lokin tila: '^$f
 }
