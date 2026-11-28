@@ -305,5 +305,7 @@ kbdfs-text-terminal.diff
 		tabs and wrapped UTF-8 input. Unfinished lines remain editable
 		past 256 runes. Completed lines stay queued until cons accepts
 		them, while input editing, interrupts and consctl remain live.
+		One bounded console writer batches echo and program output in
+		order while a slow 9P write completes.
 		Raw console delivery waits for the reader instead of dropping
 		runes. The default echo remains suitable for drawterm and serial.

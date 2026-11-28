@@ -1,5 +1,5 @@
 diff --git a/sys/src/cmd/aux/kbdfs/kbdfs.c b/sys/src/cmd/aux/kbdfs/kbdfs.c
-index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..6cd31656712262ac9c1ab929c32aefdef222ef4f 100644
+index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..67613f83c636e9d675ca38b53c12ed266b5ba595 100644
 --- a/sys/src/cmd/aux/kbdfs/kbdfs.c
 +++ b/sys/src/cmd/aux/kbdfs/kbdfs.c
 @@ -112,6 +112,7 @@ int notefd = -1;
@@ -10,7 +10,15 @@ index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..6cd31656712262ac9c1ab929c32aefde
  int serialcons;	/* -c: the serial line is a console of its own */
  int consctlopen;
  int quiet = 0;
-@@ -1108,59 +1109,252 @@ mctlproc(void *)
+@@ -135,6 +136,7 @@ Channel *serialchan;	/* chan(Rune): runes from consfd */
+ 
+ Channel *conschan;	/* chan(char*) */
+ Channel *kbdchan;	/* chan(char*) */
++Channel *outchan;	/* chan(Output*), one ordered console writer */
+ Channel *intchan;	/* chan(int) */
+ 
+ char *layertab[Nlayers] = {
+@@ -1108,59 +1110,321 @@ mctlproc(void *)
  }
  
  /*
@@ -30,13 +38,86 @@ index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..6cd31656712262ac9c1ab929c32aefde
 +static char echobuf[8192];
 +static int necho, termcol;
 +
++typedef struct Output Output;
++struct Output {
++	char *p;
++	int n;
++	Channel *ack;
++	char err[ERRMAX];
++};
++
++/* A slow 9P write must not make the editor echo one rune per RTT.  The
++ * bounded queue lets it collect subsequent input while this proc writes.
++ * Program output uses the same queue, with an acknowledgement and errors.
++ */
++static void
++outputproc(void *)
++{
++	Output *o, *pending, *batch[128];
++	char *buf;
++	int n, nb, i, size;
++	char err[ERRMAX];
++
++	threadsetname("console output");
++	size = sizeof echobuf;
++	buf = emalloc9p(size);
++	pending = nil;
++	for(;;){
++		o = pending != nil ? pending : recvp(outchan);
++		pending = nil;
++		n = nb = 0;
++		do {
++			if(n != 0 && n+o->n > size){
++				pending = o;
++				break;
++			}
++			if(o->n > size){
++				size = o->n;
++				buf = erealloc9p(buf, size);
++			}
++			memmove(buf+n, o->p, o->n);
++			n += o->n;
++			batch[nb++] = o;
++			if(nb == nelem(batch) || n == size)
++				break;
++		} while((o = nbrecvp(outchan)) != nil);
++		i = write(1, buf, n);
++		if(i < 0)
++			rerrstr(err, sizeof err);
++		else if(i != n){
++			strecpy(err, err+sizeof err, "short console write");
++			i = -1;
++		}
++		for(n = 0; n < nb; n++){
++			o = batch[n];
++			if(o->ack != nil){
++				if(i < 0)
++					strecpy(o->err, o->err+sizeof o->err, err);
++				else
++					o->err[0] = 0;
++				sendul(o->ack, i);
++			}else{
++				free(o->p);
++				free(o);
++			}
++		}
++	}
++}
++
 +static void
 +flushout(void)
 +{
-+	if(necho != 0){
-+		write(1, echobuf, necho);
-+		necho = 0;
-+	}
++	Output *o;
++
++	if(necho == 0)
++		return;
++	o = emalloc9p(sizeof *o);
++	o->p = emalloc9p(necho);
++	memmove(o->p, echobuf, necho);
++	o->n = necho;
++	o->ack = nil;
++	sendp(outchan, o);
++	necho = 0;
 +}
 +
 +static void
@@ -44,12 +125,8 @@ index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..6cd31656712262ac9c1ab929c32aefde
 +{
 +	if(necho+n > sizeof echobuf)
 +		flushout();
-+	if(n > sizeof echobuf)
-+		write(1, s, n);
-+	else{
-+		memmove(echobuf+necho, s, n);
-+		necho += n;
-+	}
++	memmove(echobuf+necho, s, n);
++	necho += n;
 +}
 +
 +/* Erase cells explicitly: BS alone only moves a terminal's cursor. */
@@ -295,7 +372,7 @@ index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..6cd31656712262ac9c1ab929c32aefde
  	}
  }
  
-@@ -1328,6 +1522,7 @@ ctlproc(void *)
+@@ -1328,6 +1592,7 @@ ctlproc(void *)
  	a[AEND].op = CHANEND;
  
  	for(;;){
@@ -303,7 +380,7 @@ index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..6cd31656712262ac9c1ab929c32aefde
  		a[ASERIAL].op = serialchan != nil && sp == nil ? CHANRCV : CHANNOP;
  		a[ASEND].op = sp != nil ? CHANSND : CHANNOP;
  		switch(i = alt(a)){
-@@ -1358,29 +1553,10 @@ ctlproc(void *)
+@@ -1358,29 +1623,10 @@ ctlproc(void *)
  			if(raw){
  				s = emalloc9p(UTFmax+1);
  				s[runetochar(s, &r)] = 0;
@@ -335,22 +412,45 @@ index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..6cd31656712262ac9c1ab929c32aefde
  			send(cook, &r);
  			break;
  		case ASEND:
-@@ -1698,7 +1874,13 @@ fswrite(Req *r)
+@@ -1688,6 +1934,7 @@ fswrite(Req *r)
+ 	Fid *f;
+ 	char *p;
+ 	int n, i;
++	Output o;
+ 
+ 	f = r->fid;
+ 	p = r->ifcall.data;
+@@ -1698,8 +1945,19 @@ fswrite(Req *r)
  		return;
  
  	case Qcons:
 -		if(write(1, p, n) != n){
+-			responderror(r);
++		o.p = p;
++		o.n = n;
++		o.ack = chancreate(sizeof(ulong), 0);
 +		qlock(&outlock);
 +		flushout();
-+		i = write(1, p, n);
-+		if(termcols && i > 0)
-+			consolecol(p, i);
++		if(termcols)
++			consolecol(p, n);
++		sendp(outchan, &o);
 +		qunlock(&outlock);
-+		if(i != n){
- 			responderror(r);
++		i = recvul(o.ack);
++		chanfree(o.ack);
++		if(i < 0){
++			respond(r, o.err);
  			return;
  		}
-@@ -1846,7 +2028,7 @@ Srv fs = {
+ 		break;
+@@ -1821,6 +2079,7 @@ fsstart(Srv*)
+ 	killfd = procopen(getpid(), "notepg", OWRITE);
+ 	elevate();
+ 	memcpy(kbtabs, ascii, sizeof kbtabs);
++	proccreate(outputproc, nil, STACK);
+ 	proccreate(ctlproc, nil, STACK);
+ }
+ 
+@@ -1846,7 +2105,7 @@ Srv fs = {
  void
  usage(void)
  {
@@ -359,7 +459,7 @@ index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..6cd31656712262ac9c1ab929c32aefde
  	exits("usage");
  }
  
-@@ -1863,6 +2045,11 @@ threadmain(int argc, char** argv)
+@@ -1863,6 +2122,11 @@ threadmain(int argc, char** argv)
  	case 's':
  		sname = EARGF(usage());
  		break;
@@ -371,7 +471,13 @@ index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..6cd31656712262ac9c1ab929c32aefde
  	case 'c':
  		serialcons++;
  		break;
-@@ -1899,7 +2086,7 @@ threadmain(int argc, char** argv)
+@@ -1894,12 +2158,13 @@ threadmain(int argc, char** argv)
+ 
+ 	keychan = chancreate(sizeof(Key), 64);
+ 	mctlchan = chancreate(sizeof(Key), 64);
++	outchan = chancreate(sizeof(Output*), 128);
+ 	ctlchan = chancreate(sizeof(int), 0);
+ 	rawchan = chancreate(sizeof(Rune), 0);
  	runechan = chancreate(sizeof(Rune), 256);
  	if(consfd >= 0)
  		serialchan = chancreate(sizeof(Rune), 256);
