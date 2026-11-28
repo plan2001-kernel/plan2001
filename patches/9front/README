@@ -263,3 +263,21 @@ cwfs-gidspace-compact.diff
 		member addition failed with "conf.gidspace too small" until
 		cwfs restarted.  When an addition would not fit, gidspace is
 		now packed under the uid write lock first.  2026-11-28.
+
+cwfs-fid-lifecycle.diff
+		cmd/cwfs: fid lifecycle and users-file faults inherited from
+		Bell Labs cwfs (issue #67).  freefp frees (cp = 0) only a File
+		it unlinked; one fileinit has already unlinked is left for
+		fileinit to free, so no slot is reused while a chain or a
+		cleanup still holds it.  fileinit, _clunk and walk's error
+		paths clear wpath after freewp; auth, attach and walk unhash a
+		File before they qunlock it, as _clunk does.  chanhangup no
+		longer frees a served channel's Files under its running
+		requests: srvput does that when the last reply is out.
+		rewalk (dump) walks the fid chains under flock.
+		uidgid.c: cmd_users stops at conf.gidspace instead of writing
+		past it, readln keeps its NUL inside the buffer, pentry is
+		bounded (seprint); /adm/users is not rewritten after an
+		incomplete read or when an entry would not fit, and newuser
+		G +M refuses a member whose entry would not fit; +M reserves
+		ngrp entries, not ngrp+1.  2026-11-28.

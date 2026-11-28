@@ -1,8 +1,8 @@
 diff --git a/sys/src/cmd/cwfs/cw.c b/sys/src/cmd/cwfs/cw.c
-index 49d8924d9c7b0c2b8b65a3654e1f3d4ff8f67387..93f001d18723c3f7397ad4f9b2a78c8eb0cab70c 100644
+index bc60cf1e74d88c1c4a3176c6fd3c705ff0339e9b..d04acc680770f73f5531771c8e0722dcf2c67474 100644
 --- a/sys/src/cmd/cwfs/cw.c
 +++ b/sys/src/cmd/cwfs/cw.c
-@@ -1219,14 +1219,20 @@ rewalk2(Cw *cw, Off addr, int slot, Wpath *up)
+@@ -1219,11 +1219,15 @@ rewalk2(Cw *cw, Off addr, int slot, Wpath *up)
  	return addr;
  }
  
@@ -17,6 +17,11 @@ index 49d8924d9c7b0c2b8b65a3654e1f3d4ff8f67387..93f001d18723c3f7397ad4f9b2a78c8e
 -	File *f;
 +	File *f, *prev;
  
+ 	/*
+ 	 * dump pitää mainlockia, mutta srvi/srvo (fileinit) muuttavat
+@@ -1231,7 +1235,9 @@ rewalk(Cw *cw)
+ 	 */
+ 	lock(&flock);
  	for(h=0; h<nelem(flist); h++)
 -		for(f=flist[h]; f; f=f->next) {
 +		for(prev=nil, f=flist[h]; f; prev=f, f=f->next) {
@@ -26,7 +31,7 @@ index 49d8924d9c7b0c2b8b65a3654e1f3d4ff8f67387..93f001d18723c3f7397ad4f9b2a78c8e
  				continue;
  			if(cw->dev == f->fs->dev)
 diff --git a/sys/src/cmd/cwfs/sub.c b/sys/src/cmd/cwfs/sub.c
-index 294e1e5eb598fadd9f754324237441a5b8176967..98f89f638b1f1c96c799b594ca87808c5a5337d6 100644
+index 5405cbfaa373a8aad7674d4a7b5fe04462b3149c..faa96e0cf682f67a11d62de6bf791b83bf0fece5 100644
 --- a/sys/src/cmd/cwfs/sub.c
 +++ b/sys/src/cmd/cwfs/sub.c
 @@ -27,6 +27,126 @@ dev2fs(Device *dev)
@@ -156,7 +161,7 @@ index 294e1e5eb598fadd9f754324237441a5b8176967..98f89f638b1f1c96c799b594ca87808c
  /*
   * allocate 'count' contiguous channels
   * of type 'type' and return pointer to base
-@@ -72,6 +192,8 @@ loop:
+@@ -78,6 +198,8 @@ loop:
  	lock(&flock);
  	for (h=0; h < nelem(flist); h++)
  		for (prev=0, f = flist[h]; f; prev=f, f=f->next) {
@@ -165,7 +170,7 @@ index 294e1e5eb598fadd9f754324237441a5b8176967..98f89f638b1f1c96c799b594ca87808c
  			if(f->cp != cp)
  				continue;
  			if(prev) {
-@@ -107,7 +229,7 @@ loop:
+@@ -114,7 +236,7 @@ loop:
  File*
  filep(Chan *cp, ulong fid, int flag)
  {
@@ -174,7 +179,7 @@ index 294e1e5eb598fadd9f754324237441a5b8176967..98f89f638b1f1c96c799b594ca87808c
  	int h;
  
  	if(fid == NOFID)
-@@ -120,7 +242,9 @@ filep(Chan *cp, ulong fid, int flag)
+@@ -127,7 +249,9 @@ filep(Chan *cp, ulong fid, int flag)
  
  loop:
  	lock(&flock);
@@ -185,7 +190,7 @@ index 294e1e5eb598fadd9f754324237441a5b8176967..98f89f638b1f1c96c799b594ca87808c
  		if(f->fid == fid && f->cp == cp){
  			/*
  			 * Already in use is an error
-@@ -133,6 +257,7 @@ loop:
+@@ -140,6 +264,7 @@ loop:
  			unlock(&flock);
  			return 0;
  		}
@@ -193,7 +198,7 @@ index 294e1e5eb598fadd9f754324237441a5b8176967..98f89f638b1f1c96c799b594ca87808c
  
  	if(flag) {
  		f = newfp();
-@@ -204,7 +329,9 @@ freefp(File *fp)
+@@ -211,7 +336,9 @@ freefp(File *fp)
  	h %= nelem(flist);
  
  	lock(&flock);
@@ -204,11 +209,11 @@ index 294e1e5eb598fadd9f754324237441a5b8176967..98f89f638b1f1c96c799b594ca87808c
  		if(f == fp) {
  			if(prev)
  				prev->next = f->next;
-@@ -212,6 +339,7 @@ freefp(File *fp)
+@@ -219,6 +346,7 @@ freefp(File *fp)
  				flist[h] = f->next;
  			break;
  		}
 +	}
- 	fp->cp = 0;
- 	unlock(&flock);
- }
+ 	/*
+ 	 * vain ketjusta irrotettu File vapautetaan; jos sitä ei löytynyt,
+ 	 * fileinit on jo irrottanut sen ja vapauttaa sen itse
