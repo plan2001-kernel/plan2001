@@ -263,3 +263,17 @@ cwfs-gidspace-compact.diff
 		member addition failed with "conf.gidspace too small" until
 		cwfs restarted.  When an addition would not fit, gidspace is
 		now packed under the uid write lock first.  2026-11-28.
+
+ethervirtio-poll.diff
+		pc/ethervirtio.c, port/ethervirtio10.c: the receive, transmit
+		and control queues waited for an interrupt with no time limit.
+		A lost interrupt stopped the queue until the next one (OpenBSD
+		made vio(4) recover from missed RX interrupts in 7.9, seen on
+		Oracle's KVM), and when no receive block could be allocated
+		(iallocbp: pool empty and kernel memory exhausted) with no
+		buffer left in the ring, the device could not raise one at
+		all, so receiving stopped for good.  They now wait at most a second
+		and then check the queue and refill the ring themselves; the
+		ring is notified only when buffers were added.  ifstat counts
+		completions found without an interrupt (npoll) and failed
+		receive block allocations (nnobuf).  2026-11-28.

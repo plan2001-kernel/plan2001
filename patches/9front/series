@@ -13,6 +13,7 @@ kbdfs-cooked-input.diff		fix		local; upstream candidate
 rcpu-script-read.diff		fix		local; upstream candidate
 keyfs-rename-pakhash.diff	fix		local; upstream candidate
 cwfs-gidspace-compact.diff	fix		local; upstream candidate
+ethervirtio-poll.diff		fix		local; upstream candidate
 # WASM32 architecture
 libc-9syscall-wasm32.diff	wasm32		local
 libthread-wasm32.diff		wasm32		local
