@@ -122,6 +122,9 @@ export class JsFs {
 	async open(path, mode = OREAD) { const r = await this.call('open', [path, mode]); return { fid: r.args[0], iounit: Number(r.args[1]) }; }
 	async create(path, mode, perm) { const r = await this.call('create', [path, mode, String(perm >>> 0)]); return { fid: r.args[0] }; }
 	async read(fid, offset, count) { return (await this.call('read', [fid, offset, Math.min(count, CHUNK)])).data; }
+	// Cancel a blocking wait using the watched service's own control operation
+	// before closing its fid; the worker owns a duplicate until read returns.
+	async wait(fid, offset, count) { return (await this.call('wait', [fid, offset, Math.min(count, CHUNK)])).data; }
 	async write(fid, offset, bytes) { return Number((await this.call('write', [fid, offset], bytes)).args[0]); }
 	async dirread(fid) { return dirs(dec.decode((await this.call('dirread', [fid])).data)); }
 	async close(fid) { await this.call('close', [fid]); }

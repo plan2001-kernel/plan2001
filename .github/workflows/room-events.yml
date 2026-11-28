@@ -1,0 +1,34 @@
+name: Room native event checks
+on:
+  pull_request:
+    paths:
+      - 'sys/src/cmd/jsio/**'
+      - 'sys/src/cmd/ethergw/**'
+      - 'sys/src/9/wasm32/jsfs.js'
+      - 'tests/issue76-jsfs.test.mjs'
+      - '.github/workflows/room-events.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check JSFS wait and disconnect
+        run: node --test tests/issue76-jsfs.test.mjs
+      - name: Protect CWFS and kernel from Room changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --name-only "$BASE...$HEAD" > /tmp/room-changed
+          cat /tmp/room-changed
+          if grep -E '(^patches/9front/|(^|/)cwfs/|^sys/src/9/)' /tmp/room-changed | grep -v '^sys/src/9/wasm32/jsfs.js$'; then
+            echo "Unexpected kernel or upstream patch change"
+            exit 1
+          fi
