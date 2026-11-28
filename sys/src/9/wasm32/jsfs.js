@@ -178,7 +178,11 @@ export class JsFs {
 	 * (esim. vaiheistusnimi samassa hakemistossa) ja julkaistaan yhdellä
 	 * fwstatilla: uusi nimi, ryhmä ja oikeudet kerralla - lukija näkee
 	 * joko ei mitään tai koko tiedoston.  Epäonnistuessa keskeneräinen
-	 * poistetaan.
+	 * poistetaan, mutta vain kun se on varmasti tämän kutsun luoma (excl)
+	 * tai vaiheistusnimi (publish): muuten create katkaisi olemassa
+	 * olevan tiedoston, ja poisto hävittäisi sen kokonaan.  Plan 9:n
+	 * fwstat ei korvaa olemassa olevaa nimeä, joten publish julkaisee vain
+	 * uuden nimen.
 	 */
 	async writeFile(path, bytes, { perm = 0o644, excl = false, publish = null } = {}) {
 		if (typeof bytes === 'string') bytes = enc.encode(bytes);
@@ -191,7 +195,7 @@ export class JsFs {
 			if (publish) await this.fwstat(fid, publish);
 		} catch (e) {
 			await this.close(fid).catch(() => {});
-			await this.remove(path).catch(() => {});
+			if (excl || publish) await this.remove(path).catch(() => {});
 			throw e;
 		}
 		await this.close(fid);

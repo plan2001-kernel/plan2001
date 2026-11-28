@@ -44,6 +44,7 @@ enum {
 	Stack	= 32*1024,
 	Maxmsg	= 128*1024,	/* devjs.c:n viesti */
 	Maxio	= 64*1024,	/* datan enimmäismäärä viestissä */
+	Dirbatch	= 8192,	/* hakemiston lukuerä (dirreadreply) */
 	Nfid	= 512,
 	Maxwork	= 16,
 };
@@ -213,27 +214,51 @@ static void
 dirreadreply(char *tag, int fd)
 {
 	Dir *d;
-	char *b, *s, hdr[32];
-	long n, len, i, nent;
+	char *b, *s, *rb, hdr[32];
+	long n, len, i, l, nent;
 
 	b = malloc(Maxio + 512);
-	if(b == nil){
+	rb = malloc(Dirbatch);
+	if(b == nil || rb == nil){
+		free(b);
+		free(rb);
 		fail(tag);
 		return;
 	}
-	/* dirread palauttaa kokonaisia merkintöjä; enintään Maxio tavua rivejä */
+	/*
+	 * Merkinnät luetaan enintään Dirbatch tavun erissä: dirread lukisi
+	 * kerralla iounitin verran (32 KiB), jonka tekstirivit eivät mahdu
+	 * puskurin jäljellä olevaan tilaan.  Erän rivit ovat enintään
+	 * 3 * Dirbatch tavua (%q kahdentaa lainausmerkit, luvut 20 numeroa),
+	 * joten uusi erä luetaan vain, kun sille on tilaa.
+	 */
 	len = 0;
 	nent = 0;
-	while(len < Maxio - 8192 && (n = dirread(fd, &d)) > 0){
+	n = 0;
+	while(len < Maxio - 4*Dirbatch && (n = read(fd, rb, Dirbatch)) > 0){
+		if((n = dirpackage((uchar*)rb, n, &d)) < 0)
+			break;
 		for(i = 0; i < n; i++){
 			s = dirline(&d[i]);
-			memmove(b+len, s, strlen(s));
-			len += strlen(s);
+			l = strlen(s);
+			if(len + l > Maxio){
+				/* ei voi tapahtua yllä olevalla rajalla; ei koskaan yli puskurin */
+				free(s);
+				free(d);
+				free(b);
+				free(rb);
+				werrstr("directory lines overflow");
+				fail(tag);
+				return;
+			}
+			memmove(b+len, s, l);
+			len += l;
 			free(s);
 			nent++;
 		}
 		free(d);
 	}
+	free(rb);
 	if(n < 0 && nent == 0){
 		free(b);
 		fail(tag);

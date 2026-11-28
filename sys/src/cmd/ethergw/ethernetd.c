@@ -32,8 +32,9 @@
  *
  * File service: TCP to the gateway's port -f (564) reaches this server's
  * stack through a pkt interface; a call from a machine's address is
- * served by exportfs -r ROOT (-X, /) with exportfs -P PATTERN (-x, if
- * given) as that machine's account: auth/asuser with the connection's
+ * served by exportfs -r ROOT (-X, /) with exportfs -P PATTERN (-x,
+ * required: the user's whole namespace would include /net, /srv and
+ * /proc) as that machine's account: auth/asuser with the connection's
  * session (a genuine dp9ik exchange through the auth server, the user's
  * own namespace, the file server checking the user's permissions).  The
  * session token never leaves this process but to asuser's standard
@@ -51,7 +52,7 @@
  * standard error) has the connections, their bytes, the exports and each
  * new outward TCP connection's destination.
  *
- *	aux/ethernetd [-a accountsrv] [-s srvname] [-n net] [-f port] [-X root] [-x pattern]
+ *	aux/ethernetd -x pattern [-a accountsrv] [-s srvname] [-n net] [-f port] [-X root]
  *		[-e] [-g gate ifc] [-D resolver]... [-m max] [-i idle] [-R rate] [-l] [-v]
  * (-v: each connection in the log too)
  */
@@ -386,15 +387,20 @@ timerproc(void*)
 static char*
 session(char *tok)
 {
-	char *a, *f[4], *name;
+	char *a, *f[4], *name, *req;
 	int fd;
 
 	if((fd = dialaccountd(accountsrv)) < 0){
 		elog("accountd: %r");
 		return nil;
 	}
-	a = askaccountd(fd, smprint("session %s", tok));
+	req = smprint("session %s", tok);
+	a = askaccountd(fd, req);
 	hangupaccountd(fd);
+	if(req != nil){
+		memset(req, 0, strlen(req));	/* the session token */
+		free(req);
+	}
 	if(a == nil){
 		elog("accountd: %r");
 		return nil;
@@ -905,6 +911,7 @@ connproc(void *a)
 	if(!c->ended)
 		sendend(c);
 	sendp(c->out, nil);	/* the writer ends it */
+	threadnotify(alarmnote, 0);	/* libthread's table has room for 32 procs' handlers */
 }
 
 /* this machine's addresses, which the machines may not reach */
@@ -1024,7 +1031,7 @@ netsetup(void)
 static void
 usage(void)
 {
-	fprint(2, "usage: aux/ethernetd [-a accountsrv] [-s srvname] [-n net] [-f port] [-X root] [-x pattern] [-e] [-g gate ifc] [-D resolver]... [-m max] [-i idle] [-R rate] [-l] [-v]\n");
+	fprint(2, "usage: aux/ethernetd -x pattern [-a accountsrv] [-s srvname] [-n net] [-f port] [-X root] [-e] [-g gate ifc] [-D resolver]... [-m max] [-i idle] [-R rate] [-l] [-v]\n");
 	threadexitsall("usage");
 }
 
@@ -1216,7 +1223,8 @@ threadmain(int argc, char **argv)
 	default:
 		usage();
 	}ARGEND
-	if(argc != 0 || fport <= 0 || fport >= 65536)
+	/* without a pattern exportfs would export the user's whole namespace, /net included */
+	if(argc != 0 || fport <= 0 || fport >= 65536 || exportpat == nil)
 		usage();
 	if(nresolvers == 0){
 		parseip(ip, "9.9.9.9");
