@@ -139,8 +139,8 @@ fi
 # (mkrunetype, from /lib/ucd's text), awk's proctab.c (maketab, from
 # yacc's y.tab.h) and jpg's ycbcr.h and rgbv.h (rgbycc, rgbrgbv).  Made
 # here with plan9port's 9c and 9l from the tree's own programs.
-hostmade() {	# DIR PROGRAM: build DIR/PROGRAM.c for the host into $m/PROGRAM
-	cp "$1/$2.c" "$m/$2.c" && (cd "$m" && PATH=$PLAN9/bin:$PATH 9c "$2.c" >/dev/null && PATH=$PLAN9/bin:$PATH 9l -o "$2" "$2.o")
+hostmade() {	# DIR PROGRAM: build DIR/PROGRAM.c for the host into $m/PROGRAM (DIR's headers on -I)
+	cp "$1/$2.c" "$m/$2.c" && (cd "$m" && PATH=$PLAN9/bin:$PATH 9c -I"$1" "$2.c" >/dev/null && PATH=$PLAN9/bin:$PATH 9l -o "$2" "$2.o")
 }
 u=$tree/sys/src/libc/ucd
 if [ -e "$u/mkrunetype.c" ] && [ ! -e "$u/runeistypedata" ]; then
