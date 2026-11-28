@@ -2,6 +2,7 @@
 """Exercise 9pterm's actual interactive keyboard and kbdfs in an isolated VM.
 
 termtest --image UEFI-IMAGE [--9pterm CLIENT]
+Use an image built with mkimage --console 0.
 The image is read through a disposable qcow2 overlay. No production account
 or service is contacted. Requires the image's native compilers and services.
 """
@@ -324,12 +325,12 @@ def delayed(p, milliseconds):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--image', required=True)
-    ap.add_argument('--9pterm', dest='client', default=cpuvieras.etsi_9pterm())
+    ap.add_argument('--9pterm', dest='client', default=None)
     ap.add_argument('--delay-ms', type=int, default=0, help='delay each CPU link direction')
     args = ap.parse_args()
     if args.delay_ms < 0:
         ap.error('--delay-ms must be nonnegative')
-    os.environ['NINEPTERM'] = os.path.abspath(args.client)
+    os.environ['NINEPTERM'] = os.path.abspath(args.client or cpuvieras.etsi_9pterm())
     with tempfile.TemporaryDirectory(prefix='p2term-') as work:
         image = os.path.join(work, 'disk.qcow2')
         subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'raw',
