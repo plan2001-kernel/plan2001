@@ -31,6 +31,10 @@ Kuorma isännältä (QEMU:n loopback-porttiohjaukset), rinnakkain:
 - natiivi rcpu (9pterm): lyhyitä komentoja, osa katkaistaan (-T)
 - vieraan sisäinen tiedostojärjestelmäkuorma (luonti, uudelleennimeäminen,
   poisto, hakemistojen luku, du) ja cwfs:n dump --dump minuutin välein
+- tuotannon kaltainen kevyt kuorma: --purske S (yhden käyttäjän
+  rinnakkaiset Room-pyynnöt kuten puhelimen selain, osa katkaistaan),
+  --dumpsek S (dump vieraan sisältä tiheästi, jotta purske osuu dumpiin),
+  --ei-sisakuormaa (ei vieraan omaa tiedostojärjestelmäkuormaa)
 
 Valvonta: sarjakonsoli koko ajan (corrupt fid chain, suicide, fid in use,
 incall queue full, out of files, panic), terveystarkistus rcpu:lla ja
@@ -45,6 +49,7 @@ diagnoosi.log, yhteenveto.txt; paluuarvo 0 (aika loppui, ei kaatumista),
     tools/test/cwfsload --kuva KUVA [--kesto MIN] [--room HAK] [--room-rev REV] [--lokit HAK]
                         [--muisti MiB] [--cpu N] [--cpuquota PROS]
                         [--kayttajat N] [--maxkayttajat N] [--dump MIN] [--keep]
+                        [--dumpsek S] [--purske S] [--purskekoko N] [--ei-sisakuormaa]
 
 Kuva: tools/native-amd64/mkimage --disk sd00 --console 0.  Room-lähde:
 --room (oletus ../room tämän puun vieressä), commit --room-rev (oletus
@@ -987,6 +992,45 @@ class Testi:
             self.mittaa("rcpu: komento", lambda: self.aja(k, 120), lambda t: t.koodi == 0)
         self.seis.wait(random.uniform(1, 6))
 
+    def purske_kierros(self):
+        """
+        Puhelimen selain avaa tai palaa Roomiin: yhden käyttäjän
+        purske rinnakkaisia API-pyyntöjä (jokainen on vieraassa oma
+        Tauth/Tattach cwfs:lle), osa katkaistaan kesken (RST).  Purskeiden
+        välillä on hiljaista, kuten tuotannossa.
+        """
+        if self.seis.wait(random.uniform(0.5, 1.5) * self.a.purske):
+            return
+        k = self.satunnainen_kayttaja()
+        if k is None or not k.huoneet:
+            return
+        ok2 = lambda r: r is not None and r[0] == 200  # noqa: E731
+
+        def yksi(i):
+            h = random.choice(k.huoneet)
+            x = random.random()
+            if x < 0.3:
+                tapa = random.choice(("otsakkeet", "vastaus"))
+                self.mittaa("purske: katkaisu " + tapa,
+                            lambda: k.api("GET", "/api/rooms/%s/messages?limit=50" % h, katkaisu=tapa))
+            elif x < 0.45:
+                self.mittaa("purske: me", lambda: k.api("GET", "/api/me"), ok2)
+            else:
+                self.mittaa("purske: viestit", lambda: k.api("GET", "/api/rooms/%s/messages?limit=50" % h), ok2)
+
+        saikeet = [threading.Thread(target=yksi, args=(i,), daemon=True) for i in range(self.a.purskekoko)]
+        for t in saikeet:
+            t.start()
+        for t in saikeet:
+            t.join(180)
+        self.tilasto.tapahtuma("purske: %d pyyntöä" % len(saikeet))
+
+    def dumpit(self, milloin):
+        """Valmiiden dumpien määrä: todistaa, että --dumpsek-silmukka todella dumppaa."""
+        t = self.mittaa("cwfs: dumpit", lambda: self.aja("9fs dump >/dev/null >[2=1]; ls -d /n/dump/*/* | wc -l", 120),
+                        lambda t: t.koodi == 0)
+        self.tilasto.tapahtuma("cwfs: dumpeja %s: %s" % (milloin, t.stdout.strip() if t else "?"))
+
     def dump_kierros(self):
         if self.seis.wait(self.a.dump * 60):
             return
@@ -1032,8 +1076,14 @@ class Testi:
         # vieraan oma tiedostojärjestelmäkuorma omassa note-ryhmässään
         # sarjakonsolilta: rcpu-istunto ei pääty, kun taustaprosessin nimiavaruus viittaa sen /mnt/termiin
         self.aja_ok("rm -rf /tmp/kuorma; mkdir -p /tmp/kuorma")
-        self.v.vm.laheta("for(x in a b c) @{ rfork s; rc /cfg/load/kuorma.rc $x </dev/null >/dev/null "
-                         ">[2]/tmp/kuorma/$x.err & }\n")
+        if a.sisakuorma:
+            self.v.vm.laheta("for(x in a b c) @{ rfork s; rc /cfg/load/kuorma.rc $x </dev/null >/dev/null "
+                             ">[2]/tmp/kuorma/$x.err & }\n")
+        if a.dumpsek > 0:
+            # tiheä dump vieraan sisältä: ei rcpu-istuntoa jokaista dumpia kohden
+            self.v.vm.laheta("@{ rfork s; while() { echo dump >>/srv/cwfs.cmd; sleep %d } "
+                             "</dev/null >/dev/null >[2=1] & }\n" % a.dumpsek)
+            self.tilasto.tapahtuma("cwfs: dump vieraassa %d s välein" % a.dumpsek)
         for i in range(a.room_saikeet):
             self.saie("room%d" % i, self.room_kierros)
         for i in range(a.staattiset):
@@ -1044,16 +1094,22 @@ class Testi:
         self.saie("natiivi", self.natiivi_kierros)
         if a.dump > 0:
             self.saie("dump", self.dump_kierros)
+        if a.purske > 0:
+            self.saie("purske", self.purske_kierros)
         for f in (self.terveys, self.tilanne):
             t = threading.Thread(target=f, daemon=True)
             t.start()
             self.saikeet.append(t)
         self.tilasto.tapahtuma("kuorma käynnissä: %d Room-, %d staattista, %d skanneri-, tili-, rcpu- ja dump-säie; "
                                "kesto %d min" % (a.room_saikeet, a.staattiset, a.skannerit, a.kesto))
+        if a.dumpsek > 0:
+            self.dumpit("alussa")
         loppu = time.time() + a.kesto * 60
         while time.time() < loppu and not self.sarja.kaatui.is_set():
             self.sarja.kaatui.wait(min(10, max(0.1, loppu - time.time())))
         kaatui = self.sarja.kaatui.is_set()
+        if a.dumpsek > 0 and not kaatui:
+            self.dumpit("lopussa")
         self.seis.set()
         for t in self.saikeet:
             t.join(60)
@@ -1156,6 +1212,11 @@ def main():
     ap.add_argument("--staattiset", type=int, default=3)
     ap.add_argument("--skannerit", type=int, default=3)
     ap.add_argument("--dump", type=int, default=30, help="cwfs:n dump minuutin välein (0: ei)")
+    ap.add_argument("--dumpsek", type=int, default=0, help="cwfs:n dump vieraan sisältä sekunnin välein (0: ei)")
+    ap.add_argument("--purske", type=float, default=0, help="Room-purske keskimäärin sekunnin välein (0: ei)")
+    ap.add_argument("--purskekoko", type=int, default=20, help="rinnakkaisia pyyntöjä purskeessa")
+    ap.add_argument("--ei-sisakuormaa", dest="sisakuorma", action="store_false",
+                    help="ei vieraan omaa tiedostojärjestelmäkuormaa")
     ap.add_argument("--ei-muistivedosta", dest="muistivedos", action="store_false")
     ap.add_argument("--keep", action="store_true", help="säilytä levykuva myös ilman kaatumista")
     a = ap.parse_args()
