@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 
 typedef unsigned int Rune;
 
@@ -84,6 +85,7 @@ csi(unsigned char *p, int n)
 		case 1: case 7:	return Khome;
 		case 4: case 8:	return Kend;
 		case 2:	return Kins;
+		case 3:	return Kdel;
 		case 5:	return Kpgup;
 		case 6:	return Kpgdown;
 		}
@@ -131,7 +133,7 @@ feed(unsigned char c)
 			seq[nseq++] = c;
 		if(c >= 0x40 && c <= 0x7e){	/* the final byte */
 			esc = 0;
-			if((r = csi(seq, nseq)) != 0 && ninetermkeys)
+			if((r = csi(seq, nseq)) != 0 && (r == Kdel || ninetermkeys))
 				key(r);
 		}else if(nseq == (int)sizeof seq)
 			esc = 0;	/* not a sequence we know: dropped */
@@ -207,4 +209,15 @@ ninetermkbdstart(void)
 	signal(SIGQUIT, onsig);
 	ninetermkbd = 1;
 	kproc("kbd", kbdproc, 0);
+}
+
+/* Width used by the server's opt-in terminal line editor. */
+int
+ninetermcolumns(void)
+{
+	struct winsize w;
+
+	if(ioctl(1, TIOCGWINSZ, &w) == 0 && w.ws_col > 0)
+		return w.ws_col;
+	return 80;
 }

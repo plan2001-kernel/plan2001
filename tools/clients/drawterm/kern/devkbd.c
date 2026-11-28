@@ -23,7 +23,12 @@ kbdkey(Rune r, int down)
 
 	memset(buf, 0, sizeof buf);
 	buf[0] = down ? 'r' : 'R';
+#ifdef NINEPTERM
+	/* tty's kproc may sleep; graphical GUI callbacks must not. */
+	qwrite(keyq, buf, 2+runetochar(buf+1, &r));
+#else
 	qproduce(keyq, buf, 2+runetochar(buf+1, &r));
+#endif
 }
 
 enum{
@@ -39,10 +44,16 @@ static Dirtab kbddir[]={
 static void
 kbdinit(void)
 {
+#ifdef NINEPTERM
+	keyq = qopen(4*1024, Qmsg, 0, 0);
+#else
 	keyq = qopen(4*1024, Qcoalesce, 0, 0);
+#endif
 	if(keyq == nil)
 		panic("kbdinit");
+#ifndef NINEPTERM
 	qnoblock(keyq, 1);
+#endif
 }
 
 static Chan*
@@ -100,7 +111,25 @@ kbdread(Chan *c, void *buf, long n, vlong off)
 	case Qdir:
 		return devdirread(c, buf, n, kbddir, nelem(kbddir), devgen);
 	case Qkbd:
+#ifdef NINEPTERM
+		{
+			long m, total;
+
+			/* kbdfs expects complete NUL-terminated events per read. */
+			if(n < UTFmax+2)
+				error(Eshort);
+			total = qread(keyq, buf, UTFmax+2);
+			while(n-total >= UTFmax+2 && qcanread(keyq)){
+				m = qread(keyq, (char*)buf+total, UTFmax+2);
+				if(m <= 0)
+					break;
+				total += m;
+			}
+			return total;
+		}
+#else
 		return qread(keyq, buf, n);
+#endif
 	default:
 		print("kbdread 0x%llux\n", c->qid.path);
 		error(Egreg);

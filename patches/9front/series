@@ -41,3 +41,5 @@ acpi-pwrbtn.diff		integration	local
 # WireGuard (#W)
 iproute-lookupskip.diff		integration	local
 pc64-wg.diff			integration	local
+
+kbdfs-text-terminal.diff	integration	local

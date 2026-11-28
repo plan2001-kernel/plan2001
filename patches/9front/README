@@ -299,3 +299,13 @@ ethervirtio-poll.diff
 		ring is notified only when buffers were added.  ifstat counts
 		completions found without an interrupt (npoll) and failed
 		receive block allocations (nnobuf).  2026-11-28.
+
+kbdfs-text-terminal.diff
+		aux/kbdfs -t columns: ANSI terminal echo with cell erasure,
+		tabs and wrapped UTF-8 input. Unfinished lines remain editable
+		past 256 runes. Completed lines stay queued until cons accepts
+		them, while input editing, interrupts and consctl remain live.
+		One bounded console writer batches echo and program output in
+		order while a slow 9P write completes.
+		Raw console delivery waits for the reader instead of dropping
+		runes. The default echo remains suitable for drawterm and serial.

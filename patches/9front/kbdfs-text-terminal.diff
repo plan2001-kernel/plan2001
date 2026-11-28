@@ -1,0 +1,531 @@
+diff --git a/sys/src/cmd/aux/kbdfs/kbdfs.c b/sys/src/cmd/aux/kbdfs/kbdfs.c
+index 905f8310b2cb8e2c8f78545c5f3e13a785006a70..67613f83c636e9d675ca38b53c12ed266b5ba595 100644
+--- a/sys/src/cmd/aux/kbdfs/kbdfs.c
++++ b/sys/src/cmd/aux/kbdfs/kbdfs.c
+@@ -112,6 +112,7 @@ int notefd = -1;
+ int killfd = -1;
+ 
+ int kbdopen;
++int termcols;	/* -t: ANSI text terminal, width in cells */
+ int serialcons;	/* -c: the serial line is a console of its own */
+ int consctlopen;
+ int quiet = 0;
+@@ -135,6 +136,7 @@ Channel *serialchan;	/* chan(Rune): runes from consfd */
+ 
+ Channel *conschan;	/* chan(char*) */
+ Channel *kbdchan;	/* chan(char*) */
++Channel *outchan;	/* chan(Output*), one ordered console writer */
+ Channel *intchan;	/* chan(int) */
+ 
+ char *layertab[Nlayers] = {
+@@ -1108,59 +1110,321 @@ mctlproc(void *)
+ }
+ 
+ /*
+- * Cook lines for cons
++ * A completed line stays owned here until cons accepts it.  Keep receiving
++ * editing and control runes while a reader is stopped: in particular DEL
++ * must be able to interrupt that reader and rawon must flush partial input.
++ * No 256-rune boundary commits an unfinished editable line.
+  */
++typedef struct Line Line;
++struct Line {
++	Line *next;
++	char *s;
++};
++
++static QLock outlock;
++static char echobuf[8192];
++static int necho, termcol;
++
++typedef struct Output Output;
++struct Output {
++	char *p;
++	int n;
++	Channel *ack;
++	char err[ERRMAX];
++};
++
++/* A slow 9P write must not make the editor echo one rune per RTT.  The
++ * bounded queue lets it collect subsequent input while this proc writes.
++ * Program output uses the same queue, with an acknowledgement and errors.
++ */
++static void
++outputproc(void *)
++{
++	Output *o, *pending, *batch[128];
++	char *buf;
++	int n, nb, i, size;
++	char err[ERRMAX];
++
++	threadsetname("console output");
++	size = sizeof echobuf;
++	buf = emalloc9p(size);
++	pending = nil;
++	for(;;){
++		o = pending != nil ? pending : recvp(outchan);
++		pending = nil;
++		n = nb = 0;
++		do {
++			if(n != 0 && n+o->n > size){
++				pending = o;
++				break;
++			}
++			if(o->n > size){
++				size = o->n;
++				buf = erealloc9p(buf, size);
++			}
++			memmove(buf+n, o->p, o->n);
++			n += o->n;
++			batch[nb++] = o;
++			if(nb == nelem(batch) || n == size)
++				break;
++		} while((o = nbrecvp(outchan)) != nil);
++		i = write(1, buf, n);
++		if(i < 0)
++			rerrstr(err, sizeof err);
++		else if(i != n){
++			strecpy(err, err+sizeof err, "short console write");
++			i = -1;
++		}
++		for(n = 0; n < nb; n++){
++			o = batch[n];
++			if(o->ack != nil){
++				if(i < 0)
++					strecpy(o->err, o->err+sizeof o->err, err);
++				else
++					o->err[0] = 0;
++				sendul(o->ack, i);
++			}else{
++				free(o->p);
++				free(o);
++			}
++		}
++	}
++}
++
++static void
++flushout(void)
++{
++	Output *o;
++
++	if(necho == 0)
++		return;
++	o = emalloc9p(sizeof *o);
++	o->p = emalloc9p(necho);
++	memmove(o->p, echobuf, necho);
++	o->n = necho;
++	o->ack = nil;
++	sendp(outchan, o);
++	necho = 0;
++}
++
++static void
++echoout(char *s, int n)
++{
++	if(necho+n > sizeof echobuf)
++		flushout();
++	memmove(echobuf+necho, s, n);
++	necho += n;
++}
++
++/* Erase cells explicitly: BS alone only moves a terminal's cursor. */
++static void
++erasecells(int n)
++{
++	char b[80];
++	int m;
++
++	while(n-- > 0){
++		if(termcol == 0){
++			echoout("\033[A", 3);
++			termcol = termcols;
++		}
++		termcol--;
++		m = snprint(b, sizeof b, "\033[%dG \033[%dG", termcol+1, termcol+1);
++		echoout(b, m);
++	}
++}
++
++#include "termwidth.h"
++
++/* Track the ordinary console output too, so a tab after rc's prompt has
++ * the same tab stop as the terminal.  Escape sequences don't occupy cells.
++ */
++static void
++consolecol(char *p, int n)
++{
++	static char utf[UTFmax];
++	static int nu, esc;
++	Rune r;
++	int w;
++
++	while(n-- > 0){
++		if(esc){
++			if(esc == 1 && *p == '[')
++				esc = 2;
++			else if(esc == 1 || (*p >= '@' && *p <= '~'))
++				esc = 0;
++			p++;
++			continue;
++		}
++		utf[nu++] = *p++;
++		if(!fullrune(utf, nu))
++			continue;
++		chartorune(&r, utf);
++		nu = 0;
++		switch(r){
++		case '\033': esc = 1; break;
++		case '\r': case '\n': termcol = 0; break;
++		case '\b': if(termcol > 0) termcol--; break;
++		case '\t': termcol = (termcol+8)&~7; break;
++		default:
++			w = termwidth(r);
++			if(w > 0){
++				if(termcol+w > termcols)
++					termcol = 0;
++				termcol += w;
++			}
++		}
++	}
++}
++
++/* Return the number of cells to undo, including padding before a wide rune. */
++static int
++echorune(Rune r)
++{
++	char b[UTFmax];
++	int w, pad;
++
++	if(!termcols){
++		echoout(b, runetochar(b, &r));
++		return 1;
++	}
++	if(r == '\n'){
++		echoout("\n", 1);
++		termcol = 0;
++		return 0;
++	}
++	w = r == '\t' ? 8-(termcol%8) : termwidth(r);
++	if(r < ' ' && r != '\t')
++		w = 2;
++	pad = 0;
++	if(w > 0 && termcol == termcols){
++		echoout("\r\n", 2);
++		termcol = 0;
++	}
++	if(r == '\t'){
++		w = 8-(termcol%8);
++		if(w > termcols-termcol)
++			w = termcols-termcol;
++		echoout("        ", w);
++	}else{
++		if(w > 0 && termcol+w > termcols){
++			pad = termcols-termcol;
++			echoout(" ", pad);
++			echoout("\r\n", 2);
++			termcol = 0;
++		}
++		if(r < ' '){
++			b[0] = '^';
++			b[1] = r+'@';
++			echoout(b, 2);
++		}else
++			echoout(b, runetochar(b, &r));
++	}
++	termcol += w;
++	return w+pad;
++}
++
+ void
+ lineproc(void *aux)
+ {
+-	Rune rb[256], r;
+-	Channel *cook;
+-	int nr, done;
++	Rune *rb, r;
++	int *width, nr, cap, old, first, j, batch;
+ 	char *s;
++	Channel *cook;
++	Line *head, **tail, *l;
++	Alt a[3];
+ 
+ 	cook = aux;
+-
+ 	threadsetname("lineproc");
+-
++	rb = nil;
++	width = nil;
++	nr = cap = 0;
++	head = nil;
++	tail = &head;
++	memset(a, 0, sizeof a);
++	a[0].c = cook;
++	a[0].v = &r;
++	a[0].op = CHANRCV;
++	a[1].c = conschan;
++	a[1].v = &s;
++	a[2].op = CHANEND;
+ 	for(;;){
+-		nr = 0;
+-		done = 0;
++		a[1].op = head != nil ? CHANSND : CHANNOP;
++		s = head != nil ? head->s : nil;
++		if(alt(a) == 1){
++			l = head;
++			head = l->next;
++			if(head == nil)
++				tail = &head;
++			free(l);
++			continue;
++		}
++		qlock(&outlock);
++		batch = 0;
+ 		do {
+-			recv(cook, &r);
+ 			switch(r){
+ 			case Kdel:
+ 				if(nbsend(intchan, &notefd) <= 0)
+-					continue;
++					break;
++				while(head != nil){
++					l = head;
++					head = l->next;
++					free(l->s);
++					free(l);
++				}
++				tail = &head;
++				if(termcols){
++					echoout("\n", 1);
++					termcol = 0;
++				}
+ 				/* no break */
+-			case '\0':	/* flush */
++			case '\0':
+ 				nr = 0;
+-				continue;
+-			case Kbs:	/* ^H: erase character */
+-			case Knack:	/* ^U: erase line */
+-			case Ketb:	/* ^W: erase word */
++				break;
++			case Kbs:
++			case Knack:
++			case Ketb:
++				old = nr;
+ 				while(nr > 0){
+-					nr--;
+-					fprint(1, "\b");
+-					if(r == Kbs)
+-						break;
+-					if(r == Ketb && utfrune(" \t", rb[nr]))
++					--nr;
++					if(termcols)
++						erasecells(width[nr]);
++					else
++						echoout("\b", 1);
++					if(r == Kbs || (r == Ketb && utfrune(" \t", rb[nr])))
+ 						break;
+ 				}
+-				continue;
+-			case Keof:	/* ^D: eof */
+-				done = 1;
++				if(termcols && old > nr && width[nr] == 0 && nr > 0){
++					for(first = nr-1; first > 0 && width[first] == 0; first--)
++						;
++					erasecells(width[first]);
++					for(j = first; j < nr; j++)
++						width[j] = echorune(rb[j]);
++				}
+ 				break;
+-			case '\n':
+-				done = 1;
+-				/* no break */
+ 			default:
+-				rb[nr++] = r;
+-				fprint(1, "%C", r);
++				if(nr == cap){
++					cap = cap == 0 ? 256 : cap*2;
++					rb = erealloc9p(rb, cap*sizeof *rb);
++					width = erealloc9p(width, cap*sizeof *width);
++				}
++				if(r != Keof){
++					rb[nr] = r;
++					width[nr++] = echorune(r);
++				}
++				if(r == '\n' || r == Keof){
++					l = emalloc9p(sizeof *l);
++					l->next = nil;
++					l->s = utfconv(rb, nr);
++					*tail = l;
++					tail = &l->next;
++					nr = 0;
++				}
++				break;
+ 			}
+-		} while(!done && nr < nelem(rb));
+-		s = utfconv(rb, nr);
+-		if(nbsendp(conschan, s) <= 0)
+-			free(s);
++		} while(++batch < 256 && nbrecv(cook, &r) > 0);
++		flushout();
++		qunlock(&outlock);
+ 	}
+ }
+ 
+@@ -1328,6 +1592,7 @@ ctlproc(void *)
+ 	a[AEND].op = CHANEND;
+ 
+ 	for(;;){
++		a[ARUNE].op = sp == nil ? CHANRCV : CHANNOP;
+ 		a[ASERIAL].op = serialchan != nil && sp == nil ? CHANRCV : CHANNOP;
+ 		a[ASEND].op = sp != nil ? CHANSND : CHANNOP;
+ 		switch(i = alt(a)){
+@@ -1358,29 +1623,10 @@ ctlproc(void *)
+ 			if(raw){
+ 				s = emalloc9p(UTFmax+1);
+ 				s[runetochar(s, &r)] = 0;
+-				/*
+-				 * conschan holds 128 runes: a paste on the
+-				 * line outran its reader and nbsendp dropped
+-				 * the rest.  Hold consfd's rune (and stop
+-				 * reading consfd) until a reader takes it,
+-				 * still taking ctlchan's messages meanwhile.
+-				 */
+-				if(i == ASERIAL){
+-					sp = s;
+-					break;
+-				}
+-				if(nbsendp(conschan, s) <= 0)
+-					free(s);
++				sp = s;
+ 				break;
+ 			}
+-			/*
+-			 * cook is unbuffered and lineproc leaves its recv
+-			 * whenever it hands over a line (newline, ^D or a
+-			 * full rb): nbsendp(conschan) yields, so with more
+-			 * input already in runechan a nbsend here found no
+-			 * receiver and dropped the next rune.  lineproc never
+-			 * waits for this thread, so block until it takes it.
+-			 */
++			/* lineproc keeps taking input while completed lines wait. */
+ 			send(cook, &r);
+ 			break;
+ 		case ASEND:
+@@ -1688,6 +1934,7 @@ fswrite(Req *r)
+ 	Fid *f;
+ 	char *p;
+ 	int n, i;
++	Output o;
+ 
+ 	f = r->fid;
+ 	p = r->ifcall.data;
+@@ -1698,8 +1945,19 @@ fswrite(Req *r)
+ 		return;
+ 
+ 	case Qcons:
+-		if(write(1, p, n) != n){
+-			responderror(r);
++		o.p = p;
++		o.n = n;
++		o.ack = chancreate(sizeof(ulong), 0);
++		qlock(&outlock);
++		flushout();
++		if(termcols)
++			consolecol(p, n);
++		sendp(outchan, &o);
++		qunlock(&outlock);
++		i = recvul(o.ack);
++		chanfree(o.ack);
++		if(i < 0){
++			respond(r, o.err);
+ 			return;
+ 		}
+ 		break;
+@@ -1821,6 +2079,7 @@ fsstart(Srv*)
+ 	killfd = procopen(getpid(), "notepg", OWRITE);
+ 	elevate();
+ 	memcpy(kbtabs, ascii, sizeof kbtabs);
++	proccreate(outputproc, nil, STACK);
+ 	proccreate(ctlproc, nil, STACK);
+ }
+ 
+@@ -1846,7 +2105,7 @@ Srv fs = {
+ void
+ usage(void)
+ {
+-	fprint(2, "usage: %s [ -qdDc ] [ -s sname ] [ -m mntpnt ] [ file ]\n", argv0);
++	fprint(2, "usage: %s [ -qdDc ] [ -t columns ] [ -s sname ] [ -m mntpnt ] [ file ]\n", argv0);
+ 	exits("usage");
+ }
+ 
+@@ -1863,6 +2122,11 @@ threadmain(int argc, char** argv)
+ 	case 's':
+ 		sname = EARGF(usage());
+ 		break;
++	case 't':
++		termcols = atoi(EARGF(usage()));
++		if(termcols < 8 || termcols > 65535)
++			usage();
++		break;
+ 	case 'c':
+ 		serialcons++;
+ 		break;
+@@ -1894,12 +2158,13 @@ threadmain(int argc, char** argv)
+ 
+ 	keychan = chancreate(sizeof(Key), 64);
+ 	mctlchan = chancreate(sizeof(Key), 64);
++	outchan = chancreate(sizeof(Output*), 128);
+ 	ctlchan = chancreate(sizeof(int), 0);
+ 	rawchan = chancreate(sizeof(Rune), 0);
+ 	runechan = chancreate(sizeof(Rune), 256);
+ 	if(consfd >= 0)
+ 		serialchan = chancreate(sizeof(Rune), 256);
+-	conschan = chancreate(sizeof(char*), 128);
++	conschan = chancreate(sizeof(char*), 0);
+ 	kbdchan = chancreate(sizeof(char*), 128);
+ 	intchan = chancreate(sizeof(int), 0);
+ 
+diff --git a/sys/src/cmd/aux/kbdfs/mkfile b/sys/src/cmd/aux/kbdfs/mkfile
+index a7b0ae4b474735f813dc90fdf85748e761104f39..adc640bc4add08694e8719b1f6af56dd08527f38 100644
+--- a/sys/src/cmd/aux/kbdfs/mkfile
++++ b/sys/src/cmd/aux/kbdfs/mkfile
+@@ -4,7 +4,7 @@ BIN=/$objtype/bin/aux
+ 
+ TARG=kbdfs
+ OFILES=kbdfs.$O
+-HFILES=latin1.h
++HFILES=latin1.h termwidth.h
+ CLEANFILES=latin1.h mklatin.$cputype
+ 
+ </sys/src/cmd/mkone
+diff --git a/sys/man/8/kbdfs b/sys/man/8/kbdfs
+index fba30c629bf87dfcb9261e1b95e828d3db2578cb..35403138b35e7c864e493c129a420218dc573d7a 100644
+--- a/sys/man/8/kbdfs
++++ b/sys/man/8/kbdfs
+@@ -6,6 +6,9 @@ kbdfs, console \- keyboard and console filesystem
+ [
+ .B -Ddc
+ ] [
++.B -t
++.I columns
++] [
+ .B -s
+ .I srv
+ ] [
+@@ -89,6 +92,15 @@ otherwise on
+ (the default).
+ .PP
+ With the
++.B -t
++flag, cooked input is echoed for an ANSI text terminal with the given
++width (at least 8 columns).  Erasing characters clears their cells,
++including tabs, wide characters and wrapped lines; ctl-U erases only
++editable input, leaving the prompt intact.  The caller supplies the
++terminal width when starting the session.
++Without this flag, console echo retains the usual backspace semantics.
++.PP
++With the
+ .B -c
+ flag, characters read from
+ .I consfile
