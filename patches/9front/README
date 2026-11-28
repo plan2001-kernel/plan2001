@@ -113,6 +113,17 @@ sdvirtio-scsi-lun.diff
 		peripheral qualifier 1, type 1Fh).  Targets without REPORT LUNS get LUN 0 as before; virtio
 		block devices are unchanged.  2026-11-24.
 
+sdiahci-reset-drdy.diff
+		pc/sdiahci.c: checkdrive took an ATA device as ready only
+		with DRDY set.  QEMU's AHCI leaves a disk after a port reset
+		with status 30h (DRDY clear) and diagnostic code 1 in the
+		error register until its first command; when the firmware
+		has not used the disk (the boot disk on virtio), the drive
+		cycled through slow reset and port reset for ever and the
+		first stat of it (bootrc's diskparts) never returned.  Code 1
+		with BSY clear is now taken as ready after Mphywait (2 s),
+		and IDENTIFY decides.  2026-11-28.
+
 kbdfs-cooked-input.diff
 		aux/kbdfs: ctlproc handed each cooked-mode rune to lineproc
 		with nbsend on the unbuffered cook channel.  After a newline

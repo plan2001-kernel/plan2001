@@ -1,0 +1,21 @@
+diff --git a/sys/src/9/pc/sdiahci.c b/sys/src/9/pc/sdiahci.c
+index f436a00a17cff87a2407ae5244b7591783080367..0414f1b750db99a0734405e27f9e3c69f28b31ed 100644
+--- a/sys/src/9/pc/sdiahci.c
++++ b/sys/src/9/pc/sdiahci.c
+@@ -1128,8 +1128,15 @@ reset:
+ 			}
+ 			s = (uchar)d->port->task;
+ 			sig = d->port->sig >> 16;
++			/*
++			 * after a reset, a device that passed its diagnostics
++			 * has 1 in the error register; some (qemu's ahci)
++			 * leave DRDY clear until their first command, so
++			 * after Mphywait take that alone as ready.
++			 */
+ 			if(s == 0x7f || s&ASbsy ||
+-			    (sig != 0xeb14 && (s & ASdrdy) == 0))
++			    (sig != 0xeb14 && (s & ASdrdy) == 0 &&
++			    ((uchar)(d->port->task>>8) != 1 || d->wait <= Mphywait)))
+ 				break;
+ 			iunlock(d);
+ 			newdrive(d);
